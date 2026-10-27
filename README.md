@@ -130,9 +130,10 @@ created on first load (the UI PUTs the bundled `number_contract.wasm` with the
 owner key as parameters).
 
 `delegate/webapp_contract_id.txt` must match the site being served. The
-checked-in value is the `number-local` id; a production site key has a
-different id, so update the file and re-publish the delegate before building
-the UI for that site.
+checked-in `number-local` id is used for both the local node and the live site,
+so the delegate pin is the same. Publishing with a *different* website key
+would change the id, requiring the file update and a delegate re-pin (and
+migration) before building that site's UI.
 
 ### Frontend iteration (dev server)
 
@@ -181,6 +182,23 @@ account: anyone with it can sign updates as the owner.
 - The code is never stored by the app: it is fetched only when you reveal it,
   kept in a readonly field, and cleared when you hide the code or close the
   dialog.
+
+## Live deployment
+
+The website contract is published on the live Freenet network under the same
+webapp id as the local site (`BZBE…`), so the delegate pin is unchanged and
+updates are in place. Any node that can fetch the contract serves it at
+`<node>/v1/contract/web/BZBE…/`; the publishing peer is not special.
+
+- Update in place with
+  `fdev --port <live node> website update --key number-local ui/dist`. The
+  signing key is backed up; the id does not move.
+- The app needs `number-delegate` registered on the node it runs against. A
+  node without it stops at "Delegate did not respond", and the site cannot
+  install it yet (#14). For now:
+  `fdev --port <port> publish --code <number_delegate package> --parameters delegate/webapp_contract_id.bin delegate`.
+- Atlas: the current Atlas is a read-only crawler index with no publisher
+  submission, so the site is live but not listed yet (#15).
 
 ## Behaviour notes
 

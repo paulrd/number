@@ -5,13 +5,18 @@ This file is the durable state for the project. Read it with `README.md` and
 
 ## Current state
 
-Local-only deployment; not published on the live Freenet network.
+Published on the live Freenet network (same webapp id as local; the website key
+did not change). The local node remains the owner's node.
 
 | Item | Value |
 |---|---|
 | Local node | `127.0.0.1:7510` (loopback-only) |
 | Webapp id | `BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k` |
 | Local URL | `http://127.0.0.1:7510/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
+| Live URL pattern | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
+| Live publish target | operator's VPS peer, API reached through the SSH-forwarded `:7509` |
+| Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
+| Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1) |
 | Current delegate key | `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` |
 | Current delegate code hash | `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY` |
 | Current contract code hash | `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` |
@@ -224,17 +229,54 @@ exactly. The lossy layer was the UI's `Number` conversion.
 - **No re-key and no migration.** `make check-artifacts` still matches
   `published/`. The local site was updated with the new UI.
 
+### #12 — Live-network deploy and Atlas submission
+
+- Published the website contract to the live network through the VPS peer
+  (`fdev --port 7509 website publish --key number-local ui/dist`). The webapp id
+  did not change, so the delegate pin and existing site address stay valid;
+  the local node (7510) is unaffected.
+- Verified live end-to-end through the gateway shell: installed the delegate
+  on the VPS peer, the first-run dialog appeared, created a fresh test identity
+  (`3f841147…`) and board (`3v52c7az…`), saved `42`, reloaded, and the value
+  and `seq 1` persisted with a clean console. The owner identity was **not**
+  copied to the VPS.
+- Side effect: the VPS peer now holds that fresh seed, so it cannot import the
+  owner backup later without clearing the delegate secret first (import refuses
+  when a seed exists). The owner board stays on the laptop node (7510).
+- Atlas: the live Atlas is read-only (126 entries, crawler-built, search only)
+  and its README says publisher self-submission is still taking shape. There is
+  no submission action to perform; searching "number" or the contract id
+  returns nothing yet. Tracked as #15.
+- Live usability gap: a node without the delegate shows "Delegate did not
+  respond" and cannot install it from the site. Tracked as #14.
+
 ## Remaining
-
-### #12 — Live-network deploy and Atlas submission (next)
-
-Only loopback has been exercised. Do not publish live until #3, #2, and the
-migration guard are complete.
 
 ### #13 — Upstream shim report
 
 The gateway shell shim drops `SubscribeResponse`/`NotFound`; the UI works around
 it with probe-then-PUT and a timeout downgrade. Report a repro upstream.
+
+### #14 — Delegate bootstrap for live users (next)
+
+The live site works only on a node where `number-delegate` is registered; a
+new user sees "Delegate did not respond" and has no way to install it. The
+client API supports `RegisterDelegate` and the TS stdlib has the request type,
+so the site can bundle `number_delegate.wasm` and register it on demand (ask
+the user first unless the node prompts). Needs: copy the delegate WASM into
+`ui/public` at build, expose its URL, build the delegate container (code +
+params + key), handle the response and retry identity, and test on a node
+without the delegate. No contract/delegate bytes change (no re-key); adds
+~430 KB to the site archive. Until this exists the site is effectively
+author-only and not ready for a public listing.
+
+### #15 — Atlas listing (blocked)
+
+Atlas (2026-10-27) is a read-only, crawler-built index with no submission
+control; its README says publisher self-submission is still taking shape. The
+site is live but not listed (searching "number" or the contract id returns 0).
+Revisit when Atlas ships self-submission, or ask the Atlas operator to crawl
+it.
 
 ## Generation history
 
@@ -292,15 +334,12 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #11 work: `ui/src/state.ts`, `ui/src/main.ts`, `ui/src/board.ts`,
-`ui/src/delegate.ts`, `ui/src/mock.ts`, `ui/src/state.test.ts`,
-`ui/src/delegate.test.ts`, `ui/e2e/offline.spec.ts`, `ui/package.json`,
-`ui/package-lock.json`, `README.md`, `DESIGN.md`, `BACKLOG.md`. #10 is
-committed in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3
-in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Uncommitted #12 work: `README.md`, `BACKLOG.md` (live deployment, Atlas
+finding, #14/#15). #11 is committed in `cce462a`, #10 in `9eb7a35`, #9 in
+`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6
+in `ba81747`.
 
-No WASM changed, so `published/` and the re-key are untouched. The local site
-was updated in place with the new UI (`fdev --port 7510 website update --key
-number-local ui/dist`), so the served app has exact-i64 and identity backup.
-Commit this tree before clearing context.
+The live site was published from the same `ui/dist`; no WASM changed, so
+`published/` and the re-key are untouched. The local site still serves the same
+build. Commit this tree before clearing context.
 
