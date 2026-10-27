@@ -277,8 +277,6 @@ from the network).
   `make check` (46 UI tests), both offline specs and the gateway spec pass.
 
 
-## Remaining
-
 ### #13 — Upstream response report
 
 The original note blamed the gateway shell for dropping
@@ -293,13 +291,18 @@ frame.
 
 - Report with the captured timeline, source pointer, impact and suggested fix:
   `reports/upstream-subscribe-response.md`.
-- **Filing blocked here:** no `gh` binary and no GitHub token in this
-  environment. File at
-  <https://github.com/freenet/freenet-stdlib/issues/new> using that file (or
-  install/auth `gh`), then link the issue here.
+- **Filing deferred by the owner:** no `gh` binary or GitHub token here, and
+  the owner chose to leave the report in the repo. To file, use
+  <https://github.com/freenet/freenet-stdlib/issues/new> and paste from
+  "## Summary" onward, or use `gh issue create --repo freenet/freenet-stdlib
+  --title "flatbuffer client API serializes SubscribeResponse as PutResponse"
+  --body-file reports/upstream-subscribe-response.md`. Link the issue here if
+  it is ever filed.
 - The UI workaround stays: subscribe timeout = "unconfirmed"; probe-then-PUT.
   The `freenet.ts` comments, README and DESIGN §11 now describe the real cause
   instead of blaming the shell.
+
+## Remaining
 
 ### #15 — Atlas listing (blocked)
 
@@ -365,16 +368,12 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #14 work: `scripts/build.sh`, `Makefile`, `.gitignore`,
-`ui/vite.config.ts`, `ui/src/vite-env.d.ts`, `ui/src/delegate.ts`,
-`ui/src/board.ts`, `ui/src/mock.ts`, `ui/src/main.ts`, `ui/src/delegate-dialog.ts`,
-`ui/index.html`, `ui/src/styles.css`, `README.md`, `DESIGN.md`, `BACKLOG.md`.
-#12 is committed in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
-`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
-`ba81747`.
+Clean; #13 is committed in `c7e7abe` (report) with #14 in `1da4fa3`, #12 in
+`0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in
+`5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
 No WASM changed, so `published/` and the re-key are untouched. The local and
-live sites were updated with the new build (delegate bundled). The VPS test
-seed from #12 remains; the isolated test nodes were wiped. Commit this tree
-before clearing context.
+live sites serve the #14 build (delegate bundled). The VPS test seed from #12
+remains; the isolated test nodes were wiped. The only open backlog item is
+#15 (Atlas), which is blocked externally.
 

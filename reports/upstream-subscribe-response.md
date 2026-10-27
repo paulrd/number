@@ -1,5 +1,9 @@
 # Upstream report: `SubscribeResponse` is serialized as `PutResponse`
 
+> **Status:** prepared and committed; **not filed** (no GitHub credentials in the
+> environment, and the owner chose to leave it in the repo). To file, use the
+> title/repo below and paste from "## Summary" onward.
+
 - **Repository:** `freenet/freenet-stdlib`
 - **Suggested title:** flatbuffer client API serializes `SubscribeResponse` as
   `PutResponse`, so clients can never confirm or refuse a subscription
