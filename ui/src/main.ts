@@ -478,7 +478,7 @@ function closeEditor(): void {
   if (editor.open) editor.close();
 }
 
-function parseValueInput(raw: string): number {
+function parseValueInput(raw: string): bigint {
   const trimmed = raw.trim();
   if (trimmed === "") {
     throw new Error("Enter a value.");
@@ -500,17 +500,7 @@ function parseValueInput(raw: string): number {
     );
   }
 
-  const value = Number(trimmed);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    throw new Error("That value could not be represented as an integer.");
-  }
-  if (!Number.isSafeInteger(value)) {
-    // See updateValueWarning: the JSON wire format would round this silently.
-    throw new Error(
-      "This board accepts values up to ±9,007,199,254,740,991 exactly.",
-    );
-  }
-  return Object.is(value, -0) ? 0 : value;
+  return exact;
 }
 
 function setValueWarning(message: string | null, invalid = false): void {
@@ -554,20 +544,8 @@ function updateValueWarning(): void {
     return;
   }
 
-  const numeric = Number(raw);
-  if (!Number.isSafeInteger(numeric)) {
-    // The wire format carries a JSON number, so anything outside this range
-    // would be silently rounded before signing. The contract accepts the full
-    // i64 range; this UI does not, until the state encoder can emit the exact
-    // typed digits.
-    setValueWarning(
-      "Beyond JavaScript's exact integer range (±9,007,199,254,740,991); " +
-        "enter a smaller whole number.",
-      true,
-    );
-    return;
-  }
-
+  // The full i64 range is supported exactly (the state codec parses and emits
+  // big integers losslessly), so only the contract bounds matter.
   setValueWarning(null);
 }
 
@@ -575,7 +553,7 @@ async function handleSave(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (busy || !boardState) return;
 
-  let value: number;
+  let value: bigint;
   try {
     value = parseValueInput(valueInput.value);
     const entry = entryFromInputs(

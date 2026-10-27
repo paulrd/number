@@ -13,6 +13,7 @@ import {
   type DelegateResponse,
 } from "@freenetorg/freenet-stdlib";
 import { OutboundDelegateMsgType } from "@freenetorg/freenet-stdlib/host-response";
+import { stringify as stringifyJsonLossless } from "lossless-json";
 import { ApplicationMessageT } from "@freenetorg/freenet-stdlib/common";
 import {
   ApplicationMessagesT,
@@ -355,7 +356,7 @@ export class DelegateClient {
 
   private buildRequest(message: object): ClientRequestTable {
     const payload = Array.from(
-      new TextEncoder().encode(JSON.stringify(message)),
+      new TextEncoder().encode(stringifyJsonLossless(message)),
     );
     const appMessage = new ApplicationMessageT(payload, [], false);
     const inbound = new InboundDelegateMsgT(

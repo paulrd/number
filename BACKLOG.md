@@ -199,15 +199,34 @@ device. The delegate already had `export`/`import`; the UI did not expose them.
   backup. The deployed gateway app (sandboxed iframe) also reveals a valid
   backup code with a clean console.
 
+### #11 — Exact i64 beyond `Number.MAX_SAFE_INTEGER`
+
+The premise here was that this needed a schema change (decimal strings) and
+therefore a contract re-key plus migration. It does not: the wire format was
+already an i64 **JSON number**, and both serde_json and the delegate parse that
+exactly. The lossy layer was the UI's `Number` conversion.
+
+- `ui/src/state.ts`: `Entry.value` is now a `bigint`. State/delta JSON is
+  parsed with `lossless-json` (unsafe integers become bigint, safe ones stay
+  numbers) and emitted with its stringifier, so big integers stay unquoted JSON
+  numbers on the wire. The contract and delegate are unchanged.
+- Editor: no longer rejects values above 2^53 and no longer warns about them;
+  it accepts the full i64 range and reports only real bounds errors. Delegate
+  sign requests use the lossless stringifier too; the offline mock digest is
+  JSON-safe.
+- Verification: unit round-trip of `i64::MIN`/`MAX` and `±(2^53+1)` (encoded
+  text contains the exact digits, decode returns the same bigint; a legacy
+  small-number state decodes to bigint). Offline e2e saves `i64::MAX`, reopens
+  it with the exact digits, and rejects `i64::MAX + 1`. On the isolated node,
+  MIN/MAX/`2^53±1`/`-1`/`0` were saved through the delegate and reloaded from
+  the contract exact, each at `seq 1`; `MAX + 1` was refused. `make check`,
+  `make e2e-offline` and the gateway e2e pass.
+- **No re-key and no migration.** `make check-artifacts` still matches
+  `published/`. The local site was updated with the new UI.
+
 ## Remaining
 
-### #11 — Exact i64 beyond `Number.MAX_SAFE_INTEGER` (next)
-
-The UI rejects values it cannot represent exactly. Supporting the full i64
-range needs a schema change (e.g. decimal string) and therefore a contract
-re-key plus migration.
-
-### #12 — Live-network deploy and Atlas submission
+### #12 — Live-network deploy and Atlas submission (next)
 
 Only loopback has been exercised. Do not publish live until #3, #2, and the
 migration guard are complete.
@@ -273,14 +292,15 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #10 work: `ui/src/identity.ts`, `ui/src/identity.test.ts`,
-`ui/src/identity-dialog.ts`, and edits to `ui/src/board.ts`, `ui/src/mock.ts`,
-`ui/src/main.ts`, `ui/index.html`, `ui/src/styles.css`, `README.md`,
-`DESIGN.md`, `BACKLOG.md`. #9 is committed in `2f6ee8c`, #8 in `5c9a84e`, #7 in
-`72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Uncommitted #11 work: `ui/src/state.ts`, `ui/src/main.ts`, `ui/src/board.ts`,
+`ui/src/delegate.ts`, `ui/src/mock.ts`, `ui/src/state.test.ts`,
+`ui/src/delegate.test.ts`, `ui/e2e/offline.spec.ts`, `ui/package.json`,
+`ui/package-lock.json`, `README.md`, `DESIGN.md`, `BACKLOG.md`. #10 is
+committed in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3
+in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
 No WASM changed, so `published/` and the re-key are untouched. The local site
 was updated in place with the new UI (`fdev --port 7510 website update --key
-number-local ui/dist`), so the served app has the backup feature. Commit this
-tree before clearing context.
+number-local ui/dist`), so the served app has exact-i64 and identity backup.
+Commit this tree before clearing context.
 

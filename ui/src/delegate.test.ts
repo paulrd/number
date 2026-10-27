@@ -70,7 +70,7 @@ describe("delegate transport", () => {
     expect(sentRequest.clientRequest.delegateRequest.params).toEqual(PARAMS_BYTES);
 
     const entry: Entry = {
-      value: 12,
+      value: 12n,
       label: "steps",
       unit: null,
       note: null,
@@ -168,7 +168,7 @@ describe("delegate transport", () => {
     );
     await expect(
       client.sign(0, 1, {
-        value: 1,
+        value: 1n,
         label: null,
         unit: null,
         note: null,

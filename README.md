@@ -189,8 +189,10 @@ account: anyone with it can sign updates as the owner.
 - **Identity lives in the delegate** on this node. A different device has a
   different owner key and therefore a different board until key export/import
   exists.
-- **Values are i64 in the contract.** The UI warns when a value exceeds
-  `Number.MAX_SAFE_INTEGER`, where JavaScript would lose precision.
+- **Values are i64 in the contract, and the UI handles the full range
+  exactly.** The wire format stays a JSON number; the UI parses and emits it
+  losslessly (BigInt), so `-9223372036854775808` and `9223372036854775807`
+  survive editing, signing, and reload unchanged.
 - **Live updates** arrive through subscription deltas. A subscription timeout in
   the gateway shell is treated as "unconfirmed", not failed — refusals surface
   through the `SubscribeResponse` callback, and live deltas have been verified

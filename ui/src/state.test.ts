@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  I64_MAX,
   I64_MIN,
   LIMITS,
   StateError,
@@ -33,9 +34,9 @@ const SIG_A = "a".repeat(128);
 const SIG_B = "b".repeat(128);
 const SIG_C = "c".repeat(128);
 
-function entry(value: number, overrides: Partial<Entry> = {}): Entry {
+function entry(value: number | bigint, overrides: Partial<Entry> = {}): Entry {
   return {
-    value,
+    value: typeof value === "bigint" ? value : BigInt(value),
     label: null,
     unit: null,
     note: null,
@@ -109,13 +110,13 @@ describe("state encode/decode", () => {
     });
 
     expect(state.slots[2].entry).toEqual({
-      value: 7,
+      value: 7n,
       label: null,
       unit: null,
       note: null,
     });
     expect(state.slots[3].entry).toEqual({
-      value: 8,
+      value: 8n,
       label: null,
       unit: null,
       note: null,
@@ -192,8 +193,8 @@ describe("merge determinism", () => {
     const a = stateWith({ 4: { seq: 2, entry: entry(10), sig: SIG_A } });
     const b = stateWith({ 4: { seq: 2, entry: entry(20), sig: SIG_B } });
 
-    expect(mergeStates(a, b).slots[4].entry?.value).toBe(20);
-    expect(mergeStates(b, a).slots[4].entry?.value).toBe(20);
+    expect(mergeStates(a, b).slots[4].entry?.value).toBe(20n);
+    expect(mergeStates(b, a).slots[4].entry?.value).toBe(20n);
     expect(mergeStates(a, b)).toEqual(mergeStates(b, a));
   });
 
@@ -205,7 +206,7 @@ describe("merge determinism", () => {
     expect(mergeStates(mergeStates(a, b), c)).toEqual(
       mergeStates(a, mergeStates(b, c)),
     );
-    expect(mergeStates(mergeStates(a, b), c).slots[1].entry?.value).toBe(3);
+    expect(mergeStates(mergeStates(a, b), c).slots[1].entry?.value).toBe(3n);
   });
 
   it("treats a repeated delta as a no-op and lets stale deltas lose", () => {
@@ -297,8 +298,8 @@ describe("bounds and invariants", () => {
     expect(isI64(-42)).toBe(true);
     expect(isI64(Number(I64_MIN))).toBe(true);
     expect(isI64(2 ** 63)).toBe(false);
-    expect(() => validateEntry(entry(1.5))).toThrow(/integer/);
-    expect(() => validateEntry({ value: "1" })).toThrow(/number/);
+    expect(() => validateEntry({ value: 1.5 })).toThrow(/integer/);
+    expect(() => validateEntry({ value: "1" })).toThrow(/integer/);
     expect(() => validateEntry(entry(2 ** 63))).toThrow(/signed 64-bit/);
   });
 
@@ -347,16 +348,43 @@ describe("bounds and invariants", () => {
     ).toThrow(/0\.\.7/);
   });
 
-  it("warns about values outside JavaScript's safe integer range", () => {
-    const state = stateWith({
-      0: {
-        seq: 1,
-        entry: entry(Number.MAX_SAFE_INTEGER + 1),
-        sig: SIG_A,
-      },
-    });
-    expect(stateWarnings(state)).toHaveLength(1);
-    expect(stateWarnings(state)[0]).toMatch(/safe integer/);
+  it("round-trips the full i64 range exactly", () => {
+    const values = [
+      I64_MIN,
+      I64_MAX,
+      I64_MIN + 1n,
+      I64_MAX - 1n,
+      9007199254740993n, // 2^53 + 1, the first value a JS number rounds
+      -9007199254740993n,
+    ];
+    for (const value of values) {
+      const state = stateWith({
+        0: { seq: 1, entry: entry(value), sig: SIG_A },
+      });
+      const encoded = encodeState(state);
+      const text = new TextDecoder().decode(encoded);
+      expect(text).toContain(`"value":${value}`);
+      expect(text).not.toContain(`"value":"`); // a JSON number, not a string
+      const decoded = decodeState(encoded);
+      expect(decoded.slots[0].entry?.value).toBe(value);
+      expect(stateWarnings(decoded)).toEqual([]);
+    }
     expect(stateWarnings(emptyState())).toEqual([]);
+  });
+
+  it("decodes a legacy state with small numbers as bigints", () => {
+    const legacy = JSON.stringify({
+      v: 1,
+      slots: emptyState().slots.map((slot, index) =>
+        index === 0
+          ? {
+              seq: 1,
+              entry: { value: 123456789, label: null, unit: null, note: null },
+              sig: SIG_A,
+            }
+          : slot,
+      ),
+    });
+    expect(decodeState(legacy).slots[0].entry?.value).toBe(123456789n);
   });
 });

@@ -28,7 +28,13 @@ function digest(label: string): Uint8Array {
 }
 
 function mockSignature(slotIndex: number, seq: number, entry: Entry | null): string {
-  const body = JSON.stringify({ slotIndex, seq, entry });
+  // The entry value is a bigint now; keep the mock digest deterministic and
+  // JSON-safe without depending on the real wire encoder.
+  const body = JSON.stringify({
+    slotIndex,
+    seq,
+    entry: entry && { ...entry, value: entry.value.toString() },
+  });
   const bytes = new Uint8Array(64);
   bytes.set(digest(`number:offline:sig:0:${body}`), 0);
   bytes.set(digest(`number:offline:sig:1:${body}`), 32);

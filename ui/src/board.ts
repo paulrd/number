@@ -460,7 +460,7 @@ export class OnlineBoard implements BoardBackend {
 
 /** Typed helper for the UI, which needs optional text normalisation. */
 export function entryFromInputs(
-  value: number,
+  value: bigint,
   label: string,
   unit: string,
   note: string,

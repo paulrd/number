@@ -10,6 +10,12 @@
  */
 
 import { blake3 } from "@noble/hashes/blake3";
+import {
+  isInteger,
+  isSafeNumber,
+  parse as parseJsonLossless,
+  stringify as stringifyJsonLossless,
+} from "lossless-json";
 import { bytesToHex, isLowerHex, utf8Length } from "./util";
 
 export const SLOT_COUNT = 8;
@@ -25,7 +31,11 @@ export const I64_MIN = -(2n ** 63n);
 export const I64_MAX = 2n ** 63n - 1n;
 
 export interface Entry {
-  value: number;
+  /**
+   * Exact signed 64-bit value. A JS `number` cannot hold the full range, so
+   * the wire JSON is parsed losslessly and this is always a `bigint`.
+   */
+  value: bigint;
   label: string | null;
   unit: string | null;
   note: string | null;
@@ -90,30 +100,39 @@ function validateSeq(value: unknown, path: string): number {
   return value;
 }
 
-/** Validate an exact i64 (JS numbers cannot exactly represent all i64s). */
-export function isI64(value: number): boolean {
+/**
+ * Validate an exact i64. Numbers are accepted for compatibility with tests and
+ * callers that hold small literals, but anything outside the safe-integer range
+ * must already be a bigint (the lossless JSON parser produces one).
+ */
+export function isI64(value: bigint | number): boolean {
+  if (typeof value === "bigint") return value >= I64_MIN && value <= I64_MAX;
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     return false;
   }
-  try {
-    const big = BigInt(value);
-    return big >= I64_MIN && big <= I64_MAX;
-  } catch {
-    return false;
-  }
+  return Number.isSafeInteger(value) || value === Number(I64_MIN);
 }
 
-function validateValue(value: unknown, path: string): number {
+function validateValue(value: unknown, path: string): bigint {
+  if (typeof value === "bigint") {
+    if (value < I64_MIN || value > I64_MAX) {
+      fail(path, "must fit in a signed 64-bit integer");
+    }
+    return value;
+  }
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    fail(path, "expected a number");
+    fail(path, "expected an integer");
   }
   if (!Number.isInteger(value)) {
     fail(path, "expected an integer");
   }
-  if (!isI64(value)) {
-    fail(path, "must fit in a signed 64-bit integer");
+  if (!Number.isSafeInteger(value)) {
+    // A number this large has already been rounded by the time it reaches us.
+    // Lossless JSON decoding yields a bigint instead; a plain number here means
+    // the caller built it with arithmetic, which cannot be trusted.
+    fail(path, "must be an exact integer (use a bigint above 2^53)");
   }
-  return value;
+  return BigInt(value);
 }
 
 function validateOptionalText(
@@ -234,13 +253,31 @@ export function validateSummary(raw: unknown): Summary {
   return { v: STATE_VERSION, slots };
 }
 
+/**
+ * Parse JSON without losing i64 precision.
+ *
+ * Integers that fit a JS number stay numbers (so seq/i/v keep their types in
+ * the validators); only values outside the safe range become bigints. A `value`
+ * above 2^53 therefore arrives exact instead of rounded.
+ */
+function parseExactJson(text: string): unknown {
+  return parseJsonLossless(text, undefined, {
+    parseNumber: (value) =>
+      isInteger(value)
+        ? isSafeNumber(value)
+          ? Number(value)
+          : BigInt(value)
+        : parseFloat(value),
+  });
+}
+
 function parseJson(input: Uint8Array | string, label: string): unknown {
   const text =
     typeof input === "string"
       ? input
       : new TextDecoder("utf-8", { fatal: true }).decode(input);
   try {
-    return JSON.parse(text);
+    return parseExactJson(text);
   } catch (error) {
     throw new StateError(
       `${label}: invalid JSON (${error instanceof Error ? error.message : String(error)})`,
@@ -252,8 +289,16 @@ export function decodeState(input: Uint8Array | string): StateV1 {
   return validateState(parseJson(input, "state"));
 }
 
+/**
+ * Canonical JSON for the wire. `stringifyJsonLossless` emits bigint values as
+ * unquoted integers, which is exactly what the contract's serde_json expects.
+ */
+function encodeJson(value: unknown): Uint8Array {
+  return textEncoder.encode(stringifyJsonLossless(value));
+}
+
 export function encodeState(state: StateV1): Uint8Array {
-  return textEncoder.encode(JSON.stringify(validateState(state)));
+  return encodeJson(validateState(state));
 }
 
 export function decodeDelta(input: Uint8Array | string): Delta {
@@ -261,7 +306,7 @@ export function decodeDelta(input: Uint8Array | string): Delta {
 }
 
 export function encodeDelta(delta: Delta): Uint8Array {
-  return textEncoder.encode(JSON.stringify(validateDelta(delta)));
+  return encodeJson(validateDelta(delta));
 }
 
 export function decodeSummary(input: Uint8Array | string): Summary {
@@ -269,7 +314,7 @@ export function decodeSummary(input: Uint8Array | string): Summary {
 }
 
 export function encodeSummary(summary: Summary): Uint8Array {
-  return textEncoder.encode(JSON.stringify(validateSummary(summary)));
+  return encodeJson(validateSummary(summary));
 }
 
 export function emptySlot(): Slot {
@@ -347,7 +392,7 @@ export function signingBytes(
   offset += 1;
 
   if (validatedEntry !== null) {
-    view.setBigInt64(offset, BigInt(validatedEntry.value), true);
+    view.setBigInt64(offset, validatedEntry.value, true);
     offset += 8;
 
     for (const bytes of [labelBytes, unitBytes, noteBytes]) {
@@ -426,9 +471,11 @@ function compareSignatures(a: string | null, b: string | null): number {
 }
 
 function canonicalEntry(entry: Entry | null): string {
-  return entry === null
-    ? "null"
-    : JSON.stringify([entry.value, entry.label, entry.unit, entry.note]);
+  if (entry === null) return "null";
+  return (
+    stringifyJsonLossless([entry.value, entry.label, entry.unit, entry.note]) ??
+    "null"
+  );
 }
 
 /** Merge one slot: higher seq wins, then lexicographically greater sig bytes. */
@@ -469,18 +516,14 @@ export function mergeDelta(state: StateV1, delta: Delta): StateV1 {
   return { v: STATE_VERSION, slots };
 }
 
-/** Non-fatal issues the UI should call out (DESIGN §2 i64 note). */
-export function stateWarnings(state: StateV1): string[] {
-  const warnings: string[] = [];
-  state.slots.forEach((slot, index) => {
-    if (slot.entry !== null && !Number.isSafeInteger(slot.entry.value)) {
-      warnings.push(
-        `Slot ${index + 1}: ${slot.entry.value} is outside JavaScript's safe integer range ` +
-          `(±${Number.MAX_SAFE_INTEGER}); display or editing may round it.`,
-      );
-    }
-  });
-  return warnings;
+/**
+ * Non-fatal issues the UI should call out.
+ *
+ * The full i64 range is supported exactly (lossless JSON), so there is nothing
+ * left to warn about here. Kept as the single place for future advisories.
+ */
+export function stateWarnings(_state: StateV1): string[] {
+  return [];
 }
 
 /** Normalise a form string: blank/whitespace-only becomes null. */

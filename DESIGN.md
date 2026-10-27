@@ -46,8 +46,10 @@ Rules:
 - `seq == 0` ⇒ `entry == null` and `sig == null` (initial/empty slot).
 - `seq > 0` ⇒ `sig` is a valid Ed25519 signature over the signing bytes below.
   `entry == null` with `seq > 0` is a **tombstone** (slot cleared) and is legal.
-- `value` is an i64 JSON number. The UI additionally warns when a value is
-  outside `Number.MAX_SAFE_INTEGER`.
+- `value` is an i64 **JSON number**. It is not a string and the schema did not
+  change to support the full range: the UI parses and emits numbers losslessly
+  (BigInt via `lossless-json`), so values above `Number.MAX_SAFE_INTEGER` reach
+  the delegate and the contract exact. The contract and delegate are unchanged.
 - Bounds (bytes, UTF-8): `label` ≤ 64, `unit` ≤ 16, `note` ≤ 512. `null` and
   absent are equivalent for the optional strings; serialise `null`.
 - `v` must be `1`.
@@ -303,7 +305,12 @@ Contract and delegate are excluded from any workspace (see build-system →
   generates at least one case.
 - `npm run build` in `ui/`, then the in-repo Playwright offline spec
   (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:
-  mount, one save, axe, clean console.
+  mount, one save, axe, clean console, and a full-i64 value that displays and
+  reopens with the exact digits and fails closed one past the bound.
+- Full i64 on a real node: save `i64::MIN`, `i64::MAX` and `±(2^53+1)` through
+  the UI, reload, and confirm the contract returns the exact digits (the
+  delegate signature and `validate_state` accept them). No re-key: the wire
+  format was already i64.
 - Gateway spec (`ui/e2e/gateway.spec.ts`) with `FREENET_BASE_URL` pointing at a
   `/v1/contract/web/<id>/` URL: shell bridge, sandboxed iframe, identity and
   board mount, no fatal console/network errors.
