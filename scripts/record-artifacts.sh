@@ -38,7 +38,9 @@ error: $what $value is the recorded (deployed) generation but is not in
        ui/src/migrations.ts.
 
 Append it before recording the new artifact:
-  - contract: push the hash onto LEGACY_CONTRACT_CODE_HASHES (newest first)
+  - contract: push the hash onto LEGACY_CONTRACT_CODE_HASHES if the current
+    contract accepts its state, otherwise onto
+    UNMIGRATABLE_CONTRACT_CODE_HASHES (newest first)
   - delegate: push { key, codeHash, webappId } onto LEGACY_DELEGATES
 Then re-run: make record-artifacts
 EOF

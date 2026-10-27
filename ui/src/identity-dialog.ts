@@ -23,7 +23,11 @@ export interface IdentityDialogDeps {
   offline: boolean;
   getIdentity(): DelegateIdentity | null;
   exportIdentity(): Promise<ExportedSecrets>;
-  importIdentity(seed: string, nextSeq: number[]): Promise<void>;
+  importIdentity(
+    seed: string,
+    nextSeq: number[],
+    contactsNextSeq: number,
+  ): Promise<void>;
   announce(message: string): void;
   copy(
     text: string,
@@ -186,7 +190,11 @@ export function createIdentityDialogs(
 
     void (async () => {
       try {
-        await deps.importIdentity(decoded.seed, decoded.nextSeq);
+        await deps.importIdentity(
+          decoded.seed,
+          decoded.nextSeq,
+          decoded.contactsNextSeq,
+        );
       } catch (error) {
         setImporting(false);
         setRestoreError(`Could not restore this identity. ${errorMessage(error)}`);

@@ -14,7 +14,11 @@ import { fileURLToPath } from "node:url";
 import { blake3 } from "@noble/hashes/blake3";
 import bs58 from "bs58";
 import { describe, expect, it } from "vitest";
-import { LEGACY_CONTRACT_CODE_HASHES, LEGACY_DELEGATES } from "./migrations";
+import {
+  LEGACY_CONTRACT_CODE_HASHES,
+  LEGACY_DELEGATES,
+  UNMIGRATABLE_CONTRACT_CODE_HASHES,
+} from "./migrations";
 
 interface DelegateGeneration {
   key: string;
@@ -71,9 +75,14 @@ describe("migration registry", () => {
     for (const hash of LEGACY_CONTRACT_CODE_HASHES) {
       decode32(hash, "legacy contract code hash");
     }
-    expect(new Set(LEGACY_CONTRACT_CODE_HASHES).size).toBe(
-      LEGACY_CONTRACT_CODE_HASHES.length,
-    );
+    for (const hash of UNMIGRATABLE_CONTRACT_CODE_HASHES) {
+      decode32(hash, "unmigratable contract code hash");
+    }
+    const contractHashes = [
+      ...LEGACY_CONTRACT_CODE_HASHES,
+      ...UNMIGRATABLE_CONTRACT_CODE_HASHES,
+    ];
+    expect(new Set(contractHashes).size).toBe(contractHashes.length);
 
     for (const entry of LEGACY_DELEGATES) {
       decode32(entry.key, "legacy delegate key");
@@ -114,10 +123,14 @@ describe("migration registry", () => {
   });
 
   it("keeps every superseded generation registered", () => {
+    const registeredContracts = [
+      ...LEGACY_CONTRACT_CODE_HASHES,
+      ...UNMIGRATABLE_CONTRACT_CODE_HASHES,
+    ];
     for (const hash of manifest.contract.generations.slice(1)) {
       expect(
-        LEGACY_CONTRACT_CODE_HASHES,
-        `superseded contract ${hash} is missing from LEGACY_CONTRACT_CODE_HASHES`,
+        registeredContracts,
+        `superseded contract ${hash} is missing from the contract registries`,
       ).toContain(hash);
     }
 

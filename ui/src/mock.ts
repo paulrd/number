@@ -12,10 +12,12 @@ import { deriveInstanceIdFromBytes, encodeBase58 } from "./freenet";
 import {
   emptyState,
   mergeDelta,
+  validateContactList,
   validateEntry,
+  type Contact,
   type Delta,
   type Entry,
-  type StateV1,
+  type StateV2,
 } from "./state";
 import { bytesToHex, delay } from "./util";
 import type { BoardBackend, BoardCallbacks } from "./board";
@@ -41,11 +43,25 @@ function mockSignature(slotIndex: number, seq: number, entry: Entry | null): str
   return bytesToHex(bytes);
 }
 
+function mockContactsSignature(seq: number, entries: Contact[]): string {
+  const body = JSON.stringify({
+    seq,
+    entries: entries.map((entry) => ({
+      label: entry.label,
+      userId: entry.userId,
+    })),
+  });
+  const bytes = new Uint8Array(64);
+  bytes.set(digest(`number:offline:contacts:0:${body}`), 0);
+  bytes.set(digest(`number:offline:contacts:1:${body}`), 32);
+  return bytesToHex(bytes);
+}
+
 export class OfflineBoard implements BoardBackend {
   readonly mode = "offline" as const;
   readonly identity: DelegateIdentity;
   readonly contractKeyBase58: string;
-  currentState: StateV1 | null = null;
+  currentState: StateV2 | null = null;
 
   private readonly codeHashBytes: Uint8Array;
   private readonly pubkeyBytes: Uint8Array;
@@ -58,6 +74,7 @@ export class OfflineBoard implements BoardBackend {
     this.identity = {
       pubkey: bytesToHex(this.pubkeyBytes),
       nextSeq: Array.from({ length: 8 }, () => 1),
+      contactsNextSeq: 1,
     };
     this.contractKeyBase58 = deriveInstanceIdFromBytes(
       this.codeHashBytes,
@@ -65,7 +82,7 @@ export class OfflineBoard implements BoardBackend {
     ).base58;
   }
 
-  async start(): Promise<StateV1> {
+  async start(): Promise<StateV2> {
     if (this.started && this.currentState) return this.currentState;
 
     this.callbacks.onStatus("connecting", "starting offline mock");
@@ -86,6 +103,48 @@ export class OfflineBoard implements BoardBackend {
 
   async clear(slotIndex: number): Promise<void> {
     await this.write(slotIndex, null);
+  }
+
+  async saveContacts(entries: Contact[]): Promise<void> {
+    const normalised = entries.map((entry) => ({
+      label: entry.label.trim(),
+      userId: entry.userId.trim().toLowerCase(),
+    }));
+    const validated = validateContactList(normalised);
+
+    if (!this.started || !this.currentState) {
+      throw new Error("Offline board is not ready yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    this.mutating = true;
+    try {
+      await delay(70);
+      const seq = Math.max(
+        this.currentState.contacts.seq + 1,
+        this.identity.contactsNextSeq ?? 1,
+      );
+      const delta: Delta = {
+        v: 2,
+        contacts: {
+          seq,
+          entries: validated,
+          sig: mockContactsSignature(seq, validated),
+        },
+        slots: [],
+      };
+
+      this.currentState = mergeDelta(this.currentState, delta);
+      this.identity.contactsNextSeq = seq + 1;
+      this.callbacks.onIdentity({
+        pubkey: this.identity.pubkey,
+        nextSeq: [...this.identity.nextSeq],
+        contactsNextSeq: this.identity.contactsNextSeq,
+      });
+      this.callbacks.onState(this.currentState);
+    } finally {
+      this.mutating = false;
+    }
   }
 
   async exportIdentity(): Promise<never> {
@@ -116,7 +175,8 @@ export class OfflineBoard implements BoardBackend {
       const seq = Math.max(this.currentState.slots[slotIndex].seq + 1, nextSeq);
       const sig = mockSignature(slotIndex, seq, entry);
       const delta: Delta = {
-        v: 1,
+        v: 2,
+        contacts: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 
@@ -125,6 +185,7 @@ export class OfflineBoard implements BoardBackend {
       this.callbacks.onIdentity({
         pubkey: this.identity.pubkey,
         nextSeq: [...this.identity.nextSeq],
+        contactsNextSeq: this.identity.contactsNextSeq,
       });
       this.callbacks.onState(this.currentState);
     } finally {
@@ -132,7 +193,7 @@ export class OfflineBoard implements BoardBackend {
     }
   }
 
-  async retry(): Promise<StateV1> {
+  async retry(): Promise<StateV2> {
     if (this.currentState) return this.currentState;
     return this.start();
   }

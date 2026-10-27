@@ -1,16 +1,23 @@
 # number
 
-A small Freenet dApp: one personal board of **up to 8 numbers**, each with
-optional metadata (label, unit, note).
+A small Freenet dApp: one personal board of **8 number slots** and a shared
+**address book**. Each slot is linked to a contact (label + user id/public key)
+from the address book and holds a two-decimal number (optional; blank is
+`0.00`) plus optional unit and note. The contact is mandatory; the slot stores
+the contact's public key, so renaming a label keeps the link.
 
 - **Contract** (`contract/`) — shared, replicated state. One instance per owner,
-  parameterised by the owner's Ed25519 verifying key. Signed slot updates,
-  per-slot last-writer-wins on a monotonic `seq`, tombstones for cleared slots,
-  canonical JSON state, small fixed-size summary, delta sync.
+  parameterised by the owner's Ed25519 verifying key. Signed slot and address
+  book updates, last-writer-wins on a monotonic `seq`, tombstones for cleared
+  slots/contacts, canonical JSON state, small fixed-size summary, delta sync.
 - **Delegate** (`delegate/`) — holds the owner's signing key locally and signs
-  slot updates. Secrets never leave the node.
+  slot and address-book updates. Secrets never leave the node.
 - **UI** (`ui/`) — TypeScript + Vite. Derives the board key from the owner key,
-  creates the instance on first use (PUT), subscribes, and sends signed deltas.
+  creates the instance on first use (PUT), subscribes, sends signed deltas, and
+  manages the address book.
+
+Values are i64 **counts of hundredths** in the contract (the wire type did not
+change; the UI divides by 100 and shows exactly two decimals).
 
 Design and exact wire formats: [DESIGN.md](./DESIGN.md).
 Current deployment state, done work, and the remaining backlog:
@@ -83,9 +90,16 @@ delegate; without a migration path that also starts a fresh owner identity.
 Append the outgoing artifact to `ui/src/migrations.ts` **before** rebuilding:
 
 - contract change: append the current contract code hash to
-  `LEGACY_CONTRACT_CODE_HASHES`;
+  `LEGACY_CONTRACT_CODE_HASHES` when the new contract accepts the old state
+  (same schema and signing bytes), otherwise to
+  `UNMIGRATABLE_CONTRACT_CODE_HASHES`;
 - delegate change: append the current delegate key, code hash, and webapp id
   to `LEGACY_DELEGATES`.
+
+The v2 address-book release is the breaking case: its state schema and signing
+bytes changed, so all v1 contract hashes are unmigratable. The owner identity
+still migrates through the delegate, but the v2 board starts empty (same owner
+key, no contacts or slots).
 
 This is enforced, not just documented: `scripts/record-artifacts.sh` refuses to
 supersede a generation missing from the registry, and `migrations.test.ts`
@@ -169,17 +183,18 @@ account: anyone with it can sign updates as the owner.
 
 - **Back up:** open **Back up identity** in the Identity row, choose **Reveal
   backup code**, then copy it or download `number-identity-<pubkey>.json`. The
-  code is versioned JSON (`"kind": "number-identity"`) containing the seed and
-  the per-slot sequence counters. Store it in a password manager; there is no
-  recovery server.
+  code is versioned JSON (`"kind": "number-identity"`) containing the seed, the
+  per-slot sequence counters, and the address-book counter. Store it in a
+  password manager; there is no recovery server.
 - **Restore:** on a device where number has not created an identity yet, the
   first-run dialog offers **Restore from a backup**. Paste the code there. This
   is the only moment restore is possible — the delegate refuses to replace an
   existing seed, so a device that already has an identity cannot import one.
 - The backup carries the key, not the board. Another device restores the same
-  key, derives the same board address, and loads the board from Freenet, so it
-  needs network access. A local-only node will show an empty board even though
-  the identity is correct (live deployment is #12).
+  key, derives the same board address, and loads the board (including its
+  address book, which lives in contract state) from Freenet, so it needs
+  network access. A local-only node will show an empty board even though the
+  identity is correct (live deployment is #12).
 - The code is never stored by the app: it is fetched only when you reveal it,
   kept in a readonly field, and cleared when you hide the code or close the
   dialog.
@@ -207,15 +222,25 @@ updates are in place. Any node that can fetch the contract serves it at
 
 ## Behaviour notes
 
+- **A slot's contact is mandatory.** It is selected from the address book and
+  stored as the contact's 64-hex public key. Removing a contact does not
+  invalidate old signed slots; they show an "unknown contact" id until re-linked.
 - **Clearing a slot tombstones it** (`seq > 0`, `entry: null`), so an older peer
-  cannot resurrect the value. "Removed", not "erased from the network".
+  cannot resurrect the value. "Removed", not "erased from the network". The
+  address book has its own signed sequence: removing every contact leaves a
+  legal empty record at a higher `seq`.
 - **Identity lives in the delegate** on this node. A different device has a
   different owner key and therefore a different board until key export/import
   exists.
-- **Values are i64 in the contract, and the UI handles the full range
-  exactly.** The wire format stays a JSON number; the UI parses and emits it
-  losslessly (BigInt), so `-9223372036854775808` and `9223372036854775807`
-  survive editing, signing, and reload unchanged.
+- **Values are i64 counts of hundredths in the contract.** The wire format is a
+  JSON number and the UI parses/emits it losslessly (BigInt), so the full range
+  `-92233720368547758.08` … `92233720368547758.07` (displayed) survives editing,
+  signing, and reload exactly. A blank input saves `0.00`; more than two decimal
+  places is rejected.
+- **v2 does not carry v1 boards forward.** The address book changed the state
+  schema and signing bytes. The owner key is preserved through delegate
+  migration, but the new board starts with an empty address book and slots; v1
+  contract hashes are registered as unmigratable.
 - **Live updates** arrive through subscription deltas. The node currently
   serializes `SubscribeResponse` as `PutResponse` (upstream freenet-stdlib bug;
   see `reports/upstream-subscribe-response.md`), so a subscribe timeout is

@@ -1,10 +1,12 @@
-//! `number-delegate` — private key custody and slot signing for the number app.
+//! `number-delegate` — private key custody, slot signing and address-book
+//! signing for the number app.
 //!
-//! The delegate owns a single Ed25519 key pair. The 32-byte seed and a
-//! per-slot monotonic sequence counter live in the delegate's secret store;
-//! the matching public key is the owner key the `number-contract` instance is
-//! parameterised by. The delegate itself is parameterised by the web container
-//! contract id it serves, and refuses every other caller.
+//! The delegate owns a single Ed25519 key pair. The 32-byte seed, a per-slot
+//! monotonic sequence counter and a contacts sequence counter live in the
+//! delegate's secret store; the matching public key is the owner key the
+//! `number-contract` instance is parameterised by. The delegate itself is
+//! parameterised by the web container contract id it serves, and refuses every
+//! other caller.
 //!
 //! All request/response payloads are JSON (UTF-8) inside
 //! [`ApplicationMessage::payload`], exactly as specified in `DESIGN.md` §7.
@@ -20,16 +22,22 @@ use serde::{Deserialize, Serialize};
 /// Number of slots on a board.
 pub const SLOT_COUNT: usize = 8;
 
+/// Maximum number of contacts in the address book.
+pub const MAX_CONTACTS: usize = 64;
+/// Maximum length of a contact label in UTF-8 bytes.
+pub const MAX_CONTACT_LABEL_BYTES: usize = 64;
 /// Metadata bounds from `DESIGN.md` §2, in UTF-8 bytes.
-pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_UNIT_BYTES: usize = 16;
 pub const MAX_NOTE_BYTES: usize = 512;
+
+/// Length of a `userId`/`contact` hex string (32 raw bytes).
+pub const USER_ID_HEX_LEN: usize = 64;
 
 /// Length of the webapp contract instance id carried in the delegate params.
 pub const WEBAPP_ID_LEN: usize = 32;
 
 /// Bumped when the delegate protocol changes; reported by `status`/`export`.
-pub const DELEGATE_VERSION: u32 = 3;
+pub const DELEGATE_VERSION: u32 = 4;
 
 /// Secret-store key holding the raw 32-byte Ed25519 seed.
 pub const SECRET_SEED: &[u8] = b"number.v1.seed";
@@ -37,8 +45,14 @@ pub const SECRET_SEED: &[u8] = b"number.v1.seed";
 /// Prefix for the per-slot `u64` little-endian next-sequence key.
 pub const NEXTSEQ_PREFIX: &str = "number.v1.nextseq.";
 
-/// Domain separator for the canonical signing bytes (`DESIGN.md` §2).
-const SIGNING_DOMAIN: &[u8] = b"number:v1:slot";
+/// Secret-store key holding the contacts `u64` little-endian next-sequence.
+pub const CONTACTS_NEXTSEQ_KEY: &[u8] = b"number.v2.nextseq.contacts";
+
+/// Domain separator for the canonical slot signing bytes (`DESIGN.md` §2).
+const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
+
+/// Domain separator for the canonical contacts signing bytes (`DESIGN.md` §2).
+const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
 
 /// Persistent secret storage, abstracted from the host.
 ///
@@ -60,13 +74,31 @@ impl SecretStore for DelegateCtx {
     }
 }
 
+/// Whether `value` is exactly 64 lowercase hexadecimal characters (32 bytes).
+fn is_user_id(value: &str) -> bool {
+    value.len() == USER_ID_HEX_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One address-book entry, mirroring the contract's wire shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub label: String,
+    #[serde(rename = "userId")]
+    pub user_id: String,
+}
+
 /// An optional string field. `null` and absent are equivalent on the wire; the
 /// canonical signing bytes encode both as length `0`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
-    pub value: i64,
+    /// A count of hundredths ("cents"). Any i64 is valid; absent defaults to 0.
     #[serde(default)]
-    pub label: Option<String>,
+    pub value: i64,
+    /// The contact's stable `userId` (64 lowercase hex chars). Mandatory.
+    pub contact: String,
     #[serde(default)]
     pub unit: Option<String>,
     #[serde(default)]
@@ -75,8 +107,12 @@ pub struct Entry {
 
 impl Entry {
     fn metadata_error(&self) -> Option<String> {
-        check_len("label", self.label.as_deref(), MAX_LABEL_BYTES)
-            .or_else(|| check_len("unit", self.unit.as_deref(), MAX_UNIT_BYTES))
+        if !is_user_id(&self.contact) {
+            return Some(format!(
+                "contact must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+            ));
+        }
+        check_len("unit", self.unit.as_deref(), MAX_UNIT_BYTES)
             .or_else(|| check_len("note", self.note.as_deref(), MAX_NOTE_BYTES))
     }
 }
@@ -90,6 +126,40 @@ fn check_len(field: &str, value: Option<&str>, max: usize) -> Option<String> {
     }
 }
 
+/// Validate a contact list exactly as the contract does.
+fn contacts_error(entries: &[Contact]) -> Option<String> {
+    if entries.len() > MAX_CONTACTS {
+        return Some(format!(
+            "contacts has {} entries; maximum is {MAX_CONTACTS}",
+            entries.len()
+        ));
+    }
+    for (index, contact) in entries.iter().enumerate() {
+        if contact.label.is_empty() {
+            return Some(format!("contact {index} label must not be empty"));
+        }
+        if contact.label.len() > MAX_CONTACT_LABEL_BYTES {
+            return Some(format!(
+                "contact {index} label is {} bytes; maximum is {MAX_CONTACT_LABEL_BYTES}",
+                contact.label.len()
+            ));
+        }
+        if !is_user_id(&contact.user_id) {
+            return Some(format!(
+                "contact {index} userId must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+            ));
+        }
+        let earlier = &entries[..index];
+        if earlier.iter().any(|other| other.user_id == contact.user_id) {
+            return Some(format!("contact {index} duplicates a userId"));
+        }
+        if earlier.iter().any(|other| other.label == contact.label) {
+            return Some(format!("contact {index} duplicates a label"));
+        }
+    }
+    None
+}
+
 /// A request from the web UI, tagged by `cmd`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
@@ -101,10 +171,16 @@ enum Request {
         #[serde(default)]
         entry: Option<Entry>,
     },
+    /// Sign a whole address-book record at `seq`.
+    #[serde(rename = "signContacts")]
+    SignContacts {
+        seq: u64,
+        entries: Vec<Contact>,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
-    /// Return the owner seed and per-slot counters for a successor delegate.
+    /// Return the owner seed and counters for a successor delegate.
     /// Only the pinned webapp may ask; this is the forward-only migration path.
     Export,
     /// Restore an exported seed into a fresh delegate. Refused once a seed
@@ -113,16 +189,24 @@ enum Request {
         seed: String,
         #[serde(rename = "nextSeq")]
         next_seq: Vec<u64>,
+        #[serde(rename = "contactsNextSeq", default = "default_contacts_next_seq")]
+        contacts_next_seq: u64,
     },
 }
 
-/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...]}`.
+fn default_contacts_next_seq() -> u64 {
+    1
+}
+
+/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityResponse {
     pub ok: bool,
     pub pubkey: String,
     #[serde(rename = "nextSeq")]
     pub next_seq: [u64; SLOT_COUNT],
+    #[serde(rename = "contactsNextSeq")]
+    pub contacts_next_seq: u64,
 }
 
 /// `{"ok":true,"sig":"<128 hex>"}`.
@@ -133,7 +217,7 @@ pub struct SignResponse {
 }
 
 /// `{"ok":true,"hasSeed":false}` before first use, or
-/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...]}`.
+/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub ok: bool,
@@ -144,9 +228,11 @@ pub struct StatusResponse {
     pub pubkey: Option<String>,
     #[serde(rename = "nextSeq", skip_serializing_if = "Option::is_none")]
     pub next_seq: Option<[u64; SLOT_COUNT]>,
+    #[serde(rename = "contactsNextSeq", skip_serializing_if = "Option::is_none")]
+    pub contacts_next_seq: Option<u64>,
 }
 
-/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...]}`.
+/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportResponse {
     pub ok: bool,
@@ -154,6 +240,8 @@ pub struct ExportResponse {
     pub seed: String,
     #[serde(rename = "nextSeq")]
     pub next_seq: [u64; SLOT_COUNT],
+    #[serde(rename = "contactsNextSeq")]
+    pub contacts_next_seq: u64,
 }
 
 /// `{"ok":true}`.
@@ -297,14 +385,19 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
 
     match request {
         Request::Identity => match identity_with(store) {
-            Ok((pubkey, next_seq)) => Response::Identity(IdentityResponse {
+            Ok((pubkey, next_seq, contacts_next_seq)) => Response::Identity(IdentityResponse {
                 ok: true,
                 pubkey,
                 next_seq,
+                contacts_next_seq,
             }),
             Err(error) => Response::error(error),
         },
         Request::Sign { slot, seq, entry } => match sign_with(store, slot, seq, entry.as_ref()) {
+            Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+            Err(error) => Response::error(error),
+        },
+        Request::SignContacts { seq, entries } => match sign_contacts_with(store, seq, &entries) {
             Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
             Err(error) => Response::error(error),
         },
@@ -313,23 +406,31 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
             Err(error) => Response::error(error),
         },
         Request::Export => match export_with(store) {
-            Ok((seed, next_seq)) => Response::Export(ExportResponse {
+            Ok((seed, next_seq, contacts_next_seq)) => Response::Export(ExportResponse {
                 ok: true,
                 version: DELEGATE_VERSION,
                 seed,
                 next_seq,
+                contacts_next_seq,
             }),
             Err(error) => Response::error(error),
         },
-        Request::Import { seed, next_seq } => match import_with(store, &seed, &next_seq) {
+        Request::Import {
+            seed,
+            next_seq,
+            contacts_next_seq,
+        } => match import_with(store, &seed, &next_seq, contacts_next_seq) {
             Ok(()) => Response::Import(ImportResponse { ok: true }),
             Err(error) => Response::error(error),
         },
     }
 }
 
-/// Return `(hex public key, nextSeq[0..8])`, creating the seed on first use.
-pub fn identity_with(store: &mut impl SecretStore) -> Result<(String, [u64; SLOT_COUNT]), String> {
+/// Return `(hex public key, nextSeq[0..8], contactsNextSeq)`, creating the seed
+/// on first use.
+pub fn identity_with(
+    store: &mut impl SecretStore,
+) -> Result<(String, [u64; SLOT_COUNT], u64), String> {
     let seed = load_or_create_seed(store)?;
     let signing_key = SigningKey::from_bytes(&seed);
     let pubkey = hex::encode(signing_key.verifying_key().to_bytes());
@@ -338,8 +439,9 @@ pub fn identity_with(store: &mut impl SecretStore) -> Result<(String, [u64; SLOT
     for (slot, value) in next_seq.iter_mut().enumerate() {
         *value = read_next_seq(store, slot as u8)?;
     }
+    let contacts_next_seq = read_contacts_next_seq(store)?;
 
-    Ok((pubkey, next_seq))
+    Ok((pubkey, next_seq, contacts_next_seq))
 }
 
 /// Report whether a seed exists, without creating one.
@@ -355,6 +457,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
             has_seed: false,
             pubkey: None,
             next_seq: None,
+            contacts_next_seq: None,
         });
     };
     let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
@@ -370,6 +473,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
     for (slot, value) in next_seq.iter_mut().enumerate() {
         *value = read_next_seq(store, slot as u8)?;
     }
+    let contacts_next_seq = read_contacts_next_seq(store)?;
 
     Ok(StatusResponse {
         ok: true,
@@ -377,15 +481,16 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
         has_seed: true,
         pubkey: Some(pubkey),
         next_seq: Some(next_seq),
+        contacts_next_seq: Some(contacts_next_seq),
     })
 }
 
-/// Export the owner seed and per-slot counters for a successor delegate.
+/// Export the owner seed and counters for a successor delegate.
 ///
 /// Authorization is the same pinned-webapp gate as every other request. This
 /// is the forward-only migration path: a successor can only recover from a
 /// predecessor whose already-published WASM answers this command.
-pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT]), String> {
+pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT], u64), String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Err("refused export: this delegate has no seed yet".into());
     };
@@ -400,8 +505,9 @@ pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT
     for (slot, value) in next_seq.iter_mut().enumerate() {
         *value = read_next_seq(store, slot as u8)?;
     }
+    let contacts_next_seq = read_contacts_next_seq(store)?;
 
-    Ok((hex::encode(seed), next_seq))
+    Ok((hex::encode(seed), next_seq, contacts_next_seq))
 }
 
 /// Restore an exported seed into a fresh delegate.
@@ -413,6 +519,7 @@ pub fn import_with(
     store: &mut impl SecretStore,
     seed_hex: &str,
     next_seq: &[u64],
+    contacts_next_seq: u64,
 ) -> Result<(), String> {
     if store.get_secret(SECRET_SEED).is_some() {
         return Err("refused import: this delegate already has a seed".into());
@@ -426,6 +533,9 @@ pub fn import_with(
     if next_seq.contains(&0) {
         return Err("nextSeq entries must be greater than 0".into());
     }
+    if contacts_next_seq == 0 {
+        return Err("contactsNextSeq must be greater than 0".into());
+    }
 
     let seed_bytes =
         hex::decode(seed_hex).map_err(|error| format!("seed is not valid hex: {error}"))?;
@@ -438,6 +548,9 @@ pub fn import_with(
         if !store.set_secret(&next_seq_key(slot as u8), &value.to_le_bytes()) {
             return Err(format!("failed to persist nextSeq for slot {slot}"));
         }
+    }
+    if !store.set_secret(CONTACTS_NEXTSEQ_KEY, &contacts_next_seq.to_le_bytes()) {
+        return Err("failed to persist contactsNextSeq".into());
     }
     if !store.set_secret(SECRET_SEED, &seed) {
         return Err("failed to persist imported seed".into());
@@ -493,14 +606,47 @@ pub fn sign_with(
     Ok(hex::encode(signature.to_bytes()))
 }
 
-/// Build the canonical signing bytes from `DESIGN.md` §2.
+/// Validate, sign, then advance the contacts sequence counter.
+pub fn sign_contacts_with(
+    store: &mut impl SecretStore,
+    seq: u64,
+    entries: &[Contact],
+) -> Result<String, String> {
+    if seq == 0 {
+        return Err("seq must be greater than 0".into());
+    }
+    let next_seq = read_contacts_next_seq(store)?;
+    if seq < next_seq {
+        return Err(format!(
+            "stale seq {seq} for contacts; need at least {next_seq}"
+        ));
+    }
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
+    if let Some(error) = contacts_error(entries) {
+        return Err(error);
+    }
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let signature = signing_key.sign(&contacts_signing_bytes(seq, entries));
+
+    if !store.set_secret(CONTACTS_NEXTSEQ_KEY, &following.to_le_bytes()) {
+        return Err("failed to persist contactsNextSeq".into());
+    }
+
+    Ok(hex::encode(signature.to_bytes()))
+}
+
+/// Build the canonical slot signing bytes from `DESIGN.md` §2.
 ///
 /// This is the single implementation of the format inside this crate; the
 /// contract crate must build byte-identical input. Null and absent optional
 /// strings both encode as length 0.
 pub fn signing_bytes(slot: u8, seq: u64, entry: Option<&Entry>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(128);
-    bytes.extend_from_slice(SIGNING_DOMAIN);
+    let mut bytes = Vec::with_capacity(160);
+    bytes.extend_from_slice(SIGNING_DOMAIN_SLOT);
     bytes.push(slot);
     bytes.extend_from_slice(&seq.to_le_bytes());
 
@@ -509,13 +655,40 @@ pub fn signing_bytes(slot: u8, seq: u64, entry: Option<&Entry>) -> Vec<u8> {
         Some(entry) => {
             bytes.push(1);
             bytes.extend_from_slice(&entry.value.to_le_bytes());
-            push_optional_str(&mut bytes, entry.label.as_deref());
+            bytes.extend_from_slice(&contact_raw(&entry.contact));
             push_optional_str(&mut bytes, entry.unit.as_deref());
             push_optional_str(&mut bytes, entry.note.as_deref());
         }
     }
 
     bytes
+}
+
+/// Build the canonical contacts signing bytes from `DESIGN.md` §2.
+pub fn contacts_signing_bytes(seq: u64, entries: &[Contact]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(SIGNING_DOMAIN_CONTACTS);
+    bytes.extend_from_slice(&seq.to_le_bytes());
+    let count = u32::try_from(entries.len()).expect("contact count is bounded by MAX_CONTACTS");
+    bytes.extend_from_slice(&count.to_le_bytes());
+    for contact in entries {
+        let label = contact.label.as_bytes();
+        let label_len =
+            u32::try_from(label.len()).expect("label bounds keep lengths below u32::MAX");
+        bytes.extend_from_slice(&label_len.to_le_bytes());
+        bytes.extend_from_slice(label);
+        bytes.extend_from_slice(&contact_raw(&contact.user_id));
+    }
+    bytes
+}
+
+/// Decode a 64-hex-character user id into its raw 32 bytes. Invalid input maps
+/// to all-zero bytes; callers validate before signing.
+fn contact_raw(value: &str) -> [u8; 32] {
+    hex::decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0u8; 32])
 }
 
 fn push_optional_str(bytes: &mut Vec<u8>, value: Option<&str>) {
@@ -537,6 +710,21 @@ fn read_next_seq(store: &impl SecretStore, slot: u8) -> Result<u64, String> {
             let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
                 format!(
                     "stored nextSeq for slot {slot} has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
+}
+
+fn read_contacts_next_seq(store: &impl SecretStore) -> Result<u64, String> {
+    match store.get_secret(CONTACTS_NEXTSEQ_KEY) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored contactsNextSeq has invalid length {} (expected 8)",
                     bytes.len()
                 )
             })?;
@@ -578,10 +766,15 @@ mod tests {
     use super::*;
 
     /// Golden vector: seed `[7u8; 32]`, slot 3, seq 7,
-    /// `{ value: -42, label: "weight", unit: "kg", note: null }`.
+    /// `{ value: 12, contact: 0x11 × 32, unit: null, note: null }`.
     /// Changing the signing-byte format changes the signature and fails here.
     const GOLDEN_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
-    const GOLDEN_SIGNATURE: &str = "6734e3576e846111f6f2c7cc9e01a67adf2c56ba8d6b7b4ee4e66de41df9ecef8dcecd0ac4226161df2465d432528483539f13af5b7bc5e60a2b9df3ea48eb0d";
+    const GOLDEN_SLOT_SIGNATURE: &str = "f666bc2cac7ec8a21df38dfde44d09d80a8318400850c9e6bd72173eafbc9d68106ddce7a122f85bbb9253d13d95b9accad3e4bad3a0ee24fcf424fe17088201";
+    /// Golden contacts vector: seq 1, `[{ label: "Alice", userId: 0x11 × 32 }]`.
+    const GOLDEN_CONTACTS_SIGNATURE: &str = "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906";
+
+    const CONTACT_11: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const CONTACT_22: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
     #[derive(Default)]
     struct MemoryStore {
@@ -631,8 +824,15 @@ mod tests {
             .expect("error response has an error string")
     }
 
+    fn contact(label: &str, user_id: &str) -> Contact {
+        Contact {
+            label: label.into(),
+            user_id: user_id.into(),
+        }
+    }
+
     #[test]
-    fn identity_is_stable_and_defaults_next_seq_to_one() {
+    fn identity_is_stable_and_defaults_counters_to_one() {
         let mut store = MemoryStore::default();
 
         let first = call(&mut store, br#"{"cmd":"identity"}"#);
@@ -642,6 +842,7 @@ mod tests {
         assert!(is_ok(&second));
         assert_eq!(first["pubkey"], second["pubkey"]);
         assert_eq!(first["nextSeq"], json!([1, 1, 1, 1, 1, 1, 1, 1]));
+        assert_eq!(first["contactsNextSeq"], 1);
         assert_eq!(
             store.secrets.get(SECRET_SEED).map(Vec::len),
             Some(32),
@@ -673,20 +874,23 @@ mod tests {
     }
 
     #[test]
-    fn export_import_round_trip_preserves_identity_and_next_seq() {
+    fn export_import_round_trip_preserves_identity_and_counters() {
         let mut old = store_with_seed([7u8; 32]);
         assert!(old.set_secret(&next_seq_key(3), &9u64.to_le_bytes()));
+        assert!(old.set_secret(CONTACTS_NEXTSEQ_KEY, &7u64.to_le_bytes()));
 
         let exported = call(&mut old, br#"{"cmd":"export"}"#);
         assert!(is_ok(&exported), "unexpected export: {exported}");
         assert_eq!(exported["seed"], "07".repeat(32));
         assert_eq!(exported["nextSeq"][3], 9);
+        assert_eq!(exported["contactsNextSeq"], 7);
 
         let mut new = MemoryStore::default();
         let payload = format!(
-            r#"{{"cmd":"import","seed":"{}","nextSeq":{}}}"#,
+            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{}}}"#,
             exported["seed"].as_str().unwrap(),
-            exported["nextSeq"]
+            exported["nextSeq"],
+            exported["contactsNextSeq"]
         );
         let imported = call(&mut new, payload.as_bytes());
         assert!(is_ok(&imported), "unexpected import: {imported}");
@@ -694,6 +898,21 @@ mod tests {
         let identity = call(&mut new, br#"{"cmd":"identity"}"#);
         assert_eq!(identity["pubkey"], GOLDEN_PUBKEY);
         assert_eq!(identity["nextSeq"][3], 9);
+        assert_eq!(identity["contactsNextSeq"], 7);
+    }
+
+    #[test]
+    fn import_defaults_contacts_next_seq_for_v1_predecessors() {
+        let mut new = MemoryStore::default();
+        let payload = format!(
+            r#"{{"cmd":"import","seed":"{}","nextSeq":[1,1,1,1,1,1,1,1]}}"#,
+            "07".repeat(32)
+        );
+        let imported = call(&mut new, payload.as_bytes());
+        assert!(is_ok(&imported), "unexpected import: {imported}");
+
+        let identity = call(&mut new, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["contactsNextSeq"], 1);
     }
 
     #[test]
@@ -713,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn import_validates_the_seed_and_next_seq() {
+    fn import_validates_the_seed_and_counters() {
         let cases = [
             (
                 r#"{"cmd":"import","seed":"zz","nextSeq":[1,1,1,1,1,1,1,1]}"#,
@@ -729,6 +948,10 @@ mod tests {
             ),
             (
                 r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,0,1,1,1,1]}"#,
+                "greater than 0",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"contactsNextSeq":0}"#,
                 "greater than 0",
             ),
         ];
@@ -749,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn golden_signing_vector() {
+    fn golden_slot_signing_vector() {
         let mut store = store_with_seed([7u8; 32]);
 
         let identity = call(&mut store, br#"{"cmd":"identity"}"#);
@@ -757,22 +980,28 @@ mod tests {
 
         let response = call(
             &mut store,
-            br#"{"cmd":"sign","slot":3,"seq":7,"entry":{"value":-42,"label":"weight","unit":"kg","note":null}}"#,
+            br#"{"cmd":"sign","slot":3,"seq":7,"entry":{"value":12,"contact":"1111111111111111111111111111111111111111111111111111111111111111","unit":null,"note":null}}"#,
         );
 
         assert!(is_ok(&response), "unexpected response: {response}");
-        assert_eq!(response["sig"], GOLDEN_SIGNATURE);
+        assert_eq!(response["sig"], GOLDEN_SLOT_SIGNATURE);
 
         // Independently confirm the pinned signature verifies under the pinned
         // public key, so this test fails on drift rather than merely on a typo.
         let entry = Entry {
-            value: -42,
-            label: Some("weight".into()),
-            unit: Some("kg".into()),
+            value: 12,
+            contact: CONTACT_11.into(),
+            unit: None,
             note: None,
         };
+        // Pin the bytes themselves, not just the signature: this is the
+        // cross-crate contract (`contract/src/lib.rs` asserts the same hex).
+        assert_eq!(
+            hex::encode(signing_bytes(3, 7, Some(&entry))),
+            "6e756d6265723a76323a736c6f74030700000000000000010c0000000000000011111111111111111111111111111111111111111111111111111111111111110000000000000000"
+        );
         let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
-        let signature: [u8; 64] = hex::decode(GOLDEN_SIGNATURE)
+        let signature: [u8; 64] = hex::decode(GOLDEN_SLOT_SIGNATURE)
             .expect("golden signature is hex")
             .try_into()
             .expect("golden signature is 64 bytes");
@@ -780,6 +1009,35 @@ mod tests {
         verifying_key
             .verify_strict(&signing_bytes(3, 7, Some(&entry)), &signature)
             .expect("golden signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn golden_contacts_signing_vector() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let response = call(
+            &mut store,
+            br#"{"cmd":"signContacts","seq":1,"entries":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}]}"#,
+        );
+
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"], GOLDEN_CONTACTS_SIGNATURE);
+
+        let entries = vec![contact("Alice", CONTACT_11)];
+        // Cross-crate pin: `contract/src/lib.rs` asserts this same hex.
+        assert_eq!(
+            hex::encode(contacts_signing_bytes(1, &entries)),
+            "6e756d6265723a76323a636f6e746163747301000000000000000100000005000000416c6963651111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let signature: [u8; 64] = hex::decode(GOLDEN_CONTACTS_SIGNATURE)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        verifying_key
+            .verify_strict(&contacts_signing_bytes(1, &entries), &signature)
+            .expect("golden contacts signature verifies over the canonical bytes");
     }
 
     #[test]
@@ -821,6 +1079,38 @@ mod tests {
     }
 
     #[test]
+    fn contacts_seq_is_monotonic_and_empty_list_is_a_tombstone() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let accepted = call(
+            &mut store,
+            br#"{"cmd":"signContacts","seq":5,"entries":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}]}"#,
+        );
+        assert!(is_ok(&accepted), "unexpected response: {accepted}");
+        assert_eq!(
+            store.secrets.get(CONTACTS_NEXTSEQ_KEY).cloned(),
+            Some(6u64.to_le_bytes().to_vec())
+        );
+
+        let replay = call(
+            &mut store,
+            br#"{"cmd":"signContacts","seq":5,"entries":[]}"#,
+        );
+        assert!(!is_ok(&replay));
+        assert!(error_text(&replay).contains("stale"));
+
+        // An empty list at a fresh seq is a legal tombstone.
+        let tombstone = call(
+            &mut store,
+            br#"{"cmd":"signContacts","seq":6,"entries":[]}"#,
+        );
+        assert!(is_ok(&tombstone), "unexpected response: {tombstone}");
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["contactsNextSeq"], 7);
+    }
+
+    #[test]
     fn slot_seq_and_metadata_bounds_are_enforced() {
         let mut store = store_with_seed([7u8; 32]);
 
@@ -847,7 +1137,7 @@ mod tests {
 
         let max_entry = Entry {
             value: i64::MAX,
-            label: Some("l".repeat(MAX_LABEL_BYTES)),
+            contact: CONTACT_11.into(),
             unit: Some("u".repeat(MAX_UNIT_BYTES)),
             note: Some("n".repeat(MAX_NOTE_BYTES)),
         };
@@ -858,17 +1148,17 @@ mod tests {
             sign_with(&mut fresh, 0, 1, Some(&entry)).expect_err("metadata bound must reject")
         };
 
-        let label_error = too_long(Entry {
+        let contact_error = too_long(Entry {
             value: 0,
-            label: Some("l".repeat(MAX_LABEL_BYTES + 1)),
+            contact: "11".repeat(31),
             unit: None,
             note: None,
         });
-        assert!(label_error.contains("label"));
+        assert!(contact_error.contains("contact"));
 
         let unit_error = too_long(Entry {
             value: 0,
-            label: None,
+            contact: CONTACT_11.into(),
             unit: Some("u".repeat(MAX_UNIT_BYTES + 1)),
             note: None,
         });
@@ -876,20 +1166,82 @@ mod tests {
 
         let note_error = too_long(Entry {
             value: 0,
-            label: None,
+            contact: CONTACT_11.into(),
             unit: None,
             note: Some("n".repeat(MAX_NOTE_BYTES + 1)),
         });
         assert!(note_error.contains("note"));
 
-        // Bounds are bytes, not characters: 33 two-byte characters is 66 bytes.
+        // Bounds are bytes, not characters: 9 two-byte characters is 18 bytes.
         let multibyte_error = too_long(Entry {
             value: 0,
-            label: Some("é".repeat(MAX_LABEL_BYTES / 2 + 1)),
-            unit: None,
+            contact: CONTACT_11.into(),
+            unit: Some("é".repeat(MAX_UNIT_BYTES / 2 + 1)),
             note: None,
         });
-        assert!(multibyte_error.contains("label"));
+        assert!(multibyte_error.contains("unit"));
+    }
+
+    #[test]
+    fn contacts_bounds_are_enforced() {
+        let cases: Vec<(Vec<Contact>, &str)> = vec![
+            (vec![contact("", CONTACT_11)], "must not be empty"),
+            (
+                vec![contact(
+                    &"l".repeat(MAX_CONTACT_LABEL_BYTES + 1),
+                    CONTACT_11,
+                )],
+                "label",
+            ),
+            (vec![contact("Alice", "")], "userId"),
+            (vec![contact("Alice", &"11".repeat(31))], "userId"),
+            (vec![contact("Alice", &("11".repeat(31) + "AA"))], "userId"),
+            (
+                vec![contact("Alice", CONTACT_11), contact("Alicia", CONTACT_11)],
+                "duplicates a userId",
+            ),
+            (
+                vec![contact("Alice", CONTACT_11), contact("Alice", CONTACT_22)],
+                "duplicates a label",
+            ),
+        ];
+
+        for (entries, expected) in cases {
+            let mut store = MemoryStore::default();
+            let error = sign_contacts_with(&mut store, 1, &entries)
+                .expect_err("invalid contact list must be rejected");
+            assert!(
+                error.contains(expected),
+                "error {error:?} did not contain {expected:?}"
+            );
+            assert!(
+                store.secrets.is_empty(),
+                "an invalid contact list must not create a seed"
+            );
+        }
+
+        let mut store = store_with_seed([7u8; 32]);
+        let too_many: Vec<Contact> = (0..=MAX_CONTACTS)
+            .map(|index| {
+                let mut user_id = [1u8; 32];
+                user_id[31] = index as u8;
+                contact(&format!("c{index}"), &hex::encode(user_id))
+            })
+            .collect();
+        let error = sign_contacts_with(&mut store, 1, &too_many).expect_err("65 contacts rejected");
+        assert!(error.contains("maximum"));
+
+        let at_limit: Vec<Contact> = (0..MAX_CONTACTS)
+            .map(|index| {
+                let mut user_id = [1u8; 32];
+                user_id[31] = index as u8;
+                contact(&format!("c{index}"), &hex::encode(user_id))
+            })
+            .collect();
+        assert!(sign_contacts_with(&mut store, 1, &at_limit).is_ok());
+
+        let zero = sign_contacts_with(&mut store, 0, &[]).expect_err("seq must be positive");
+        assert!(zero.contains("seq"));
     }
 
     #[test]
@@ -951,6 +1303,7 @@ mod tests {
             br#"{"cmd":"unknown"}"#,
             br#"{"cmd":"sign","slot":"three","seq":7,"entry":null}"#,
             br#"{"cmd":"sign","slot":3,"seq":7,"entry":{"value":"not a number"}}"#,
+            br#"{"cmd":"signContacts","seq":1,"entries":{}}"#,
             br#"{"cmd":"identity""#,
         ];
 
@@ -981,17 +1334,28 @@ mod tests {
         let identity = call(&mut store, br#"{"cmd":"identity"}"#);
         assert!(!is_ok(&identity));
         assert!(error_text(&identity).contains("invalid length"));
+
+        let mut contacts_store = store_with_seed([7u8; 32]);
+        assert!(contacts_store.set_secret(CONTACTS_NEXTSEQ_KEY, &[1, 2, 3]));
+        let identity = call(&mut contacts_store, br#"{"cmd":"identity"}"#);
+        assert!(!is_ok(&identity));
+        assert!(error_text(&identity).contains("invalid length"));
     }
 
     proptest! {
         #[test]
         fn entry_json_round_trip_preserves_signing_bytes(
             value in any::<i64>(),
-            label in proptest::option::of("[A-Za-z0-9 _-]{0,64}"),
+            contact_bytes in proptest::array::uniform32(any::<u8>()),
             unit in proptest::option::of("[A-Za-z0-9 _-]{0,16}"),
             note in proptest::option::of("[A-Za-z0-9 _-]{0,512}"),
         ) {
-            let entry = Entry { value, label, unit, note };
+            let entry = Entry {
+                value,
+                contact: hex::encode(contact_bytes),
+                unit,
+                note,
+            };
             let encoded = serde_json::to_vec(&entry).unwrap();
             let decoded: Entry = serde_json::from_slice(&encoded).unwrap();
 

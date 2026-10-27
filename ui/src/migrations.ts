@@ -37,6 +37,11 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    key: "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
+    codeHash: "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     key: "BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX",
     codeHash: "7GQ6yxU9x7KKBKfGyTx5MJysQQJjbYj8WQsG6L42xedh",
     webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
@@ -57,8 +62,28 @@ export const LEGACY_DELEGATES: LegacyDelegate[] = [
  *
  * Only add a hash when the new contract accepts the old state (same schema and
  * signing bytes). Append newest-first.
+ *
+ * v2 (address book + hundredths) is an incompatible schema/signature change, so
+ * no v1 board can be re-PUT into it. Do not add v1 hashes here; list them in
+ * `UNMIGRATABLE_CONTRACT_CODE_HASHES` instead.
  */
-export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
+export const LEGACY_CONTRACT_CODE_HASHES: string[] = [];
+
+/**
+ * Superseded contract generations whose state the current contract cannot
+ * accept. They still have to be registered (the record gate and
+ * `migrations.test.ts` require every superseded generation to be accounted
+ * for), but the UI must not try to migrate from them: their signatures cover a
+ * different schema, so the current `validate_state` would reject the PUT.
+ *
+ * The user-visible consequence is documented in README/DESIGN: a v1 board is
+ * not carried into v2. The owner identity is carried forward by the delegate,
+ * so the new board is the same owner with an empty address book and slots.
+ * Append newest-first; never remove an entry.
+ */
+export const UNMIGRATABLE_CONTRACT_CODE_HASHES: string[] = [
+  // v1 before the address book: v2 state/signing bytes are incompatible.
+  "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
   // Last build before the frozen path remap: its bytes embed the build
   // machine's cargo registry path, so the reproducible successor is a re-key.
   "3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd",

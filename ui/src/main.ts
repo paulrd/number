@@ -6,18 +6,21 @@ import {
   type BoardCallbacks,
   type BoardStatus,
 } from "./board";
+import { createContactsDialog } from "./contacts-dialog";
 import { DelegateError } from "./delegate";
 import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import {
-  I64_MAX,
-  I64_MIN,
+  formatCents,
+  parseCents,
   SLOT_COUNT,
   stateWarnings,
   validateEntry,
-  type StateV1,
+  type Contact,
+  type Entry,
+  type StateV2,
 } from "./state";
 import { errorMessage, shorten } from "./util";
 import type { DelegateIdentity } from "./delegate";
@@ -47,6 +50,8 @@ const identityCopy = byId<HTMLButtonElement>("identity-copy");
 const identityBackup = byId<HTMLButtonElement>("identity-backup");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
+const contactsOpen = byId<HTMLButtonElement>("contacts-open");
+const contactsCount = byId<HTMLElement>("contacts-count");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
 
 const notice = byId<HTMLDivElement>("notice");
@@ -67,7 +72,9 @@ const editorSeq = byId<HTMLParagraphElement>("editor-seq");
 const editorClose = byId<HTMLButtonElement>("editor-close");
 const valueInput = byId<HTMLInputElement>("value-input");
 const valueWarning = byId<HTMLParagraphElement>("value-warning");
-const labelInput = byId<HTMLInputElement>("label-input");
+const contactSelect = byId<HTMLSelectElement>("contact-select");
+const contactAdd = byId<HTMLButtonElement>("contact-add");
+const contactHint = byId<HTMLParagraphElement>("contact-hint");
 const unitInput = byId<HTMLInputElement>("unit-input");
 const noteInput = byId<HTMLTextAreaElement>("note-input");
 const editorError = byId<HTMLParagraphElement>("editor-error");
@@ -88,7 +95,7 @@ interface SlotView {
 
 const slotViews: SlotView[] = [];
 
-let boardState: StateV1 | null = null;
+let boardState: StateV2 | null = null;
 let identity: DelegateIdentity | null = null;
 let contractKeyFull: string | null = null;
 let boardStatus: BoardStatus = "starting";
@@ -105,6 +112,17 @@ function createElement<K extends keyof HTMLElementTagNameMap>(
   element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
+}
+
+function shortUserId(userId: string): string {
+  return userId.slice(0, 8);
+}
+
+function findContact(userId: string): Contact | null {
+  return (
+    boardState?.contacts.entries.find((contact) => contact.userId === userId) ??
+    null
+  );
 }
 
 function buildSlots(): void {
@@ -158,6 +176,8 @@ function renderBoard(): void {
       view.value.classList.remove("is-long", "is-xlong");
       view.unit.textContent = "";
       view.label.textContent = "Waiting…";
+      view.label.classList.remove("is-unknown");
+      view.label.title = "";
       view.note.hidden = true;
       view.seq.textContent = "seq 0";
       view.action.textContent = "Waiting for the board.";
@@ -177,7 +197,7 @@ function renderBoard(): void {
     else view.button.classList.add("is-empty");
 
     const valueText = entry
-      ? String(entry.value)
+      ? formatCents(entry.value)
       : slot.seq > 0
         ? "∅"
         : "+";
@@ -188,12 +208,20 @@ function renderBoard(): void {
     );
     view.value.classList.toggle("is-xlong", Boolean(entry) && valueText.length > 14);
     view.unit.textContent = entry?.unit ?? "";
+
+    const contact = entry ? findContact(entry.contact) : null;
     view.label.textContent = entry
-      ? (entry.label ?? "")
+      ? contact
+        ? contact.label
+        : `Unknown · ${shortUserId(entry.contact)}`
       : slot.seq > 0
         ? "Cleared"
         : "Empty";
     view.label.classList.toggle("is-placeholder", !entry);
+    view.label.classList.toggle("is-unknown", Boolean(entry) && !contact);
+    // The full key survives a removed contact; keep it available on hover.
+    view.label.title = entry && !contact ? entry.contact : "";
+
     view.note.textContent = entry?.note ?? "";
     view.note.hidden = !entry?.note;
     view.seq.textContent = `seq ${slot.seq}`;
@@ -257,6 +285,16 @@ function renderContractKey(): void {
   contractCopy.disabled = false;
   contractCopy.title = contractKeyFull;
   contractCopy.setAttribute("aria-label", `Copy contract key ${short}`);
+}
+
+function renderContactCount(): void {
+  const count = boardState?.contacts.entries.length ?? 0;
+  contactsCount.textContent = String(count);
+  contactsOpen.disabled = boardState === null;
+  contactsOpen.setAttribute(
+    "aria-label",
+    `Address book, ${count} ${count === 1 ? "contact" : "contacts"}`,
+  );
 }
 
 function renderControls(): void {
@@ -425,10 +463,10 @@ function announce(message: string): void {
 function setEditorBusy(value: boolean): void {
   busy = value;
   valueInput.disabled = value;
-  labelInput.disabled = value;
+  contactSelect.disabled = value;
+  contactAdd.disabled = value;
   unitInput.disabled = value;
   noteInput.disabled = value;
-  saveButton.disabled = value;
   cancelButton.disabled = value;
   editorClose.disabled = value;
   clearButton.disabled =
@@ -436,6 +474,7 @@ function setEditorBusy(value: boolean): void {
   saveButton.textContent = value ? "Saving…" : "Save";
   editorForm.setAttribute("aria-busy", String(value));
   saveButton.setAttribute("aria-busy", String(value));
+  updateContactState();
   renderBoard();
   renderControls();
 
@@ -449,6 +488,72 @@ function setEditorBusy(value: boolean): void {
   }
 }
 
+function contactOption(contact: Contact): HTMLOptionElement {
+  const option = document.createElement("option");
+  option.value = contact.userId;
+  option.textContent = `${contact.label} · ${shortUserId(contact.userId)}`;
+  option.title = contact.userId;
+  return option;
+}
+
+function populateContactOptions(
+  selectedUserId: string,
+  extra?: Contact,
+): void {
+  const entries = boardState?.contacts.entries ?? [];
+  const known = new Set<string>();
+  const options: HTMLOptionElement[] = [];
+
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "Select a contact…";
+  options.push(blank);
+
+  const add = (contact: Contact): void => {
+    if (known.has(contact.userId)) return;
+    known.add(contact.userId);
+    options.push(contactOption(contact));
+  };
+
+  for (const contact of entries) add(contact);
+  if (extra) add(extra);
+
+  // A slot keeps the key it was signed with. Show it even after the contact was
+  // removed, and keep it unselectable for saving until a current one is picked.
+  if (selectedUserId !== "" && !known.has(selectedUserId)) {
+    const unknown = document.createElement("option");
+    unknown.value = selectedUserId;
+    unknown.textContent = `Unknown · ${shortUserId(selectedUserId)}`;
+    unknown.dataset.unknown = "true";
+    options.push(unknown);
+  }
+
+  contactSelect.replaceChildren(...options);
+  contactSelect.value = selectedUserId;
+  updateContactState();
+}
+
+function updateContactState(): void {
+  const entries = boardState?.contacts.entries ?? [];
+  const selected = contactSelect.value;
+  const known =
+    selected !== "" && entries.some((contact) => contact.userId === selected);
+
+  let hint = "";
+  if (entries.length === 0) {
+    hint = "No contacts yet. Add one to save a slot.";
+  } else if (selected === "") {
+    hint = "Choose a contact before saving.";
+  } else if (!known) {
+    hint =
+      "This slot's contact is no longer in the address book. Choose a contact to save changes.";
+  }
+  contactHint.textContent = hint;
+  contactHint.hidden = hint === "";
+
+  saveButton.disabled = busy || !known;
+}
+
 function openEditor(index: number): void {
   if (!boardState || busy) return;
 
@@ -460,8 +565,7 @@ function openEditor(index: number): void {
   editorTitle.textContent = `Slot ${index + 1}`;
   editorSeq.textContent =
     slot.seq === 0 ? "Never written" : `Signed at sequence ${slot.seq}`;
-  valueInput.value = entry ? String(entry.value) : "";
-  labelInput.value = entry?.label ?? "";
+  valueInput.value = entry ? formatCents(entry.value) : "";
   unitInput.value = entry?.unit ?? "";
   noteInput.value = entry?.note ?? "";
   clearButton.disabled = entry === null;
@@ -469,6 +573,8 @@ function openEditor(index: number): void {
 
   editorError.hidden = true;
   editorError.textContent = "";
+  valueInput.removeAttribute("aria-invalid");
+  populateContactOptions(entry?.contact ?? "");
   updateValueWarning();
 
   if (!editor.open) editor.showModal();
@@ -480,42 +586,23 @@ function closeEditor(): void {
   if (editor.open) editor.close();
 }
 
-function parseValueInput(raw: string): bigint {
-  const trimmed = raw.trim();
-  if (trimmed === "") {
-    throw new Error("Enter a value.");
-  }
-  if (!/^[+-]?\d+$/.test(trimmed)) {
-    throw new Error("Enter a whole number (digits with an optional leading - or +).");
-  }
-
-  let exact: bigint;
-  try {
-    exact = BigInt(trimmed);
-  } catch {
-    throw new Error("That value is not a valid integer.");
-  }
-  if (exact < I64_MIN || exact > I64_MAX) {
-    throw new Error(
-      "Value must fit in a signed 64-bit integer " +
-        "(-9,223,372,036,854,775,808 to 9,223,372,036,854,775,807).",
-    );
-  }
-
-  return exact;
-}
+const VALUE_DESCRIBED_BY = "value-hint";
 
 function setValueWarning(message: string | null, invalid = false): void {
   if (message === null) {
     valueWarning.hidden = true;
+    valueWarning.textContent = "";
     valueInput.removeAttribute("aria-invalid");
-    valueInput.removeAttribute("aria-describedby");
+    valueInput.setAttribute("aria-describedby", VALUE_DESCRIBED_BY);
     return;
   }
 
   valueWarning.textContent = message;
   valueWarning.hidden = false;
-  valueInput.setAttribute("aria-describedby", "value-warning");
+  valueInput.setAttribute(
+    "aria-describedby",
+    `${VALUE_DESCRIBED_BY} value-warning`,
+  );
   if (invalid) valueInput.setAttribute("aria-invalid", "true");
   else valueInput.removeAttribute("aria-invalid");
 }
@@ -526,62 +613,63 @@ function updateValueWarning(): void {
     setValueWarning(null);
     return;
   }
-  if (!/^[+-]?\d+$/.test(raw)) {
-    setValueWarning("Use digits only; no decimal point or exponent.", true);
+
+  // A lone sign or point is a half-typed number, not a mistake yet.
+  if (/^[+-]?$/.test(raw) || /^[+-]?\.$/.test(raw)) {
+    setValueWarning(null);
     return;
   }
 
-  let exact: bigint;
   try {
-    exact = BigInt(raw);
-  } catch {
-    setValueWarning("That value is not a valid integer.", true);
-    return;
+    parseCents(raw);
+    setValueWarning(null);
+  } catch (error) {
+    setValueWarning(errorMessage(error), true);
   }
-  if (exact < I64_MIN || exact > I64_MAX) {
-    setValueWarning(
-      "Outside the signed 64-bit range; the contract will reject this value.",
-      true,
-    );
-    return;
-  }
+}
 
-  // The full i64 range is supported exactly (the state codec parses and emits
-  // big integers losslessly), so only the contract bounds matter.
-  setValueWarning(null);
+function showEditorError(message: string, focus: HTMLElement | null): void {
+  editorError.textContent = message;
+  editorError.hidden = false;
+  focus?.focus();
 }
 
 async function handleSave(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (busy || !boardState) return;
 
+  const contact = contactSelect.value;
+  if (contact === "") {
+    showEditorError("Choose a contact before saving.", contactSelect);
+    return;
+  }
+
   let value: bigint;
   try {
-    value = parseValueInput(valueInput.value);
-    const entry = entryFromInputs(
+    value = parseCents(valueInput.value);
+  } catch (error) {
+    valueInput.setAttribute("aria-invalid", "true");
+    showEditorError(errorMessage(error), valueInput);
+    return;
+  }
+
+  let entry: Entry;
+  try {
+    entry = entryFromInputs(
       value,
-      labelInput.value,
+      contact,
       unitInput.value,
       noteInput.value,
     );
     validateEntry(entry);
   } catch (error) {
-    editorError.textContent = humanError(error);
-    editorError.hidden = false;
-    valueInput.setAttribute("aria-invalid", "true");
-    valueInput.focus();
+    showEditorError(errorMessage(error), null);
     return;
   }
 
   editorError.hidden = true;
   setEditorBusy(true);
   try {
-    const entry = entryFromInputs(
-      value,
-      labelInput.value,
-      unitInput.value,
-      noteInput.value,
-    );
     await backend.save(currentSlot, entry);
     const slotNumber = currentSlot + 1;
     closeEditor();
@@ -675,6 +763,11 @@ const callbacks: BoardCallbacks = {
     boardState = state;
     renderBoard();
     renderWarnings();
+    renderContactCount();
+    contactsDialog.refresh();
+    // A contacts write can land while the editor is open (the address book is
+    // reachable from it). Keep the options honest without losing the selection.
+    if (editor.open) populateContactOptions(contactSelect.value);
   },
   onIdentity: (next) => {
     identity = next;
@@ -697,6 +790,23 @@ const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
 
+const contactsDialog = createContactsDialog({
+  getContacts: () => boardState?.contacts.entries ?? [],
+  getUsedContactCount: (userId) =>
+    boardState
+      ? boardState.slots.filter((slot) => slot.entry?.contact === userId).length
+      : 0,
+  saveContacts: (entries) => backend.saveContacts(entries),
+  announce,
+  onAdded: (contact) => {
+    populateContactOptions(contact.userId, contact);
+    editorError.hidden = true;
+    editorError.textContent = "";
+    updateContactState();
+    contactSelect.focus({ preventScroll: true });
+  },
+});
+
 const delegateDialog = createDelegateDialog({
   offline: isOffline,
   installDelegate: () => backend.installDelegate(),
@@ -707,7 +817,8 @@ const identityDialogs = createIdentityDialogs({
   offline: isOffline,
   getIdentity: () => identity,
   exportIdentity: () => backend.exportIdentity(),
-  importIdentity: (seed, nextSeq) => backend.importIdentity(seed, nextSeq),
+  importIdentity: (seed, nextSeq, contactsNextSeq) =>
+    backend.importIdentity(seed, nextSeq, contactsNextSeq),
   announce,
   copy: copyToClipboard,
   onRestored: () => {
@@ -736,6 +847,7 @@ renderBoard();
 renderWarnings();
 renderIdentity();
 renderContractKey();
+renderContactCount();
 renderStatus();
 reconnectButton.hidden = isOffline;
 
@@ -748,6 +860,13 @@ editorForm.addEventListener("submit", (event) => {
   void handleSave(event);
 });
 valueInput.addEventListener("input", updateValueWarning);
+contactSelect.addEventListener("change", updateContactState);
+contactAdd.addEventListener("click", () => {
+  contactsDialog.open({ selectOnAdd: true });
+});
+contactsOpen.addEventListener("click", () => {
+  contactsDialog.open();
+});
 
 editor.addEventListener("cancel", (event) => {
   if (busy) event.preventDefault();

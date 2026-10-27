@@ -7,20 +7,26 @@
     "repoRoot": "/build"
   },
   "contract": {
-    "codeHash": "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
+    "codeHash": "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
     "file": "published/contract/number_contract.wasm",
     "generations": [
+      "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
       "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
       "3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd",
       "7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez"
     ]
   },
   "delegate": {
-    "codeHash": "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",
-    "key": "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
+    "codeHash": "CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj",
+    "key": "BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef",
     "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
     "file": "published/delegate/number_delegate.wasm",
     "generations": [
+      {
+        "key": "BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef",
+        "codeHash": "CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
       {
         "key": "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
         "codeHash": "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",

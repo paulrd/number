@@ -16,15 +16,16 @@ did not change). The local node remains the owner's node.
 | Live URL pattern | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API reached through the SSH-forwarded `:7509` |
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
-| Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1) |
+| Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 build) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` |
-| Current delegate code hash | `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY` |
-| Current contract code hash | `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` |
+| Current delegate key | `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` (v2, recorded) |
+| Current delegate code hash | `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj` |
+| Current contract code hash | `A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur` (v2) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
-| Board contract id | `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk` |
-| Slot 1 | `7` (preserved by the #3 re-key migration) |
+| Board contract id | `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC` (v2, empty) |
+| Slot 1 | empty (v2 board is new; the v1 board `4JkW…` is not migratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
+| Live site | still the v1 build; update with the v2 `ui/dist` after publishing the new delegate |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | update instructions given; not updated from this environment — check `freenet --version` there |
 
@@ -303,6 +304,30 @@ frame.
   The `freenet.ts` comments, README and DESIGN §11 now describe the real cause
   instead of blaming the shell.
 
+### #16 — Address book and two-decimal values (v2)
+
+- The address book is signed contract state: `contacts {seq, entries, sig}`,
+  entries `{label, userId}` with `userId` a 32-byte Ed25519 public key (64
+  lowercase hex). It is capped at 64 entries, merged with the same
+  seq/signature order as slots, and synced in summaries and deltas.
+- A slot entry now stores a mandatory `contact` (`userId`), not a free-text
+  label. The editor selects from the address book; adding a contact is a
+  signed write. Removing a contact leaves its key on existing slots (they show
+  `Unknown · <short id>`) and does not invalidate signed state.
+- `value` is an optional i64 **count of hundredths**; blank saves `0.00` and the
+  UI always shows exactly two decimals. The full range is
+  `-92233720368547758.08` … `92233720368547758.07`.
+- Delegate protocol v4: `signContacts`, `contactsNextSeq`, v2 signing domains.
+  The seed and slot-counter secret keys are unchanged, so the existing
+  forward-only delegate migration carries the owner key.
+- The contract is a **breaking generation**: v1 state cannot be re-PUT into v2.
+  The v1 contract hashes are in `UNMIGRATABLE_CONTRACT_CODE_HASHES`; the UI does
+  not probe them. Same owner key, fresh v2 board.
+- New recorded artifacts: contract `A1J4…`, delegate code `CmXA…`, delegate key
+  `BN6E…`. `make check-artifacts` and `make verify-merge` pass (293 cases, 14
+  laws, 0 violations); offline e2e covers add/remove contact, decimals, blank
+  zero, the cents bounds, axe, and a clean console.
+
 ## Remaining
 
 ### #15 — Atlas listing (blocked)
@@ -326,18 +351,26 @@ the Atlas operator to crawl it.
 - `BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX` — previous, export-capable;
   registered. Code hash `7GQ6yxU9x7KKBKfGyTx5MJysQQJjbYj8WQsG6L42xedh`.
   Superseded by the #3 reproducible build; migrated its seed forward.
-- `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` — **current**, code hash
+- `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` — previous, code hash
   `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY`, pinned to the webapp above.
-  Recorded in `published/manifest.json`; append to `LEGACY_DELEGATES` before the
-  next delegate change (the record gate enforces it).
+  Superseded by v2; registered in `LEGACY_DELEGATES`, so its seed migrates
+  forward.
+- `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` — **current (v2)**, code hash
+  `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj`. Recorded in
+  `published/manifest.json`; append to `LEGACY_DELEGATES` before the next
+  delegate change (the record gate enforces it).
 - Contract `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` — old v1 hash,
-  registered as legacy. Board `9UpJtiFg…`.
+  registered as unmigratable. Board `9UpJtiFg…`.
 - Contract `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd` — pre-remap build,
-  registered as legacy. Board `EgbCX4Csk7nmA4cNB7CGQ4sxLKwtJPjjcEF1HntpgZkF`.
-- Contract `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` — **current**,
-  reproducible. Board `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk`. Recorded
-  in `published/manifest.json`; append to `LEGACY_CONTRACT_CODE_HASHES` before
-  the next contract change.
+  registered as unmigratable. Board `EgbCX4Csk7nmA4cNB7CGQ4sxLKwtJPjjcEF1HntpgZkF`.
+- Contract `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` — v1, reproducible,
+  registered as unmigratable in v2. Board
+  `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk`.
+- Contract `A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur` — **current (v2)**,
+  address book + hundredths. Board
+  `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC`. Recorded in
+  `published/manifest.json`; append to `LEGACY_CONTRACT_CODE_HASHES` or
+  `UNMIGRATABLE_CONTRACT_CODE_HASHES` before the next contract change.
 
 ## Rules that must not be broken
 
@@ -345,7 +378,9 @@ the Atlas operator to crawl it.
   `make record-artifacts`, and only after the outgoing generation is in
   `ui/src/migrations.ts`; `make check-artifacts` must pass.
 - Before changing contract WASM, append the outgoing hash to
-  `LEGACY_CONTRACT_CODE_HASHES`.
+  `LEGACY_CONTRACT_CODE_HASHES` if the new contract accepts its state, otherwise
+  to `UNMIGRATABLE_CONTRACT_CODE_HASHES`. Only the former is probed for state
+  migration; the latter keeps a breaking generation registered for the gate.
 - Before changing delegate WASM, append the outgoing key, code hash, and webapp
   id to `LEGACY_DELEGATES`.
 - Never remove a migration registry entry.
@@ -369,15 +404,20 @@ make verify-merge
 
 ## Working tree
 
-Clean. #13's report is committed and filed as freenet-stdlib#140; #14 is in
-`1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
-`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
-`ba81747`.
+Contains the v2 address-book change (not committed in this session). #13's
+report is committed and filed as freenet-stdlib#140; #14 is in `1da4fa3`, #12 in
+`0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`,
+#7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
-No WASM changed, so `published/` and the re-key are untouched. The local and
-live sites serve the #14 build (delegate bundled). The VPS test seed from #12
-remains; the isolated test nodes were wiped. The only open backlog item is
-#15 (Atlas), which is blocked externally.
+`published/` now records the v2 generation; `make check-artifacts` proves the
+bytes. The **live site has not been updated** and still serves the #14 v1
+build. To deploy v2: publish the new delegate on the node
+(`make publish-delegate`) and run `fdev --port <port> website update --key
+number-local ui/dist`; the website id does not move, so the delegate pin is
+unchanged. A visitor's existing v1 board is not migrated (same owner key, new
+empty v2 board); the first-run flow should recover the seed from the v1
+delegate. The VPS test seed from #12 remains; the isolated test nodes were
+wiped. The only open backlog item is #15 (Atlas), blocked externally.
 
 Handoff notes:
 - The local node was restarted on 0.2.151 with the same data/config dirs.

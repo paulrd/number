@@ -1,11 +1,25 @@
-# number — design (v1)
+# number — design (v2)
 
-A personal Freenet app: one board per user, holding exactly **8 slots**. Each
-slot is either empty or holds an **i64** value with optional `label`, `unit`,
-and `note`. Only the board's owner can write. The board is a contract instance
+A personal Freenet app: one board per user, holding exactly **8 slots** and an
+**address book**. Each slot is either empty or holds an i64 **count of
+hundredths** (displayed with exactly two decimal places), a mandatory
+**contact** (the `userId` of an address-book entry), and optional `unit` and
+`note`. Only the board's owner can write. The board is a contract instance
 parameterised by the owner's Ed25519 verifying key, so the owner's identity is
 the stable anchor (a new WASM version re-keys the instance, but the client
 re-derives it from the same owner key).
+
+The address book lives in the signed, replicated contract state. A contact
+associates a human **label** with a **user id** (an Ed25519 public key, 32 bytes
+as 64 lowercase hex). A slot stores the user id, not the label, so renaming a
+contact does not break existing slots. The contract validates the id's format;
+it deliberately does not require the id to still be present in the book, so
+removing a contact cannot invalidate already-signed slot state. The UI requires
+choosing a current contact when saving.
+
+v2 is an incompatible schema/signature change. Existing v1 boards cannot be
+migrated into a v2 contract (see §7 "Migration"). The owner identity is carried
+forward by the delegate's seed export/import path.
 
 Components:
 
@@ -32,10 +46,21 @@ Instance id: `BLAKE3(code_hash_bytes || parameters)` (exactly as
 
 ```json
 {
-  "v": 1,
+  "v": 2,
+  "contacts": {
+    "seq": 1,
+    "entries": [
+      { "label": "Alice", "userId": "1111111111111111111111111111111111111111111111111111111111111111" }
+    ],
+    "sig": "<128 lowercase hex chars>"
+  },
   "slots": [
     { "seq": 0, "entry": null, "sig": null },
-    { "seq": 3, "entry": { "value": -42, "label": "weight", "unit": "kg", "note": null }, "sig": "<128 lowercase hex chars>" }
+    {
+      "seq": 3,
+      "entry": { "value": 1250, "contact": "1111111111111111111111111111111111111111111111111111111111111111", "unit": "kg", "note": null },
+      "sig": "<128 lowercase hex chars>"
+    }
   ]
 }
 ```
@@ -46,26 +71,41 @@ Rules:
 - `seq == 0` ⇒ `entry == null` and `sig == null` (initial/empty slot).
 - `seq > 0` ⇒ `sig` is a valid Ed25519 signature over the signing bytes below.
   `entry == null` with `seq > 0` is a **tombstone** (slot cleared) and is legal.
-- `value` is an i64 **JSON number**. It is not a string and the schema did not
-  change to support the full range: the UI parses and emits numbers losslessly
-  (BigInt via `lossless-json`), so values above `Number.MAX_SAFE_INTEGER` reach
-  the delegate and the contract exact. The contract and delegate are unchanged.
-- Bounds (bytes, UTF-8): `label` ≤ 64, `unit` ≤ 16, `note` ≤ 512. `null` and
-  absent are equivalent for the optional strings; serialise `null`.
-- `v` must be `1`.
+- `value` is an i64 **JSON number** counting **hundredths**. It is the same wire
+  type as v1; only its interpretation changed (the UI divides by 100 for
+  display). The UI parses and emits numbers losslessly (BigInt via
+  `lossless-json`), so the full i64 range survives exactly.
+- `contact` is mandatory: exactly 64 lowercase hex characters, the 32-byte
+  Ed25519 public key of an address-book entry. The contract checks the format,
+  not membership (see the introduction).
+- `unit` ≤ 16 and `note` ≤ 512 bytes (UTF-8). `null` and absent are equivalent
+  for the optional strings; serialise `null`.
+- `v` must be `2`.
 
-### Signing bytes (canonical, hand-built)
+### Address book (`contacts` record)
+
+- `entries` is at most **64** contacts, in signed order.
+- Each `label` is a non-empty UTF-8 string of at most 64 bytes.
+- Each `userId` is exactly 64 lowercase hex characters (32 bytes).
+- No duplicate `userId` and no duplicate exact `label`.
+- `seq == 0` ⇒ `entries == []` and `sig == null`.
+- `seq > 0` ⇒ `sig` is a valid signature over the contacts signing bytes.
+  `entries == []` with `seq > 0` is legal (all contacts removed).
+- A contact update replaces the whole record at a higher `seq`; the UI signs a
+  new record for add, remove, or rename. There are no per-contact counters.
+
+### Signing bytes — slot (canonical, hand-built)
 
 ```
-b"number:v1:slot"
+b"number:v2:slot"
 || slot_index: u8
 || seq: u64 little-endian
 || entry_tag: u8            // 0 = None, 1 = Some
 // only when entry_tag == 1:
 || value: i64 little-endian
-|| label_len: u32 LE || label bytes
-|| unit_len:  u32 LE || unit bytes
-|| note_len:  u32 LE || note bytes
+|| contact: 32 raw bytes    // decode the 64 hex characters
+|| unit_len: u32 LE || unit bytes
+|| note_len: u32 LE || note bytes
 ```
 
 `None` optional strings encode as length `0` (there is no null/absent
@@ -74,60 +114,96 @@ every field of the entry. Both the contract and the delegate MUST build these
 bytes with the same function shape. A golden vector in each crate's tests pins
 it.
 
+### Signing bytes — contacts
+
+```
+b"number:v2:contacts"
+|| seq: u64 little-endian
+|| count: u32 LE
+|| for each entry, in order:
+     label_len: u32 LE || label bytes
+     || userId: 32 raw bytes
+```
+
+An empty list with `seq > 0` signs `count = 0`. Entry order is part of the
+signature.
+
 ## 3. Summary (JSON, UTF-8)
 
 ```json
-{ "v": 1, "slots": [ [3, "<32 hex chars>"], [0, "00000000000000000000000000000000"] ] }
+{
+  "v": 2,
+  "contacts": [1, "<32 hex chars>"],
+  "slots": [ [3, "<32 hex chars>"], [0, "00000000000000000000000000000000"] ]
+}
 ```
 
-Exactly 8 pairs: `[seq, digest16]`. `digest16` is the first 16 bytes of
-`BLAKE3(signing bytes for that slot)` for `seq > 0`, and 16 zero bytes for an
-empty slot. The digest exists so two peers that hold the same `seq` but
-different entries (owner equivocation) still notice and heal. Every summary
-field is read by `get_state_delta`.
+`contacts` is one `[seq, digest16]` pair; `slots` is exactly 8 pairs. `digest16`
+is the first 16 bytes of `BLAKE3(signing bytes for that record/slot)` for
+`seq > 0`, and 16 zero bytes for an empty record/slot. The digest exists so two
+peers that hold the same `seq` but different content (owner equivocation) still
+notice and heal. Every summary field is read by `get_state_delta`.
 
 ## 4. Delta (JSON, UTF-8)
 
 ```json
-{ "v": 1, "slots": [ { "i": 2, "seq": 4, "entry": null, "sig": "<hex>" } ] }
+{
+  "v": 2,
+  "contacts": { "seq": 5, "entries": [], "sig": "<hex>" },
+  "slots": [ { "i": 2, "seq": 4, "entry": null, "sig": "<hex>" } ]
+}
 ```
 
-`get_state_delta` includes slot `i` iff
+`contacts` is `null` when unchanged; otherwise it is the full contacts record.
+`get_state_delta` includes contacts iff
 
 ```
-our.seq > their.seq
-|| (our.seq == their.seq && our.digest16 != their.digest16)
+our.contacts.seq > their.contacts.seq
+|| (equal seq && our.contacts.digest16 != their.contacts.digest16)
 ```
 
-If no slot qualifies, return a literally empty `StateDelta::from(vec![])`.
+and includes slot `i` iff
 
-## 5. Merge rule (per slot)
+```
+our.slots[i].seq > their.slots[i].seq
+|| (equal seq && our.slots[i].digest16 != their.slots[i].digest16)
+```
 
-Merge is `max` over the total order:
+With an empty (or undecodable) summary — a new subscriber — include contacts
+iff `seq > 0`, and every slot with `seq > 0`. If nothing qualifies, return a
+literally empty `StateDelta::from(vec![])`. A contacts-only delta has
+`"slots": []`.
+
+## 5. Merge rule
+
+Contacts and slots each merge by `max` over the total order:
 
 1. higher `seq` wins;
-2. equal `seq` → the slot whose **signature bytes** are lexicographically
+2. equal `seq` → the record whose **signature bytes** are lexicographically
    greater wins;
-3. equal `seq` and equal signature → identical slot.
+3. equal `seq` and equal signature → identical record.
 
 Properties: associative, commutative, idempotent, absorbing. A full-state
-update is merged slot-wise; a delta is merged slot-wise; re-applying either is a
-no-op.
+update merges contacts and every slot; a delta merges the contacts record (when
+present) and every included slot; re-applying either is a no-op.
 
 Invalid input is **rejected atomically** for state/delta (single writer →
-atomic is correct): any slot with a bad signature, out-of-bounds metadata, or
-`seq == 0` with a non-null entry rejects the whole update. Stale (lower-seq)
-slots are not an error — they lose the merge.
+atomic is correct): any bad signature, out-of-bounds metadata, malformed
+contact, duplicate contact id/label, or `seq == 0` with non-empty content
+rejects the whole update. Stale (lower-seq) records are not an error — they
+lose the merge.
 
 ## 6. ContractInterface behaviour
 
 - `validate_state(parameters, state, related)`:
   - params length 32 and a valid Ed25519 point;
-  - state decodes as a valid `StateV1` per §2, exactly 8 slots;
-  - every `seq > 0` slot's signature verifies under the params key.
+  - state decodes as a valid `StateV2` per §2, exactly 8 slots, a valid contacts
+    record;
+  - the contacts signature (when `seq > 0`) and every `seq > 0` slot signature
+    verify under the params key.
 - `update_state(parameters, state, data)`:
   - decode current state; for each `UpdateData::State` / `Delta` /
-    `StateAndDelta`, validate the incoming slots, then merge per §5;
+    `StateAndDelta`, validate the incoming contacts/slots, then merge per §5;
   - `UpdateData::Related*` is not used (no related contracts);
   - return `UpdateModification::valid(merged_bytes)`.
 - `summarize_state`: §3.
@@ -143,21 +219,22 @@ Request:
 
 ```json
 { "cmd": "identity" }
-{ "cmd": "sign", "slot": 3, "seq": 7, "entry": { "value": 12, "label": null, "unit": null, "note": null } }
+{ "cmd": "sign", "slot": 3, "seq": 7, "entry": { "value": 1250, "contact": "<64 hex>", "unit": null, "note": null } }
 { "cmd": "sign", "slot": 3, "seq": 8, "entry": null }
+{ "cmd": "signContacts", "seq": 2, "entries": [ { "label": "Alice", "userId": "<64 hex>" } ] }
 { "cmd": "status" }
 { "cmd": "export" }
-{ "cmd": "import", "seed": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1] }
+{ "cmd": "import", "seed": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1 }
 ```
 
 Response (outbound `ApplicationMessage`):
 
 ```json
-{ "ok": true, "pubkey": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1] }   // identity
-{ "ok": true, "sig": "<128 hex>" }                                   // sign
+{ "ok": true, "pubkey": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1 } // identity
+{ "ok": true, "sig": "<128 hex>" }                                   // sign / signContacts
 { "ok": true, "hasSeed": false }                                     // status, fresh
-{ "ok": true, "hasSeed": true, "pubkey": "<64 hex>", "nextSeq": [...] } // status, initialized
-{ "ok": true, "seed": "<64 hex>", "nextSeq": [...] }                 // export
+{ "ok": true, "hasSeed": true, "pubkey": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1 } // status, initialized
+{ "ok": true, "seed": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1 } // export
 { "ok": true }                                                       // import
 { "ok": false, "error": "..." }                                      // any failure
 ```
@@ -165,8 +242,11 @@ Response (outbound `ApplicationMessage`):
 Secrets (delegate secret store):
 
 - `number.v1.seed` — 32-byte Ed25519 seed, generated with
-  `freenet_stdlib::rand::rand_bytes(32)` on first use.
+  `freenet_stdlib::rand::rand_bytes(32)` on first use. The key name is kept from
+  v1 so the seed's meaning does not move with the generation.
 - `number.v1.nextseq.<i>` — 8-byte little-endian u64, per slot, default 1.
+- `number.v2.nextseq.contacts` — 8-byte little-endian u64, contacts record,
+  default 1. `DELEGATE_VERSION` is 4.
 
 Parameters:
 
@@ -179,9 +259,15 @@ Parameters:
 
 Rules:
 
-- `slot` must be `0..7`; `seq >= nextseq[slot]`; `seq > 0`.
-- Enforce the §2 metadata bounds; sign §2 canonical bytes; then store
+- `sign`: `slot` must be `0..7`; `seq >= nextseq[slot]`; `seq > 0`; enforce the
+  §2 entry bounds and contact format; sign the slot bytes; then store
   `nextseq[slot] = seq + 1`.
+- `signContacts`: `seq >= contactsNextSeq`; `seq > 0`; enforce the §2 contacts
+  bounds (count, labels, user ids, uniqueness); sign the contacts bytes; then
+  store `contactsNextSeq = seq + 1`.
+- Import writes the contacts counter and per-slot counters before the seed, so
+  a failed import can be retried. A v1 `export` response has no
+  `contactsNextSeq`; the UI treats it as 1.
 - Only accept messages whose `origin` is
   `Some(MessageOrigin::WebApp(id))` and `id` equals the pinned webapp contract
   id. Reject a different `WebApp(id)`, `MessageOrigin::Delegate`, `None`, and
@@ -237,6 +323,12 @@ install it on first use.
   probes each old hash with the same owner pubkey, GETs the old state, and PUTs
   it into the current contract; `validate_state` re-checks every signature.
   Only list versions whose state/signing bytes the current contract accepts.
+- **v2 is a breaking contract generation.** The state schema and signing bytes
+  changed, so no v1 board can be re-PUT into v2. All v1 hashes live in
+  `UNMIGRATABLE_CONTRACT_CODE_HASHES` (registered for the record gate, never
+  probed by the UI). The owner identity survives through the delegate migration,
+  but the v2 board starts empty: same owner key, empty address book and slots.
+  This is deliberate; do not "fix" it by listing a v1 hash as migratable.
 
 ## 8. UI flow
 
@@ -255,19 +347,30 @@ install it on first use.
 4. `GET`; on not-found, `PUT` the bundled `number_contract.wasm` with params and
    an all-empty `initial_state` (mirror `buildShardPutRequest` from
    freenet-microblogging), then `SUBSCRIBE`.
-5. Render 8 slots; an edit computes `seq = max(contract seq, nextSeq) + 1`? No:
-   use `seq = max(contract.seq, delegate.nextSeq[i])` then ask the delegate to
-   sign that `seq`; delegate stores `seq+1`. Contract merge then accepts it.
-6. Send `UpdateRequest(key, DeltaUpdate(delta bytes))`; update UI from the
+5. Render 8 slots and the address book. An edit computes
+   `seq = max(contract.slots[i].seq, delegate.nextSeq[i])`, then asks the
+   delegate to sign that `seq`; the delegate stores `seq+1`. Contract merge then
+   accepts it.
+6. A contact change (add, rename, remove) signs a whole new contacts record at
+   `seq = max(contract.contacts.seq + 1, delegate.contactsNextSeq)`, sends it as
+   a `Delta` with `contacts` set and `slots: []`, and updates the address book
+   from the response / subscription notification.
+7. Send `UpdateRequest(key, DeltaUpdate(delta bytes))`; update UI from the
    response / subscription notification.
-7. Clearing a slot sends `entry: null` with a higher `seq` (tombstone).
+8. Clearing a slot sends `entry: null` with a higher `seq` (tombstone).
+9. The editor's value is optional: blank saves `0`. It accepts at most two
+   decimals, converts to an exact i64 count of hundredths, and displays every
+   value with exactly two decimals. The contact select is mandatory and lists
+   the current address book; adding a contact writes it before the slot save.
 
 ### Identity backup and restore (user-facing)
 
 - `ui/src/identity.ts` wraps the delegate's `export` payload in versioned JSON:
-  `{v: 1, kind: "number-identity", seed, nextSeq, pubkey, createdAt}`. `pubkey`
-  and `createdAt` are informational; the delegate validates the seed and
-  counters. `nextSeq` must be 8 positive safe integers, matching the delegate.
+  `{v: 1, kind: "number-identity", seed, nextSeq, contactsNextSeq?, pubkey,
+  createdAt}`. `pubkey` and `createdAt` are informational; the delegate
+  validates the seed and counters. `nextSeq` must be 8 positive safe integers,
+  matching the delegate. `contactsNextSeq` is optional for backward
+  compatibility with v1 backups (missing ⇒ 1).
 - The first-run dialog is a blocker: `status.hasSeed == false` after legacy
   migration pauses the board until the user creates a key or imports a backup.
   Escape and backdrop cannot dismiss it into an implicit new key, because the
@@ -315,28 +418,33 @@ Contract and delegate are excluded from any workspace (see build-system →
 
 ## 10. Acceptance
 
-- `cargo test` in `contract/` covers: signature tamper per field, bounds,
-  seq-0 invariant, merkle-free summary/delta round-trip, empty delta when
-  converged, property tests for merge comm/assoc/idempotence/absorption.
-- `cargo test` in `delegate/` covers: identity creation/stability, sign golden
-  vector, seq monotonicity, bounds, pinned-webapp acceptance, foreign webapp /
-  `Delegate` / missing-origin rejection, malformed delegate parameters failing
-  closed, `status` without seed creation, export/import round-trip preserving
-  identity and counters, and import refusing to overwrite an existing seed.
+- `cargo test` in `contract/` covers: signature tamper per field, slot and
+  contacts bounds, seq-0 invariants, contacts uniqueness, merkle-free
+  summary/delta round-trip including contacts, contacts-only delta, empty
+  delta when converged, property tests for slot and contacts merge
+  comm/assoc/idempotence/absorption.
+- `cargo test` in `delegate/` covers: identity creation/stability, slot and
+  contacts signing golden vectors, seq monotonicity for both counters, slot and
+  contacts bounds, pinned-webapp acceptance, foreign webapp / `Delegate` /
+  missing-origin rejection, malformed delegate parameters failing closed,
+  `status` without seed creation, export/import round-trip preserving identity
+  and all counters, and import refusing to overwrite an existing seed.
 - `make check-artifacts` rebuilds both WASMs reproducibly and byte-compares
   them to `published/`; `migrations.test.ts` proves every superseded generation
-  in `published/manifest.json` is still in the migration registry.
+  in `published/manifest.json` is still in a migration registry, and that a
+  v1 hash is never listed as migratable into v2.
 - `make verify-merge`: the generated bundle carries states, deltas, summaries
-  and transitions; 0 violations, 0 inconclusive, and each of the 14 laws
-  generates at least one case.
+  and transitions, including a contacts change; 0 violations, 0 inconclusive,
+  and each of the 14 laws generates at least one case.
 - `npm run build` in `ui/`, then the in-repo Playwright offline spec
   (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:
-  mount, one save, axe, clean console, and a full-i64 value that displays and
-  reopens with the exact digits and fails closed one past the bound.
-- Full i64 on a real node: save `i64::MIN`, `i64::MAX` and `±(2^53+1)` through
-  the UI, reload, and confirm the contract returns the exact digits (the
-  delegate signature and `validate_state` accept them). No re-key: the wire
-  format was already i64.
+  mount, add a contact, save a decimal, axe, clean console, a blank value that
+  displays `0.00`, more than two decimals rejected, and the full i64-cents
+  range displaying and reopening exactly one past the bound.
+- Real node: add a contact, save a two-decimal value, reload, and confirm the
+  contact label and exact hundredths survive; add a second contact and confirm
+  the address book replicates; clear a contact and confirm old slots show an
+  unknown id rather than becoming invalid.
 - Gateway spec (`ui/e2e/gateway.spec.ts`) with `FREENET_BASE_URL` pointing at a
   `/v1/contract/web/<id>/` URL: shell bridge, sandboxed iframe, identity and
   board mount, no fatal console/network errors.
@@ -347,10 +455,12 @@ Contract and delegate are excluded from any workspace (see build-system →
 - Local node: publish delegate + contract, PUT/UPDATE via the UI, reload and
   confirm persistence; tombstone a slot and confirm it does not resurrect.
 - Migration: publish a successor delegate, confirm the UI exports the
-  predecessor seed and imports it before identity creation (same owner key and
-  board); change the contract WASM with the outgoing hash in
-  `LEGACY_CONTRACT_CODE_HASHES`, confirm the new instance receives the old
-  signed state.
+  predecessor seed and imports it before identity creation (same owner key);
+  for a normal, schema-compatible contract change, list the outgoing hash in
+  `LEGACY_CONTRACT_CODE_HASHES` and confirm the new instance receives the old
+  signed state. For v2, confirm the UI does **not** probe the v1 hashes in
+  `UNMIGRATABLE_CONTRACT_CODE_HASHES` and starts the same owner with an empty
+  v2 board.
 
 ## 11. Verified behaviours (local-node findings)
 
@@ -394,6 +504,11 @@ These are not design preferences; each was observed against `freenet` 0.2.150
   `__WEBAPP_CONTRACT_ID_BYTES__` on every delegate request.
 - **Migration was exercised locally.** A successor delegate exported a
   predecessor's seed and imported it before identity creation, preserving the
-  owner key, board contract key, and slot value. A contract WASM change with
-  the outgoing hash in `LEGACY_CONTRACT_CODE_HASHES` re-PUT the old signed
-  state into the new instance; the owner identity and slot value survived.
+  owner key and slot value. A schema-compatible contract WASM change with the
+  outgoing hash in `LEGACY_CONTRACT_CODE_HASHES` re-PUT the old signed state
+  into the new instance; the owner identity and slot value survived.
+- **v2 is a deliberate board break.** The address book changed the state
+  schema and signing bytes, so v1 boards are not carried forward. The delegate
+  seed is migrated (same owner public key), which is what keeps the account and
+  a future migration anchor intact. Do not add a v1 hash to the migratable list
+  to "preserve" a board: `validate_state` would reject the PUT.

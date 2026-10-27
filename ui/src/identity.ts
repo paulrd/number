@@ -27,6 +27,12 @@ export interface IdentityBackup {
   seed: string;
   /** Per-slot next sequence values, 8 entries, each >= 1. */
   nextSeq: number[];
+  /**
+   * Next sequence value for the signed contacts record, >= 1. Optional so v1
+   * backups (written before the address book existed) still decode; missing
+   * means 1.
+   */
+  contactsNextSeq?: number;
   /** Owner public key for human comparison; not verified at decode time. */
   pubkey?: string;
   /** ISO timestamp, informational. */
@@ -36,6 +42,8 @@ export interface IdentityBackup {
 export interface DecodedIdentityBackup {
   seed: string;
   nextSeq: number[];
+  /** Defaults to 1 for a v1 backup that has no contacts counter. */
+  contactsNextSeq: number;
   pubkey?: string;
 }
 
@@ -56,6 +64,7 @@ export function encodeIdentityBackup(
     kind: IDENTITY_BACKUP_KIND,
     seed: secrets.seed.toLowerCase(),
     nextSeq: [...secrets.nextSeq],
+    contactsNextSeq: secrets.contactsNextSeq,
     ...(pubkey ? { pubkey: pubkey.toLowerCase() } : {}),
     createdAt: now.toISOString(),
   };
@@ -113,6 +122,20 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     );
   }
 
+  let contactsNextSeq = 1;
+  if (record.contactsNextSeq !== undefined) {
+    if (
+      typeof record.contactsNextSeq !== "number" ||
+      !Number.isSafeInteger(record.contactsNextSeq) ||
+      record.contactsNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup contacts sequence must be a positive integer.",
+      );
+    }
+    contactsNextSeq = record.contactsNextSeq;
+  }
+
   let pubkey: string | undefined;
   if (record.pubkey !== undefined) {
     if (
@@ -129,6 +152,7 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
   return {
     seed: record.seed.toLowerCase(),
     nextSeq: nextSeq as number[],
+    contactsNextSeq,
     ...(pubkey ? { pubkey } : {}),
   };
 }

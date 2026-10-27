@@ -1,12 +1,12 @@
 /**
  * Contract state, delta, and summary codecs plus the client-side merge.
  *
- * These shapes are the wire format in DESIGN.md §2–§5. The browser cannot run
- * Ed25519 verification here, but it can enforce every structural and bounds
- * rule, build the canonical signing bytes (for summaries and optimistic
- * digests), and merge with exactly the same max-over-seq/signature rule as the
- * contract. The contract remains the authority; a bad local merge is corrected
- * by the next GET/notification.
+ * These shapes are the v2 wire format in DESIGN.md §2–§5 and
+ * `number-v2-spec.md` §2. The browser cannot run Ed25519 verification here, but
+ * it can enforce every structural and bounds rule, build the canonical signing
+ * bytes (for summaries and optimistic digests), and merge with exactly the same
+ * max-over-seq/signature rule as the contract. The contract remains the
+ * authority; a bad local merge is corrected by the next GET/notification.
  */
 
 import { blake3 } from "@noble/hashes/blake3";
@@ -16,27 +16,49 @@ import {
   parse as parseJsonLossless,
   stringify as stringifyJsonLossless,
 } from "lossless-json";
-import { bytesToHex, isLowerHex, utf8Length } from "./util";
+import { bytesToHex, hexToBytes, isLowerHex, utf8Length } from "./util";
 
 export const SLOT_COUNT = 8;
-export const STATE_VERSION = 1 as const;
+export const MAX_CONTACTS = 64;
+export const STATE_VERSION = 2 as const;
 
 export const LIMITS = {
+  /** Contact label limit, in UTF-8 bytes. */
   label: 64,
   unit: 16,
   note: 512,
 } as const;
 
+export const USER_ID_HEX_LEN = 64;
+
+export const SIGNING_DOMAIN_SLOT = "number:v2:slot";
+export const SIGNING_DOMAIN_CONTACTS = "number:v2:contacts";
+
 export const I64_MIN = -(2n ** 63n);
 export const I64_MAX = 2n ** 63n - 1n;
 
+/** The human-readable cent range for error messages. */
+export const CENTS_RANGE = "-92233720368547758.08";
+export const CENTS_MAX = "92233720368547758.07";
+
+export interface Contact {
+  label: string;
+  /** 32-byte Ed25519 public key as 64 lowercase hex characters. */
+  userId: string;
+}
+
+export interface ContactsRecord {
+  seq: number;
+  entries: Contact[];
+  sig: string | null;
+}
+
 export interface Entry {
-  /**
-   * Exact signed 64-bit value. A JS `number` cannot hold the full range, so
-   * the wire JSON is parsed losslessly and this is always a `bigint`.
-   */
+  /** Exact signed 64-bit count of hundredths. A JS `number` cannot hold the
+   * full range, so the wire JSON is parsed losslessly and this is a bigint. */
   value: bigint;
-  label: string | null;
+  /** The owner's contact id; mandatory, 64 lowercase hex characters. */
+  contact: string;
   unit: string | null;
   note: string | null;
 }
@@ -47,8 +69,9 @@ export interface Slot {
   sig: string | null;
 }
 
-export interface StateV1 {
-  v: 1;
+export interface StateV2 {
+  v: 2;
+  contacts: ContactsRecord;
   slots: Slot[];
 }
 
@@ -60,14 +83,17 @@ export interface DeltaSlot {
 }
 
 export interface Delta {
-  v: 1;
+  v: 2;
+  /** `null` when the contacts record is unchanged. */
+  contacts: ContactsRecord | null;
   slots: DeltaSlot[];
 }
 
 export type SummarySlot = [seq: number, digest16: string];
 
 export interface Summary {
-  v: 1;
+  v: 2;
+  contacts: SummarySlot;
   slots: SummarySlot[];
 }
 
@@ -79,7 +105,8 @@ export class StateError extends Error {
 }
 
 const textEncoder = new TextEncoder();
-const SIGNING_PREFIX = textEncoder.encode("number:v1:slot");
+const SLOT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_SLOT);
+const CONTACTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_CONTACTS);
 const ZERO_DIGEST16 = "0".repeat(32);
 
 function fail(path: string, message: string): never {
@@ -150,12 +177,99 @@ function validateOptionalText(
   return value;
 }
 
+function validateSignature(value: unknown, path: string): string {
+  if (typeof value !== "string" || !isLowerHex(value, 128)) {
+    fail(path, "expected 128 lowercase hex characters");
+  }
+  return value;
+}
+
+function validateUserId(value: unknown, path: string): string {
+  if (typeof value !== "string" || !isLowerHex(value, USER_ID_HEX_LEN)) {
+    fail(path, `expected ${USER_ID_HEX_LEN} lowercase hex characters (a userId)`);
+  }
+  return value;
+}
+
+/** Validate/normalise one contact. Labels are not trimmed here. */
+export function validateContact(raw: unknown, path = "contact"): Contact {
+  const obj = asRecord(raw, path);
+  const label = obj.label;
+  if (typeof label !== "string") fail(`${path}.label`, "expected a string");
+  if (label.length === 0) fail(`${path}.label`, "must not be empty");
+  const length = utf8Length(label);
+  if (length > LIMITS.label) {
+    fail(
+      `${path}.label`,
+      `UTF-8 length ${length} exceeds the ${LIMITS.label}-byte limit`,
+    );
+  }
+  return {
+    label,
+    userId: validateUserId(obj.userId, `${path}.userId`),
+  };
+}
+
+/**
+ * Validate a contact list: at most MAX_CONTACTS entries, no duplicate userId
+ * and no duplicate exact label. Order is significant and preserved.
+ */
+export function validateContactList(
+  raw: unknown,
+  path = "contacts.entries",
+): Contact[] {
+  if (!Array.isArray(raw)) fail(path, "expected an array");
+  if (raw.length > MAX_CONTACTS) {
+    fail(path, `expected at most ${MAX_CONTACTS} contacts`);
+  }
+  const entries = raw.map((value, index) => validateContact(value, `${path}[${index}]`));
+  const userIds = new Set<string>();
+  const labels = new Set<string>();
+  for (const [index, contact] of entries.entries()) {
+    if (userIds.has(contact.userId)) {
+      fail(`${path}[${index}].userId`, `duplicate userId ${contact.userId}`);
+    }
+    userIds.add(contact.userId);
+    if (labels.has(contact.label)) {
+      fail(`${path}[${index}].label`, `duplicate label ${JSON.stringify(contact.label)}`);
+    }
+    labels.add(contact.label);
+  }
+  return entries;
+}
+
+/** Validate/normalise the signed contacts record. */
+export function validateContacts(raw: unknown, path = "contacts"): ContactsRecord {
+  const obj = asRecord(raw, path);
+  const seq = validateSeq(obj.seq, `${path}.seq`);
+  const entries = validateContactList(obj.entries ?? [], `${path}.entries`);
+
+  let sig: string | null = null;
+  if (obj.sig !== undefined && obj.sig !== null) {
+    sig = validateSignature(obj.sig, `${path}.sig`);
+  }
+
+  if (seq === 0) {
+    if (entries.length > 0) {
+      fail(path, "seq 0 must have no contacts");
+    }
+    if (sig !== null) {
+      fail(path, "seq 0 must have a null signature");
+    }
+  } else if (sig === null) {
+    fail(path, "seq > 0 requires a signature");
+  }
+
+  return { seq, entries, sig };
+}
+
 /** Validate/normalise one entry. Optional strings become null, never "". */
 export function validateEntry(raw: unknown, path = "entry"): Entry {
   const obj = asRecord(raw, path);
   return {
-    value: validateValue(obj.value, `${path}.value`),
-    label: validateOptionalText(obj.label, `${path}.label`, LIMITS.label),
+    // `value` is optional on the wire; absent means zero.
+    value: validateValue(obj.value === undefined ? 0 : obj.value, `${path}.value`),
+    contact: validateUserId(obj.contact, `${path}.contact`),
     unit: validateOptionalText(obj.unit, `${path}.unit`, LIMITS.unit),
     note: validateOptionalText(obj.note, `${path}.note`, LIMITS.note),
   };
@@ -181,10 +295,7 @@ export function validateSlot(raw: unknown, index: number, path = `slots[${index}
 
   let sig: string | null = null;
   if (sigRaw !== null) {
-    if (typeof sigRaw !== "string" || !isLowerHex(sigRaw, 128)) {
-      fail(`${path}.sig`, "expected 128 lowercase hex characters");
-    }
-    sig = sigRaw;
+    sig = validateSignature(sigRaw, `${path}.sig`);
   }
   if (seq > 0 && sig === null) {
     fail(path, "seq > 0 requires a signature");
@@ -193,21 +304,29 @@ export function validateSlot(raw: unknown, index: number, path = `slots[${index}
   return { seq, entry, sig };
 }
 
-export function validateState(raw: unknown): StateV1 {
+export function validateState(raw: unknown): StateV2 {
   const obj = asRecord(raw, "state");
-  if (obj.v !== STATE_VERSION) fail("state.v", "expected 1");
+  if (obj.v !== STATE_VERSION) fail("state.v", "expected 2");
+  const contacts = validateContacts(obj.contacts, "state.contacts");
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("state.slots", `expected exactly ${SLOT_COUNT} slots`);
   }
   return {
     v: STATE_VERSION,
+    contacts,
     slots: obj.slots.map((slot, index) => validateSlot(slot, index)),
   };
 }
 
 export function validateDelta(raw: unknown): Delta {
   const obj = asRecord(raw, "delta");
-  if (obj.v !== STATE_VERSION) fail("delta.v", "expected 1");
+  if (obj.v !== STATE_VERSION) fail("delta.v", "expected 2");
+
+  const contacts =
+    obj.contacts === undefined || obj.contacts === null
+      ? null
+      : validateContacts(obj.contacts, "delta.contacts");
+
   if (!Array.isArray(obj.slots)) fail("delta.slots", "expected an array");
 
   const seen = new Set<number>();
@@ -229,28 +348,35 @@ export function validateDelta(raw: unknown): Delta {
     return { i, ...validated };
   });
 
-  return { v: STATE_VERSION, slots };
+  return { v: STATE_VERSION, contacts, slots };
+}
+
+function validateSummaryPair(raw: unknown, path: string): SummarySlot {
+  if (!Array.isArray(raw) || raw.length !== 2) {
+    fail(path, "expected [seq, digest16]");
+  }
+  const seq = validateSeq(raw[0], `${path}[0]`);
+  const digest = raw[1];
+  if (typeof digest !== "string" || !isLowerHex(digest, 32)) {
+    fail(`${path}[1]`, "expected 32 lowercase hex characters");
+  }
+  return [seq, digest];
 }
 
 export function validateSummary(raw: unknown): Summary {
   const obj = asRecord(raw, "summary");
-  if (obj.v !== STATE_VERSION) fail("summary.v", "expected 1");
+  if (obj.v !== STATE_VERSION) fail("summary.v", "expected 2");
+  const contacts = validateSummaryPair(obj.contacts, "summary.contacts");
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("summary.slots", `expected exactly ${SLOT_COUNT} pairs`);
   }
-  const slots = obj.slots.map((pair, index): SummarySlot => {
-    const path = `summary.slots[${index}]`;
-    if (!Array.isArray(pair) || pair.length !== 2) {
-      fail(path, "expected [seq, digest16]");
-    }
-    const seq = validateSeq(pair[0], `${path}[0]`);
-    const digest = pair[1];
-    if (typeof digest !== "string" || !isLowerHex(digest, 32)) {
-      fail(`${path}[1]`, "expected 32 lowercase hex characters");
-    }
-    return [seq, digest];
-  });
-  return { v: STATE_VERSION, slots };
+  return {
+    v: STATE_VERSION,
+    contacts,
+    slots: obj.slots.map((pair, index) =>
+      validateSummaryPair(pair, `summary.slots[${index}]`),
+    ),
+  };
 }
 
 /**
@@ -285,7 +411,7 @@ function parseJson(input: Uint8Array | string, label: string): unknown {
   }
 }
 
-export function decodeState(input: Uint8Array | string): StateV1 {
+export function decodeState(input: Uint8Array | string): StateV2 {
   return validateState(parseJson(input, "state"));
 }
 
@@ -297,7 +423,7 @@ function encodeJson(value: unknown): Uint8Array {
   return textEncoder.encode(stringifyJsonLossless(value));
 }
 
-export function encodeState(state: StateV1): Uint8Array {
+export function encodeState(state: StateV2): Uint8Array {
   return encodeJson(validateState(state));
 }
 
@@ -317,13 +443,18 @@ export function encodeSummary(summary: Summary): Uint8Array {
   return encodeJson(validateSummary(summary));
 }
 
+export function emptyContacts(): ContactsRecord {
+  return { seq: 0, entries: [], sig: null };
+}
+
 export function emptySlot(): Slot {
   return { seq: 0, entry: null, sig: null };
 }
 
-export function emptyState(): StateV1 {
+export function emptyState(): StateV2 {
   return {
     v: STATE_VERSION,
+    contacts: emptyContacts(),
     slots: Array.from({ length: SLOT_COUNT }, emptySlot),
   };
 }
@@ -336,13 +467,25 @@ export function cloneSlot(slot: Slot): Slot {
   return { seq: slot.seq, entry: cloneEntry(slot.entry), sig: slot.sig };
 }
 
-export function cloneState(state: StateV1): StateV1 {
-  return { v: STATE_VERSION, slots: state.slots.map(cloneSlot) };
+export function cloneContacts(record: ContactsRecord): ContactsRecord {
+  return {
+    seq: record.seq,
+    entries: record.entries.map((entry) => ({ ...entry })),
+    sig: record.sig,
+  };
+}
+
+export function cloneState(state: StateV2): StateV2 {
+  return {
+    v: STATE_VERSION,
+    contacts: cloneContacts(state.contacts),
+    slots: state.slots.map(cloneSlot),
+  };
 }
 
 /**
- * Canonical signing bytes from DESIGN §2. Kept byte-for-byte in sync with the
- * contract and delegate; used by the client only to compute summary digests
+ * Canonical slot signing bytes from spec §2.3. Kept byte-for-byte in sync with
+ * the contract and delegate; used by the client only to compute summary digests
  * and to display/reconcile what was signed.
  */
 export function signingBytes(
@@ -359,28 +502,29 @@ export function signingBytes(
     throw new StateError("seq 0 must have a null entry");
   }
 
-  const label = validatedEntry?.label ?? "";
-  const unit = validatedEntry?.unit ?? "";
-  const note = validatedEntry?.note ?? "";
-  const labelBytes = textEncoder.encode(label);
-  const unitBytes = textEncoder.encode(unit);
-  const noteBytes = textEncoder.encode(note);
+  const contact = validatedEntry?.contact ?? "";
+  const contactBytes = contact === "" ? new Uint8Array(0) : hexToBytes(contact);
+  const unitBytes = textEncoder.encode(validatedEntry?.unit ?? "");
+  const noteBytes = textEncoder.encode(validatedEntry?.note ?? "");
 
   const length =
-    SIGNING_PREFIX.length +
+    SLOT_PREFIX.length +
     1 + // slot index
     8 + // seq u64 LE
     1 + // entry tag
     (validatedEntry === null
       ? 0
-      : 8 + 4 + labelBytes.length + 4 + unitBytes.length + 4 + noteBytes.length);
+      : 8 + // value i64 LE
+        contactBytes.length +
+        4 + unitBytes.length +
+        4 + noteBytes.length);
 
   const out = new Uint8Array(length);
   const view = new DataView(out.buffer);
   let offset = 0;
 
-  out.set(SIGNING_PREFIX, offset);
-  offset += SIGNING_PREFIX.length;
+  out.set(SLOT_PREFIX, offset);
+  offset += SLOT_PREFIX.length;
 
   out[offset] = slotIndex;
   offset += 1;
@@ -395,12 +539,54 @@ export function signingBytes(
     view.setBigInt64(offset, validatedEntry.value, true);
     offset += 8;
 
-    for (const bytes of [labelBytes, unitBytes, noteBytes]) {
+    out.set(contactBytes, offset);
+    offset += contactBytes.length;
+
+    for (const bytes of [unitBytes, noteBytes]) {
       view.setUint32(offset, bytes.length, true);
       offset += 4;
       out.set(bytes, offset);
       offset += bytes.length;
     }
+  }
+
+  return out;
+}
+
+/** Canonical contacts signing bytes from spec §2.4. */
+export function contactsSigningBytes(
+  seq: number,
+  entries: Contact[],
+): Uint8Array {
+  const validatedSeq = validateSeq(seq, "seq");
+  const validatedEntries = validateContactList(entries);
+
+  let length = CONTACTS_PREFIX.length + 8 + 4;
+  for (const entry of validatedEntries) {
+    length += 4 + textEncoder.encode(entry.label).length + 32;
+  }
+
+  const out = new Uint8Array(length);
+  const view = new DataView(out.buffer);
+  let offset = 0;
+
+  out.set(CONTACTS_PREFIX, offset);
+  offset += CONTACTS_PREFIX.length;
+
+  view.setBigUint64(offset, BigInt(validatedSeq), true);
+  offset += 8;
+
+  view.setUint32(offset, validatedEntries.length, true);
+  offset += 4;
+
+  for (const entry of validatedEntries) {
+    const labelBytes = textEncoder.encode(entry.label);
+    view.setUint32(offset, labelBytes.length, true);
+    offset += 4;
+    out.set(labelBytes, offset);
+    offset += labelBytes.length;
+    out.set(hexToBytes(entry.userId), offset);
+    offset += 32;
   }
 
   return out;
@@ -412,10 +598,18 @@ export function slotDigest16(index: number, slot: Slot): string {
   return bytesToHex(blake3(signingBytes(index, slot.seq, slot.entry)).slice(0, 16));
 }
 
-export function summaryFromState(state: StateV1): Summary {
+export function contactsDigest16(record: ContactsRecord): string {
+  if (record.seq === 0) return ZERO_DIGEST16;
+  return bytesToHex(
+    blake3(contactsSigningBytes(record.seq, record.entries)).slice(0, 16),
+  );
+}
+
+export function summaryFromState(state: StateV2): Summary {
   const validated = validateState(state);
   return {
     v: STATE_VERSION,
+    contacts: [validated.contacts.seq, contactsDigest16(validated.contacts)],
     slots: validated.slots.map((slot, index) => [
       slot.seq,
       slotDigest16(index, slot),
@@ -423,12 +617,24 @@ export function summaryFromState(state: StateV1): Summary {
   };
 }
 
+function needsContacts(
+  ours: ContactsRecord,
+  theirs: ContactsRecord,
+): boolean {
+  return (
+    ours.seq > theirs.seq ||
+    (ours.seq === theirs.seq &&
+      contactsDigest16(ours) !== contactsDigest16(theirs))
+  );
+}
+
 /**
- * Delta the contract would produce for `theirs` (DESIGN §4): include a slot iff
- * ours is strictly newer, or same seq with a different canonical digest. When
- * the states are converged this returns a literally empty slot list.
+ * Delta the contract would produce for `theirs` (spec §2.7): include contacts
+ * when ours is newer or diverged at equal seq; include a slot iff ours is
+ * strictly newer, or same seq with a different canonical digest. When the
+ * states are converged this returns a literally empty delta.
  */
-export function computeDelta(ours: StateV1, theirs: StateV1): Delta {
+export function computeDelta(ours: StateV2, theirs: StateV2): Delta {
   const mine = validateState(ours);
   const other = validateState(theirs);
   const slots: DeltaSlot[] = [];
@@ -444,7 +650,13 @@ export function computeDelta(ours: StateV1, theirs: StateV1): Delta {
     }
   }
 
-  return { v: STATE_VERSION, slots };
+  return {
+    v: STATE_VERSION,
+    contacts: needsContacts(mine.contacts, other.contacts)
+      ? cloneContacts(mine.contacts)
+      : null,
+    slots,
+  };
 }
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
@@ -473,9 +685,40 @@ function compareSignatures(a: string | null, b: string | null): number {
 function canonicalEntry(entry: Entry | null): string {
   if (entry === null) return "null";
   return (
-    stringifyJsonLossless([entry.value, entry.label, entry.unit, entry.note]) ??
+    stringifyJsonLossless([entry.value, entry.contact, entry.unit, entry.note]) ??
     "null"
   );
+}
+
+function canonicalContacts(record: ContactsRecord): string {
+  return (
+    stringifyJsonLossless([
+      record.seq,
+      record.entries.map((entry) => [entry.label, entry.userId]),
+    ]) ?? "null"
+  );
+}
+
+/**
+ * Merge the contacts record: higher seq wins, then lexicographically greater
+ * signature bytes. Equal seq + sig means the same record for all valid inputs.
+ */
+export function mergeContacts(
+  a: ContactsRecord,
+  b: ContactsRecord,
+): ContactsRecord {
+  const left = validateContacts(a);
+  const right = validateContacts(b);
+  if (left.seq !== right.seq) {
+    return cloneContacts(left.seq > right.seq ? left : right);
+  }
+  const sigOrder = compareSignatures(left.sig, right.sig);
+  if (sigOrder !== 0) return cloneContacts(sigOrder > 0 ? left : right);
+
+  const aCanonical = canonicalContacts(left);
+  const bCanonical = canonicalContacts(right);
+  if (aCanonical === bCanonical) return cloneContacts(left);
+  return cloneContacts(aCanonical > bCanonical ? left : right);
 }
 
 /** Merge one slot: higher seq wins, then lexicographically greater sig bytes. */
@@ -492,17 +735,18 @@ export function mergeSlot(a: Slot, b: Slot): Slot {
   return cloneSlot(aEntry > bEntry ? a : b);
 }
 
-export function mergeStates(a: StateV1, b: StateV1): StateV1 {
+export function mergeStates(a: StateV2, b: StateV2): StateV2 {
   const left = validateState(a);
   const right = validateState(b);
   return {
     v: STATE_VERSION,
+    contacts: mergeContacts(left.contacts, right.contacts),
     slots: left.slots.map((slot, index) => mergeSlot(slot, right.slots[index])),
   };
 }
 
-/** Apply a delta slot-wise (DESIGN §5). Incoming slots may lose the merge. */
-export function mergeDelta(state: StateV1, delta: Delta): StateV1 {
+/** Apply a delta slot-wise (spec §3). Incoming records may lose the merge. */
+export function mergeDelta(state: StateV2, delta: Delta): StateV2 {
   const base = validateState(state);
   const incoming = validateDelta(delta);
   const slots = base.slots.map(cloneSlot);
@@ -513,7 +757,14 @@ export function mergeDelta(state: StateV1, delta: Delta): StateV1 {
       sig: deltaSlot.sig,
     });
   }
-  return { v: STATE_VERSION, slots };
+  return {
+    v: STATE_VERSION,
+    contacts:
+      incoming.contacts === null
+        ? cloneContacts(base.contacts)
+        : mergeContacts(base.contacts, incoming.contacts),
+    slots,
+  };
 }
 
 /**
@@ -522,7 +773,7 @@ export function mergeDelta(state: StateV1, delta: Delta): StateV1 {
  * The full i64 range is supported exactly (lossless JSON), so there is nothing
  * left to warn about here. Kept as the single place for future advisories.
  */
-export function stateWarnings(_state: StateV1): string[] {
+export function stateWarnings(_state: StateV2): string[] {
   return [];
 }
 
@@ -530,4 +781,78 @@ export function stateWarnings(_state: StateV1): string[] {
 export function optionalText(value: string): string | null {
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Build an Entry from raw form strings. The contact userId is trimmed and
+ * lowercased; validateEntry still enforces the hex shape.
+ */
+export function entryFromInputs(
+  value: bigint,
+  contact: string,
+  unit: string,
+  note: string,
+): Entry {
+  return {
+    value,
+    contact: contact.trim().toLowerCase(),
+    unit: optionalText(unit),
+    note: optionalText(note),
+  };
+}
+
+const CENTS_PATTERN = /^([+-]?)(?:(\d+)(?:\.(\d{0,2}))?|\.(\d{1,2}))$/;
+const TOO_MANY_DECIMALS = /^[+-]?\d*\.\d{3,}$/;
+
+const CENTS_FORMAT_MESSAGE =
+  "Enter an amount with at most 2 decimal places, for example 12.50.";
+const CENTS_DECIMALS_MESSAGE = "Amounts can have at most 2 decimal places.";
+const CENTS_RANGE_MESSAGE = `Amount must be between ${CENTS_RANGE} and ${CENTS_MAX}.`;
+
+/**
+ * Parse a decimal amount into an exact i64 count of hundredths.
+ *
+ * Blank means zero. Accepts an optional sign, digits, one decimal point and
+ * 0–2 fractional digits (so `.5` and `12.` are fine). Rejects exponents,
+ * inner spaces, more than 2 decimals and anything non-numeric.
+ */
+export function parseCents(input: string): bigint {
+  if (typeof input !== "string") {
+    throw new StateError(CENTS_FORMAT_MESSAGE);
+  }
+  const text = input.trim();
+  if (text === "") return 0n;
+
+  const match = CENTS_PATTERN.exec(text);
+  if (!match) {
+    throw new StateError(
+      TOO_MANY_DECIMALS.test(text) ? CENTS_DECIMALS_MESSAGE : CENTS_FORMAT_MESSAGE,
+    );
+  }
+
+  const [, sign, wholeRaw, fractionRaw, bareFraction] = match;
+  const whole = wholeRaw ?? "0";
+  const fraction = (fractionRaw ?? bareFraction ?? "").padEnd(2, "0");
+  const magnitude = BigInt(whole) * 100n + BigInt(fraction);
+  const cents = sign === "-" ? -magnitude : magnitude;
+
+  if (cents < I64_MIN || cents > I64_MAX) {
+    throw new StateError(CENTS_RANGE_MESSAGE);
+  }
+  return cents;
+}
+
+/** Format an exact i64 count of hundredths with exactly two decimal places. */
+export function formatCents(cents: bigint): string {
+  if (typeof cents !== "bigint") {
+    throw new StateError("formatCents expects a bigint number of hundredths.");
+  }
+  if (cents < I64_MIN || cents > I64_MAX) {
+    throw new StateError("cents must fit in a signed 64-bit integer");
+  }
+  const negative = cents < 0n;
+  const magnitude = negative ? -cents : cents;
+  const whole = magnitude / 100n;
+  const fraction = magnitude % 100n;
+  return `${negative ? "-" : ""}${whole}.${fraction.toString().padStart(2, "0")}`;
 }

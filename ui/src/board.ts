@@ -24,14 +24,18 @@ import {
 import {
   decodeDelta,
   decodeState,
+  entryFromInputs,
   mergeDelta,
-  optionalText,
+  validateContactList,
   validateEntry,
+  type Contact,
   type Delta,
   type Entry,
-  type StateV1,
+  type StateV2,
 } from "./state";
 import { errorMessage, hexToBytes } from "./util";
+
+export { entryFromInputs };
 
 export type BoardStatus =
   | "starting"
@@ -44,7 +48,7 @@ export type BoardStatus =
 
 export interface BoardCallbacks {
   onStatus: (status: BoardStatus, detail?: string) => void;
-  onState: (state: StateV1) => void;
+  onState: (state: StateV2) => void;
   onIdentity: (identity: DelegateIdentity) => void;
   onContractKey: (keyBase58: string) => void;
   onError: (error: Error) => void;
@@ -79,15 +83,21 @@ export interface BoardBackend {
   readonly mode: "online" | "offline";
   readonly identity: DelegateIdentity | null;
   readonly contractKeyBase58: string | null;
-  readonly currentState: StateV1 | null;
-  start(): Promise<StateV1>;
+  readonly currentState: StateV2 | null;
+  start(): Promise<StateV2>;
   save(slotIndex: number, entry: Entry): Promise<void>;
   clear(slotIndex: number): Promise<void>;
-  retry(): Promise<StateV1>;
+  /** Replace the signed address book with `entries`. */
+  saveContacts(entries: Contact[]): Promise<void>;
+  retry(): Promise<StateV2>;
   /** Export the owner seed and counters for a backup. */
   exportIdentity(): Promise<ExportedSecrets>;
   /** Restore a seed into a delegate that has none (a new device). */
-  importIdentity(seed: string, nextSeq: number[]): Promise<void>;
+  importIdentity(
+    seed: string,
+    nextSeq: number[],
+    contactsNextSeq: number,
+  ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
   close(): void;
@@ -98,14 +108,14 @@ export class OnlineBoard implements BoardBackend {
 
   identity: DelegateIdentity | null = null;
   contractKeyBase58: string | null = null;
-  currentState: StateV1 | null = null;
+  currentState: StateV2 | null = null;
 
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
   private readonly delegateClients: DelegateClient[] = [];
   private migrating = false;
   private started = false;
-  private startPromise: Promise<StateV1> | null = null;
+  private startPromise: Promise<StateV2> | null = null;
   private mutating = false;
 
   constructor(
@@ -126,7 +136,7 @@ export class OnlineBoard implements BoardBackend {
     this.delegateClients.push(this.delegate);
   }
 
-  start(): Promise<StateV1> {
+  start(): Promise<StateV2> {
     if (this.started && this.currentState) return Promise.resolve(this.currentState);
     if (this.startPromise) return this.startPromise;
 
@@ -208,7 +218,11 @@ export class OnlineBoard implements BoardBackend {
         this.delegateClients.push(predecessor);
         try {
           const exported = await predecessor.exportSecrets();
-          await this.delegate.importSecrets(exported.seed, exported.nextSeq);
+          await this.delegate.importSecrets(
+            exported.seed,
+            exported.nextSeq,
+            exported.contactsNextSeq,
+          );
           this.callbacks.onWarning?.(
             "Recovered the owner identity from the previous delegate.",
           );
@@ -226,7 +240,7 @@ export class OnlineBoard implements BoardBackend {
     }
   }
 
-  private async doStart(): Promise<StateV1> {
+  private async doStart(): Promise<StateV2> {
     if (!this.config.contractCodeHash.trim()) {
       throw new ContractBuildError(
         "ContractBuildMissing",
@@ -394,6 +408,69 @@ export class OnlineBoard implements BoardBackend {
     await this.write(slotIndex, null);
   }
 
+  /**
+   * Write the whole address book as one signed contacts record. Same
+   * optimistic/rollback shape as `write`, and the same single-write guard.
+   */
+  async saveContacts(entries: Contact[]): Promise<void> {
+    const normalised = entries.map((entry) => ({
+      label: entry.label.trim(),
+      userId: entry.userId.trim().toLowerCase(),
+    }));
+    const validated = validateContactList(normalised);
+
+    if (!this.started || !this.currentState || !this.identity || !this.contract) {
+      throw new Error("The board is not connected yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    this.mutating = true;
+    const previous = this.currentState;
+    let updateStarted = false;
+
+    try {
+      // Same rule as slots: beat the contract's record and the delegate counter.
+      const seq = Math.max(
+        previous.contacts.seq + 1,
+        this.identity.contactsNextSeq ?? 1,
+      );
+      const sig = await this.delegate.signContacts(seq, validated);
+
+      const delta: Delta = {
+        v: 2,
+        contacts: { seq, entries: validated, sig },
+        slots: [],
+      };
+
+      const optimistic = mergeDelta(previous, delta);
+      this.currentState = optimistic;
+      this.callbacks.onState(optimistic);
+
+      this.identity = { ...this.identity, contactsNextSeq: seq + 1 };
+      this.callbacks.onIdentity(this.identity);
+
+      updateStarted = true;
+      await this.contract.updateDelta(delta);
+
+      try {
+        const fresh = await this.contract.getState();
+        this.currentState = fresh;
+        this.callbacks.onState(fresh);
+      } catch (error) {
+        this.callbacks.onWarning?.(
+          `Saved the address book, but could not refresh the board: ${errorMessage(error)}`,
+        );
+      }
+    } catch (error) {
+      this.currentState = previous;
+      this.callbacks.onState(previous);
+      if (updateStarted) void this.refresh();
+      throw error;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
   /** Ask the delegate for the seed and counters behind this identity. */
   exportIdentity(): Promise<ExportedSecrets> {
     return this.delegate.exportSecrets();
@@ -404,8 +481,12 @@ export class OnlineBoard implements BoardBackend {
    * already exists, so this only succeeds on a fresh device (normally from the
    * first-run prompt, before `identity()` creates anything).
    */
-  async importIdentity(seed: string, nextSeq: number[]): Promise<void> {
-    await this.delegate.importSecrets(seed, nextSeq);
+  async importIdentity(
+    seed: string,
+    nextSeq: number[],
+    contactsNextSeq: number,
+  ): Promise<void> {
+    await this.delegate.importSecrets(seed, nextSeq, contactsNextSeq);
   }
 
   /**
@@ -457,7 +538,8 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.sign(slotIndex, seq, entry);
 
       const delta: Delta = {
-        v: 1,
+        v: 2,
+        contacts: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 
@@ -512,7 +594,7 @@ export class OnlineBoard implements BoardBackend {
     }
   }
 
-  async retry(): Promise<StateV1> {
+  async retry(): Promise<StateV2> {
     this.close();
     return this.start();
   }
@@ -523,19 +605,4 @@ export class OnlineBoard implements BoardBackend {
     this.contract?.close();
     this.contract = null;
   }
-}
-
-/** Typed helper for the UI, which needs optional text normalisation. */
-export function entryFromInputs(
-  value: bigint,
-  label: string,
-  unit: string,
-  note: string,
-): Entry {
-  return {
-    value,
-    label: optionalText(label),
-    unit: optionalText(unit),
-    note: optionalText(note),
-  };
 }

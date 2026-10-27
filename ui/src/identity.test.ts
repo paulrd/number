@@ -16,6 +16,7 @@ function backup(overrides: Record<string, unknown> = {}): string {
     kind: "number-identity",
     seed: SEED,
     nextSeq: NEXT_SEQ,
+    contactsNextSeq: 2,
     pubkey: PUBKEY,
     createdAt: "2026-10-27T00:00:00.000Z",
     ...overrides,
@@ -25,22 +26,36 @@ function backup(overrides: Record<string, unknown> = {}): string {
 describe("identity backup codec", () => {
   it("round-trips seed, counters and public key", () => {
     const text = encodeIdentityBackup(
-      { seed: SEED.toUpperCase(), nextSeq: NEXT_SEQ },
+      { seed: SEED.toUpperCase(), nextSeq: NEXT_SEQ, contactsNextSeq: 3 },
       PUBKEY,
       new Date("2026-10-27T12:00:00.000Z"),
     );
     expect(decodeIdentityBackup(text)).toEqual({
       seed: SEED,
       nextSeq: NEXT_SEQ,
+      contactsNextSeq: 3,
       pubkey: PUBKEY,
     });
-    expect(JSON.parse(text).createdAt).toBe("2026-10-27T12:00:00.000Z");
+    const parsed = JSON.parse(text);
+    expect(parsed.contactsNextSeq).toBe(3);
+    expect(parsed.createdAt).toBe("2026-10-27T12:00:00.000Z");
   });
 
   it("accepts a code without the informational fields", () => {
     expect(
       decodeIdentityBackup(backup({ pubkey: undefined, createdAt: undefined })),
-    ).toEqual({ seed: SEED, nextSeq: NEXT_SEQ });
+    ).toEqual({ seed: SEED, nextSeq: NEXT_SEQ, contactsNextSeq: 2 });
+  });
+
+  it("accepts a v1 backup with no contacts counter and defaults it to 1", () => {
+    const legacy = backup({ contactsNextSeq: undefined });
+    expect(legacy).not.toContain("contactsNextSeq");
+    expect(decodeIdentityBackup(legacy)).toEqual({
+      seed: SEED,
+      nextSeq: NEXT_SEQ,
+      contactsNextSeq: 1,
+      pubkey: PUBKEY,
+    });
   });
 
   it("trims surrounding whitespace from a pasted code", () => {
@@ -78,6 +93,14 @@ describe("identity backup codec", () => {
     ]) {
       expect(() => decodeIdentityBackup(backup({ nextSeq }))).toThrow(
         /sequence list must contain 8 positive integers/,
+      );
+    }
+  });
+
+  it("rejects a malformed contacts counter", () => {
+    for (const contactsNextSeq of [0, -1, 1.5, "2", true]) {
+      expect(() => decodeIdentityBackup(backup({ contactsNextSeq }))).toThrow(
+        /contacts sequence must be a positive integer/,
       );
     }
   });

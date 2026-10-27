@@ -1,5 +1,6 @@
 {
-  "v": 1,
+  "v": 2,
+  "contacts": { "seq": 0, "entries": [], "sig": null },
   "slots": [
     { "seq": 0, "entry": null, "sig": null },
     { "seq": 0, "entry": null, "sig": null },

@@ -32,7 +32,9 @@ import {
   type ClientRequestT as ClientRequestTable,
 } from "@freenetorg/freenet-stdlib/client-request";
 import {
+  validateContactList,
   validateEntry,
+  type Contact,
   type Entry,
 } from "./state";
 import { delay, errorMessage, isLowerHex } from "./util";
@@ -68,6 +70,8 @@ export interface DelegateIdentity {
   pubkey: string;
   /** Per-slot next sequence values, 8 entries, each >= 1. */
   nextSeq: number[];
+  /** Next sequence value for the signed contacts record, >= 1. */
+  contactsNextSeq: number;
 }
 
 export interface DelegateStatus {
@@ -80,6 +84,8 @@ export interface ExportedSecrets {
   /** 32-byte Ed25519 seed as 64 lowercase hex characters. */
   seed: string;
   nextSeq: number[];
+  /** Next sequence value for the signed contacts record, >= 1. */
+  contactsNextSeq: number;
 }
 
 type ResponseRecord = Record<string, unknown>;
@@ -274,6 +280,7 @@ export class DelegateClient {
   async importSecrets(
     seed: string,
     nextSeq: number[],
+    contactsNextSeq = 1,
     timeoutMs = 5_000,
   ): Promise<void> {
     if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
@@ -283,9 +290,15 @@ export class DelegateClient {
       );
     }
     this.validateNextSeq(nextSeq);
+    const validatedContactsNextSeq = this.validateContactsNextSeq(contactsNextSeq);
     await this.request(
       "import",
-      { cmd: "import", seed: seed.toLowerCase(), nextSeq },
+      {
+        cmd: "import",
+        seed: seed.toLowerCase(),
+        nextSeq,
+        contactsNextSeq: validatedContactsNextSeq,
+      },
       timeoutMs,
     );
   }
@@ -312,6 +325,51 @@ export class DelegateClient {
     if (payload.ok !== true) {
       throw classifyDelegateFailure(
         typeof payload.error === "string" ? payload.error : "sign was rejected",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed signature (expected 128 lowercase hex characters).",
+      );
+    }
+    return sig;
+  }
+
+  /**
+   * Sign the address book. The board serialises writes, so this and `sign` are
+   * never in flight together; both reuse the `"sign"` pending kind because the
+   * delegate answers `{ok, sig}` for each.
+   */
+  async signContacts(
+    seq: number,
+    entries: Contact[],
+    timeoutMs = 15_000,
+  ): Promise<string> {
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
+    }
+    let validatedEntries: Contact[];
+    try {
+      validatedEntries = validateContactList(entries);
+    } catch (error) {
+      throw new DelegateError(
+        "Protocol",
+        errorMessage(error),
+      );
+    }
+
+    const payload = await this.request(
+      "sign",
+      { cmd: "signContacts", seq, entries: validatedEntries },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signContacts was rejected",
       );
     }
     const sig = payload.sig;
@@ -483,6 +541,7 @@ export class DelegateClient {
     return {
       pubkey: pubkey.toLowerCase(),
       nextSeq: this.validateNextSeq(payload.nextSeq),
+      contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
     };
   }
 
@@ -523,6 +582,7 @@ export class DelegateClient {
     return {
       seed: seed.toLowerCase(),
       nextSeq: this.validateNextSeq(payload.nextSeq),
+      contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
     };
   }
 
@@ -543,6 +603,29 @@ export class DelegateClient {
       );
     }
     return [...(value as number[])];
+  }
+
+  /**
+   * A v1 predecessor export has no contacts counter; default it to 1 so the
+   * migrated identity can still sign its first address book.
+   */
+  private parseContactsNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validateContactsNextSeq(value);
+  }
+
+  private validateContactsNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "contactsNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
   }
 
   private rejectAll(error: DelegateError): void {
