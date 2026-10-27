@@ -25,6 +25,8 @@ did not change). The local node remains the owner's node.
 | Board contract id | `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk` |
 | Slot 1 | `7` (preserved by the #3 re-key migration) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
+| Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
+| VPS peer | update instructions given; not updated from this environment — check `freenet --version` there |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -368,12 +370,24 @@ make verify-merge
 ## Working tree
 
 Clean. #13's report is committed and filed as freenet-stdlib#140; #14 is in
-`1da4fa3`, #12 in `0658c1c`, #11 in
-`cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`,
-#3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+`1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
+`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
+`ba81747`.
 
 No WASM changed, so `published/` and the re-key are untouched. The local and
 live sites serve the #14 build (delegate bundled). The VPS test seed from #12
 remains; the isolated test nodes were wiped. The only open backlog item is
 #15 (Atlas), which is blocked externally.
+
+Handoff notes:
+- The local node was restarted on 0.2.151 with the same data/config dirs.
+  Pre-update backups (ephemeral, in `/tmp/opencode`):
+  `number-node-backup-0.2.150/` and `freenet-0.2.150/{freenet,fdev}`.
+- The upstream issue is <https://github.com/freenet/freenet-stdlib/issues/140>;
+  the UI workaround (subscribe timeout = unconfirmed, probe-then-PUT) remains
+  until it is fixed.
+- The VPS runs the live site. Updating it is a manual step because this
+  environment has no SSH: use the release installer only if it is a supervised
+  default install, otherwise `FREENET_NO_SERVICE=1` and restart the existing
+  unit/command (see the conversation/handoff notes).
 
