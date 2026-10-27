@@ -7,10 +7,14 @@
     "dev": "vite",
     "dev:offline": "VITE_OFFLINE_MODE=1 vite",
     "build": "tsc && vite build",
-    "build:offline": "VITE_OFFLINE_MODE=1 tsc && VITE_OFFLINE_MODE=1 vite build",
+    "build:offline": "VITE_OFFLINE_MODE=1 tsc && VITE_OFFLINE_MODE=1 vite build --outDir dist-offline",
     "preview": "vite preview",
+    "preview:offline": "vite preview --outDir dist-offline",
     "test": "vitest run",
-    "test:offline": "VITE_OFFLINE_MODE=1 vitest run"
+    "test:offline": "VITE_OFFLINE_MODE=1 vitest run",
+    "test:e2e": "npm run build:offline && playwright test",
+    "test:e2e:offline": "npm run build:offline && playwright test e2e/offline.spec.ts",
+    "test:e2e:gateway": "npm run build:offline && playwright test e2e/gateway.spec.ts"
   },
   "dependencies": {
     "@freenetorg/freenet-stdlib": "^0.4.0",
@@ -18,6 +22,8 @@
     "bs58": "^6.0.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.15.0",
     "flatbuffers": "^25.9.23",
     "typescript": "^5.8.0",

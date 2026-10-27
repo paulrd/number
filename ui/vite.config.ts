@@ -52,6 +52,10 @@ const delegateCodeHashBytes = readJsonArrayOrDefault(
   "delegate_code_hash_bytes.json",
   process.env.DELEGATE_CODE_HASH_BYTES,
 );
+const webappContractIdBytes = readJsonArrayOrDefault(
+  "webapp_contract_id_bytes.json",
+  process.env.WEBAPP_CONTRACT_ID_BYTES,
+);
 
 export default defineConfig({
   // Relative assets: Freenet serves webapps from a nested sandboxed-iframe path.
@@ -60,6 +64,7 @@ export default defineConfig({
     __CONTRACT_CODE_HASH__: JSON.stringify(contractCodeHash),
     __DELEGATE_KEY_BYTES__: delegateKeyBytes,
     __DELEGATE_CODE_HASH_BYTES__: delegateCodeHashBytes,
+    __WEBAPP_CONTRACT_ID_BYTES__: webappContractIdBytes,
     __CONTRACT_WASM_URL__: JSON.stringify(
       process.env.CONTRACT_WASM_URL?.trim() || "./number_contract.wasm",
     ),

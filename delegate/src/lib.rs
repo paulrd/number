@@ -3,7 +3,8 @@
 //! The delegate owns a single Ed25519 key pair. The 32-byte seed and a
 //! per-slot monotonic sequence counter live in the delegate's secret store;
 //! the matching public key is the owner key the `number-contract` instance is
-//! parameterised by.
+//! parameterised by. The delegate itself is parameterised by the web container
+//! contract id it serves, and refuses every other caller.
 //!
 //! All request/response payloads are JSON (UTF-8) inside
 //! [`ApplicationMessage::payload`], exactly as specified in `DESIGN.md` §7.
@@ -23,6 +24,12 @@ pub const SLOT_COUNT: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_UNIT_BYTES: usize = 16;
 pub const MAX_NOTE_BYTES: usize = 512;
+
+/// Length of the webapp contract instance id carried in the delegate params.
+pub const WEBAPP_ID_LEN: usize = 32;
+
+/// Bumped when the delegate protocol changes; reported by `status`/`export`.
+pub const DELEGATE_VERSION: u32 = 3;
 
 /// Secret-store key holding the raw 32-byte Ed25519 seed.
 pub const SECRET_SEED: &[u8] = b"number.v1.seed";
@@ -94,6 +101,19 @@ enum Request {
         #[serde(default)]
         entry: Option<Entry>,
     },
+    /// Report whether this delegate has already created a seed, without
+    /// creating one. The UI uses this before attempting a migration.
+    Status,
+    /// Return the owner seed and per-slot counters for a successor delegate.
+    /// Only the pinned webapp may ask; this is the forward-only migration path.
+    Export,
+    /// Restore an exported seed into a fresh delegate. Refused once a seed
+    /// exists, so a later request cannot overwrite the owner identity.
+    Import {
+        seed: String,
+        #[serde(rename = "nextSeq")]
+        next_seq: Vec<u64>,
+    },
 }
 
 /// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...]}`.
@@ -112,6 +132,36 @@ pub struct SignResponse {
     pub sig: String,
 }
 
+/// `{"ok":true,"hasSeed":false}` before first use, or
+/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...]}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub ok: bool,
+    pub version: u32,
+    #[serde(rename = "hasSeed")]
+    pub has_seed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
+    #[serde(rename = "nextSeq", skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<[u64; SLOT_COUNT]>,
+}
+
+/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...]}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportResponse {
+    pub ok: bool,
+    pub version: u32,
+    pub seed: String,
+    #[serde(rename = "nextSeq")]
+    pub next_seq: [u64; SLOT_COUNT],
+}
+
+/// `{"ok":true}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportResponse {
+    pub ok: bool,
+}
+
 /// `{"ok":false,"error":"..."}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -119,13 +169,16 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// The delegate's JSON response. Untagged because the three shapes are
+/// The delegate's JSON response. Untagged because the shapes are
 /// discriminated by their fields, exactly as shown in `DESIGN.md` §7.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Response {
     Identity(IdentityResponse),
     Sign(SignResponse),
+    Status(StatusResponse),
+    Export(ExportResponse),
+    Import(ImportResponse),
     Error(ErrorResponse),
 }
 
@@ -146,16 +199,27 @@ pub struct NumberDelegate;
 impl DelegateInterface for NumberDelegate {
     fn process(
         ctx: &mut DelegateCtx,
-        _parameters: Parameters<'static>,
+        parameters: Parameters<'static>,
         origin: Option<MessageOrigin>,
         message: InboundDelegateMsg,
     ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+        // The params pin this delegate to one web container contract. Missing
+        // or malformed params fail closed rather than falling back to "any
+        // web app", which would restore the original signing hole.
+        let pinned_webapp = expected_webapp(&parameters).map_err(DelegateError::Other)?;
+
         match message {
             InboundDelegateMsg::ApplicationMessage(message) => {
                 // The single authorization boundary: every application request
                 // goes through `handle_application_message`, which refuses a
-                // non-WebApp origin before dispatching on `cmd`.
-                let payload = handle_application_message(ctx, origin.as_ref(), &message.payload);
+                // caller other than the pinned web app before dispatching on
+                // `cmd`.
+                let payload = handle_application_message(
+                    ctx,
+                    pinned_webapp,
+                    origin.as_ref(),
+                    &message.payload,
+                );
                 Ok(vec![OutboundDelegateMsg::ApplicationMessage(
                     ApplicationMessage::new(payload),
                 )])
@@ -165,17 +229,38 @@ impl DelegateInterface for NumberDelegate {
     }
 }
 
+/// Decode the pinned webapp contract id from the delegate parameters.
+///
+/// The parameters must be exactly the 32 raw bytes of the web container
+/// contract's instance id. Anything else is a configuration error and fails
+/// closed: an unpinned delegate would again sign for any web app.
+pub fn expected_webapp(params: &Parameters<'_>) -> Result<ContractInstanceId, String> {
+    let bytes: [u8; WEBAPP_ID_LEN] = params.as_ref().try_into().map_err(|_| {
+        format!(
+            "delegate parameters must be the {WEBAPP_ID_LEN}-byte webapp contract id, got {} bytes",
+            params.as_ref().len()
+        )
+    })?;
+    Ok(ContractInstanceId::new(bytes))
+}
+
 /// Authorize a caller.
 ///
-/// This delegate custodies a private key, so only an attested web app may use
-/// it. Inter-delegate calls name the calling delegate, not the person, and an
-/// unattested call has no caller at all. New `MessageOrigin` variants fail
-/// closed through the wildcard arm.
-pub fn authorize(origin: Option<&MessageOrigin>) -> Result<(), String> {
+/// This delegate custodies a private key, so only the pinned web container
+/// contract may use it. Inter-delegate calls name the calling delegate, not
+/// the person, and an unattested call has no caller at all. New
+/// `MessageOrigin` variants fail closed through the wildcard arm.
+pub fn authorize(
+    expected_webapp: ContractInstanceId,
+    origin: Option<&MessageOrigin>,
+) -> Result<(), String> {
     match origin {
-        Some(MessageOrigin::WebApp(_)) => Ok(()),
+        Some(MessageOrigin::WebApp(id)) if *id == expected_webapp => Ok(()),
+        Some(MessageOrigin::WebApp(id)) => Err(format!(
+            "refused web app {id}: number-delegate only serves {expected_webapp}"
+        )),
         Some(MessageOrigin::Delegate(caller)) => Err(format!(
-            "refused inter-delegate call from {caller:?}: number-delegate only serves web apps"
+            "refused inter-delegate call from {caller:?}: number-delegate only serves the pinned web app"
         )),
         None => Err("refused unattested call: missing message origin".into()),
         _ => Err("refused unknown message origin: rebuild against a newer freenet-stdlib".into()),
@@ -188,10 +273,11 @@ pub fn authorize(origin: Option<&MessageOrigin>) -> Result<(), String> {
 /// becomes `{"ok":false,...}` rather than an error/panic.
 pub fn handle_application_message(
     store: &mut impl SecretStore,
+    expected_webapp: ContractInstanceId,
     origin: Option<&MessageOrigin>,
     payload: &[u8],
 ) -> Vec<u8> {
-    let response = match authorize(origin) {
+    let response = match authorize(expected_webapp, origin) {
         Ok(()) => handle_request(store, payload),
         Err(error) => Response::error(error),
     };
@@ -222,6 +308,23 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
             Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
             Err(error) => Response::error(error),
         },
+        Request::Status => match status_with(store) {
+            Ok(response) => Response::Status(response),
+            Err(error) => Response::error(error),
+        },
+        Request::Export => match export_with(store) {
+            Ok((seed, next_seq)) => Response::Export(ExportResponse {
+                ok: true,
+                version: DELEGATE_VERSION,
+                seed,
+                next_seq,
+            }),
+            Err(error) => Response::error(error),
+        },
+        Request::Import { seed, next_seq } => match import_with(store, &seed, &next_seq) {
+            Ok(()) => Response::Import(ImportResponse { ok: true }),
+            Err(error) => Response::error(error),
+        },
     }
 }
 
@@ -237,6 +340,110 @@ pub fn identity_with(store: &mut impl SecretStore) -> Result<(String, [u64; SLOT
     }
 
     Ok((pubkey, next_seq))
+}
+
+/// Report whether a seed exists, without creating one.
+///
+/// The UI calls this before `identity` so a fresh delegate can be offered a
+/// predecessor's exported seed first. `identity` would otherwise create a new
+/// seed and make the migration impossible.
+pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
+    let Some(bytes) = store.get_secret(SECRET_SEED) else {
+        return Ok(StatusResponse {
+            ok: true,
+            version: DELEGATE_VERSION,
+            has_seed: false,
+            pubkey: None,
+            next_seq: None,
+        });
+    };
+    let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "stored seed has invalid length {} (expected 32)",
+            bytes.len()
+        )
+    })?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+
+    let mut next_seq = [1u64; SLOT_COUNT];
+    for (slot, value) in next_seq.iter_mut().enumerate() {
+        *value = read_next_seq(store, slot as u8)?;
+    }
+
+    Ok(StatusResponse {
+        ok: true,
+        version: DELEGATE_VERSION,
+        has_seed: true,
+        pubkey: Some(pubkey),
+        next_seq: Some(next_seq),
+    })
+}
+
+/// Export the owner seed and per-slot counters for a successor delegate.
+///
+/// Authorization is the same pinned-webapp gate as every other request. This
+/// is the forward-only migration path: a successor can only recover from a
+/// predecessor whose already-published WASM answers this command.
+pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT]), String> {
+    let Some(bytes) = store.get_secret(SECRET_SEED) else {
+        return Err("refused export: this delegate has no seed yet".into());
+    };
+    let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "stored seed has invalid length {} (expected 32)",
+            bytes.len()
+        )
+    })?;
+
+    let mut next_seq = [1u64; SLOT_COUNT];
+    for (slot, value) in next_seq.iter_mut().enumerate() {
+        *value = read_next_seq(store, slot as u8)?;
+    }
+
+    Ok((hex::encode(seed), next_seq))
+}
+
+/// Restore an exported seed into a fresh delegate.
+///
+/// Refused once a seed exists: a later request must not silently replace the
+/// owner identity. Counters are written first, so a failure to write the seed
+/// leaves no half-initialized identity behind and the import can be retried.
+pub fn import_with(
+    store: &mut impl SecretStore,
+    seed_hex: &str,
+    next_seq: &[u64],
+) -> Result<(), String> {
+    if store.get_secret(SECRET_SEED).is_some() {
+        return Err("refused import: this delegate already has a seed".into());
+    }
+    if next_seq.len() != SLOT_COUNT {
+        return Err(format!(
+            "nextSeq must have {SLOT_COUNT} entries, got {}",
+            next_seq.len()
+        ));
+    }
+    if next_seq.contains(&0) {
+        return Err("nextSeq entries must be greater than 0".into());
+    }
+
+    let seed_bytes =
+        hex::decode(seed_hex).map_err(|error| format!("seed is not valid hex: {error}"))?;
+    let seed: [u8; 32] = seed_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("seed must be 32 bytes, got {}", seed_bytes.len()))?;
+
+    for (slot, value) in next_seq.iter().enumerate() {
+        if !store.set_secret(&next_seq_key(slot as u8), &value.to_le_bytes()) {
+            return Err(format!("failed to persist nextSeq for slot {slot}"));
+        }
+    }
+    if !store.set_secret(SECRET_SEED, &seed) {
+        return Err("failed to persist imported seed".into());
+    }
+
+    Ok(())
 }
 
 /// Validate, sign, then advance the slot's sequence counter.
@@ -398,13 +605,18 @@ mod tests {
         store
     }
 
-    fn webapp_origin() -> MessageOrigin {
-        MessageOrigin::WebApp(ContractInstanceId::new([0x42; 32]))
+    fn expected_webapp_id() -> ContractInstanceId {
+        ContractInstanceId::new([0x42; 32])
+    }
+
+    fn webapp_origin(id: ContractInstanceId) -> MessageOrigin {
+        MessageOrigin::WebApp(id)
     }
 
     fn call(store: &mut MemoryStore, payload: &[u8]) -> Value {
-        let origin = webapp_origin();
-        let bytes = handle_application_message(store, Some(&origin), payload);
+        let expected = expected_webapp_id();
+        let origin = webapp_origin(expected);
+        let bytes = handle_application_message(store, expected, Some(&origin), payload);
         serde_json::from_slice(&bytes).expect("delegate response is valid JSON")
     }
 
@@ -435,6 +647,105 @@ mod tests {
             Some(32),
             "identity must persist a 32-byte seed"
         );
+    }
+
+    #[test]
+    fn status_does_not_create_a_seed() {
+        let mut store = MemoryStore::default();
+        let response = call(&mut store, br#"{"cmd":"status"}"#);
+
+        assert!(is_ok(&response));
+        assert_eq!(response["hasSeed"], false);
+        assert!(store.secrets.is_empty(), "status must not create a seed");
+    }
+
+    #[test]
+    fn export_requires_an_existing_seed() {
+        let mut store = MemoryStore::default();
+        let response = call(&mut store, br#"{"cmd":"export"}"#);
+
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("no seed"));
+        assert!(
+            store.secrets.is_empty(),
+            "a refused export must not create a seed"
+        );
+    }
+
+    #[test]
+    fn export_import_round_trip_preserves_identity_and_next_seq() {
+        let mut old = store_with_seed([7u8; 32]);
+        assert!(old.set_secret(&next_seq_key(3), &9u64.to_le_bytes()));
+
+        let exported = call(&mut old, br#"{"cmd":"export"}"#);
+        assert!(is_ok(&exported), "unexpected export: {exported}");
+        assert_eq!(exported["seed"], "07".repeat(32));
+        assert_eq!(exported["nextSeq"][3], 9);
+
+        let mut new = MemoryStore::default();
+        let payload = format!(
+            r#"{{"cmd":"import","seed":"{}","nextSeq":{}}}"#,
+            exported["seed"].as_str().unwrap(),
+            exported["nextSeq"]
+        );
+        let imported = call(&mut new, payload.as_bytes());
+        assert!(is_ok(&imported), "unexpected import: {imported}");
+
+        let identity = call(&mut new, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["pubkey"], GOLDEN_PUBKEY);
+        assert_eq!(identity["nextSeq"][3], 9);
+    }
+
+    #[test]
+    fn import_refuses_to_replace_an_existing_seed() {
+        let mut store = store_with_seed([7u8; 32]);
+        let payload = format!(
+            r#"{{"cmd":"import","seed":"{}","nextSeq":[1,1,1,1,1,1,1,1]}}"#,
+            "09".repeat(32)
+        );
+        let response = call(&mut store, payload.as_bytes());
+
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("already has a seed"));
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["pubkey"], GOLDEN_PUBKEY);
+    }
+
+    #[test]
+    fn import_validates_the_seed_and_next_seq() {
+        let cases = [
+            (
+                r#"{"cmd":"import","seed":"zz","nextSeq":[1,1,1,1,1,1,1,1]}"#,
+                "hex",
+            ),
+            (
+                r#"{"cmd":"import","seed":"00","nextSeq":[1,1,1,1,1,1,1,1]}"#,
+                "32 bytes",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1]}"#,
+                "8 entries",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,0,1,1,1,1]}"#,
+                "greater than 0",
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            let mut store = MemoryStore::default();
+            let response = call(&mut store, payload.as_bytes());
+            assert!(!is_ok(&response), "payload must be rejected: {payload}");
+            assert!(
+                error_text(&response).contains(expected),
+                "error for {payload} did not contain {expected}: {response}"
+            );
+            assert!(
+                store.secrets.is_empty(),
+                "a rejected import must not write any secrets"
+            );
+        }
     }
 
     #[test]
@@ -582,14 +893,20 @@ mod tests {
     }
 
     #[test]
-    fn non_webapp_origins_are_refused_without_touching_secrets() {
+    fn unpinned_origins_are_refused_without_touching_secrets() {
         let payload = br#"{"cmd":"identity"}"#;
+        let expected = expected_webapp_id();
         let delegate =
             MessageOrigin::Delegate(DelegateKey::new([9u8; 32], CodeHash::new([8u8; 32])));
+        let foreign_webapp = MessageOrigin::WebApp(ContractInstanceId::new([0x43; 32]));
 
-        for (label, origin) in [("missing", None), ("delegate", Some(&delegate))] {
+        for (label, origin) in [
+            ("missing", None),
+            ("delegate", Some(&delegate)),
+            ("foreign webapp", Some(&foreign_webapp)),
+        ] {
             let mut store = MemoryStore::default();
-            let bytes = handle_application_message(&mut store, origin, payload);
+            let bytes = handle_application_message(&mut store, expected, origin, payload);
             let response: Value = serde_json::from_slice(&bytes).unwrap();
 
             assert!(!is_ok(&response), "{label} origin must be refused");
@@ -601,10 +918,27 @@ mod tests {
         }
 
         let mut store = MemoryStore::default();
-        let origin = webapp_origin();
-        let bytes = handle_application_message(&mut store, Some(&origin), payload);
+        let origin = webapp_origin(expected);
+        let bytes = handle_application_message(&mut store, expected, Some(&origin), payload);
         let response: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(is_ok(&response), "web app origin must be accepted");
+        assert!(is_ok(&response), "pinned web app origin must be accepted");
+    }
+
+    #[test]
+    fn delegate_parameters_must_be_the_pinned_webapp_id() {
+        for length in [0, 31, 33] {
+            let params = Parameters::from(vec![0u8; length]);
+            assert!(
+                expected_webapp(&params).is_err(),
+                "params of {length} bytes must be refused"
+            );
+        }
+
+        let params = Parameters::from(vec![7u8; WEBAPP_ID_LEN]);
+        assert_eq!(
+            expected_webapp(&params).expect("32-byte params are valid"),
+            ContractInstanceId::new([7u8; WEBAPP_ID_LEN])
+        );
     }
 
     #[test]

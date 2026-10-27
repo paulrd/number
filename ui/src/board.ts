@@ -4,12 +4,17 @@
  * the delegate's nextSeq, then let the delegate sign and advance its counter.
  */
 
+import bs58 from "bs58";
 import {
   ContractBuildError,
   NumberContract,
   type ContractUpdate,
   type ConnectionStatus,
 } from "./freenet";
+import {
+  LEGACY_CONTRACT_CODE_HASHES,
+  LEGACY_DELEGATES,
+} from "./migrations";
 import {
   DelegateClient,
   type DelegateIdentity,
@@ -49,6 +54,7 @@ export interface BoardConfig {
   contractWasmUrl: string;
   delegateKeyBytes: number[];
   delegateCodeHashBytes: number[];
+  delegateParamsBytes: number[];
 }
 
 export interface BoardBackend {
@@ -72,6 +78,8 @@ export class OnlineBoard implements BoardBackend {
 
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
+  private readonly delegateClients: DelegateClient[] = [];
+  private migrating = false;
   private started = false;
   private startPromise: Promise<StateV1> | null = null;
   private mutating = false;
@@ -89,7 +97,9 @@ export class OnlineBoard implements BoardBackend {
       },
       config.delegateKeyBytes,
       config.delegateCodeHashBytes,
+      config.delegateParamsBytes,
     );
+    this.delegateClients.push(this.delegate);
   }
 
   start(): Promise<StateV1> {
@@ -100,6 +110,66 @@ export class OnlineBoard implements BoardBackend {
       this.startPromise = null;
     });
     return this.startPromise;
+  }
+
+  /**
+   * Forward-only delegate secret recovery.
+   *
+   * A successor delegate starts with an empty secret store. If the committed
+   * registry has predecessors, ask each one for its exported seed and import
+   * the first answer before `identity()` creates a fresh seed. A predecessor
+   * published before the export handler existed cannot answer; that generation
+   * is unrecoverable and is recorded as such in `migrations.ts`.
+   */
+  private async migrateDelegateSecrets(): Promise<void> {
+    if (LEGACY_DELEGATES.length === 0) return;
+
+    const status = await this.delegate.status().catch(() => null);
+    if (status?.hasSeed) return;
+
+    const currentKey = bs58.encode(new Uint8Array(this.config.delegateKeyBytes));
+    for (const legacy of LEGACY_DELEGATES) {
+      if (legacy.key === currentKey) continue;
+      try {
+        const keyBytes = Array.from(bs58.decode(legacy.key));
+        const codeHashBytes = Array.from(bs58.decode(legacy.codeHash));
+        const paramsBytes = Array.from(bs58.decode(legacy.webappId));
+        if (
+          keyBytes.length !== 32 ||
+          codeHashBytes.length !== 32 ||
+          paramsBytes.length !== 32
+        ) {
+          throw new Error("legacy delegate registry entry is not 32 bytes");
+        }
+
+        const predecessor = new DelegateClient(
+          (request) => {
+            if (!this.contract) throw new Error("Freenet connection is not open");
+            this.contract.sendClientRequest(request);
+          },
+          keyBytes,
+          codeHashBytes,
+          paramsBytes,
+        );
+        this.delegateClients.push(predecessor);
+        try {
+          const exported = await predecessor.exportSecrets();
+          await this.delegate.importSecrets(exported.seed, exported.nextSeq);
+          this.callbacks.onWarning?.(
+            "Recovered the owner identity from the previous delegate.",
+          );
+          return;
+        } finally {
+          const index = this.delegateClients.indexOf(predecessor);
+          if (index !== -1) this.delegateClients.splice(index, 1);
+        }
+      } catch (error) {
+        console.warn(
+          "[migration] delegate predecessor did not answer:",
+          errorMessage(error),
+        );
+      }
+    }
   }
 
   private async doStart(): Promise<StateV1> {
@@ -126,13 +196,27 @@ export class OnlineBoard implements BoardBackend {
               this.callbacks.onState(state);
             },
             onError: (message, cause) => {
-              this.delegate.handleHostError(message);
-              this.callbacks.onError(
-                cause instanceof Error ? cause : new Error(message),
-              );
+              for (const client of this.delegateClients) {
+                client.handleHostError(message);
+              }
+              // A missing predecessor is an expected probe outcome; do not
+              // surface it as a board error. Real failures still surface from
+              // the identity/load step after migration.
+              if (!this.migrating) {
+                this.callbacks.onError(
+                  cause instanceof Error ? cause : new Error(message),
+                );
+              }
             },
             onNotification: (update) => this.handleNotification(update),
-            onDelegateResponse: (response) => this.delegate.handleResponse(response),
+            onDelegateResponse: (response) => {
+              // Broadcast to every client with a pending request. Migration
+              // temporarily has a predecessor client in this list; the main
+              // client ignores a response when it has nothing pending.
+              for (const client of this.delegateClients) {
+                client.handleResponse(response);
+              }
+            },
           },
         );
       } catch (error) {
@@ -144,6 +228,14 @@ export class OnlineBoard implements BoardBackend {
 
       this.callbacks.onStatus("connecting", "opening WebSocket");
       await this.contract.connect();
+
+      this.callbacks.onStatus("identity", "checking for a legacy identity");
+      this.migrating = true;
+      try {
+        await this.migrateDelegateSecrets();
+      } finally {
+        this.migrating = false;
+      }
 
       this.callbacks.onStatus("identity", "asking the delegate for the owner key");
       const identity = await this.delegate.identity();
@@ -158,7 +250,10 @@ export class OnlineBoard implements BoardBackend {
       }
 
       this.callbacks.onStatus("connecting", "loading the board");
-      const state = await this.contract.ensureState(parameters);
+      const state = await this.contract.ensureState(
+        parameters,
+        LEGACY_CONTRACT_CODE_HASHES,
+      );
       this.currentState = state;
 
       const key = this.contract.contractKeyBase58;

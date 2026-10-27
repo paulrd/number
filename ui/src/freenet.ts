@@ -448,8 +448,14 @@ export class NumberContract {
   }
 
   async getState(timeoutMs: number = GET_TIMEOUT_MS): Promise<StateV1> {
+    return this.getStateForKey(this.requireKey(), timeoutMs);
+  }
+
+  private async getStateForKey(
+    key: ContractKey,
+    timeoutMs: number,
+  ): Promise<StateV1> {
     const api = this.requireApi();
-    const key = this.requireKey();
     let signalMissing!: () => void;
     const missing = new Promise<never>((_, reject) => {
       signalMissing = () => reject(new ContractNotFoundError());
@@ -477,7 +483,10 @@ export class NumberContract {
    * `seq: 0`) loses every slot merge, so it is a no-op. The only cost of a
    * spurious PUT is re-sending the WASM.
    */
-  async ensureState(parameters: Uint8Array): Promise<StateV1> {
+  async ensureState(
+    parameters: Uint8Array,
+    legacyContractCodeHashes: readonly string[] = [],
+  ): Promise<StateV1> {
     if (parameters.length !== 32) {
       throw new Error(`contract parameters must be 32 bytes, got ${parameters.length}`);
     }
@@ -491,7 +500,19 @@ export class NumberContract {
     }
 
     if (state === null) {
-      await this.putInitial(parameters);
+      const legacyState = await this.findLegacyState(
+        parameters,
+        legacyContractCodeHashes,
+      );
+      if (legacyState) {
+        // Probe BEFORE writing the new key: PUT old state into the current
+        // contract, whose validate_state re-checks every signature. If the
+        // registry contains an incompatible version, surface the failure
+        // instead of silently creating an empty board.
+        await this.putState(parameters, legacyState);
+      } else {
+        await this.putState(parameters, emptyState());
+      }
       state = await this.readAfterPut();
     }
 
@@ -524,7 +545,27 @@ export class NumberContract {
       : new Error("Timed out reading the contract state after publishing");
   }
 
-  private async putInitial(parameters: Uint8Array): Promise<void> {
+  /** Probe old contract instances for state this version accepts. */
+  private async findLegacyState(
+    parameters: Uint8Array,
+    legacyContractCodeHashes: readonly string[],
+  ): Promise<StateV1 | null> {
+    for (const codeHash of legacyContractCodeHashes) {
+      try {
+        const legacyKey = deriveContractKey(codeHash, parameters);
+        const state = await this.getStateForKey(legacyKey, PROBE_TIMEOUT_MS);
+        return state;
+      } catch {
+        // Not found, unreadable, or a timeout: try the next generation.
+      }
+    }
+    return null;
+  }
+
+  private async putState(
+    parameters: Uint8Array,
+    state: StateV1,
+  ): Promise<void> {
     const api = this.requireApi();
     let wasm: Uint8Array;
     try {
@@ -564,7 +605,7 @@ export class NumberContract {
       wasm,
       this.codeHashBytes,
       parameters,
-      encodeState(emptyState()),
+      encodeState(state),
     );
     await withTimeout(api.put(request), PUT_TIMEOUT_MS, "Timed out publishing the contract");
   }

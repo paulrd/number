@@ -17,6 +17,7 @@ import type { Entry } from "./state";
 
 const KEY_BYTES = Array.from({ length: 32 }, () => 1);
 const CODE_HASH_BYTES = Array.from({ length: 32 }, () => 2);
+const PARAMS_BYTES = Array.from({ length: 32 }, () => 3);
 const SIG = "a".repeat(128);
 
 function response(payload: object): DelegateResponse {
@@ -47,6 +48,7 @@ describe("delegate transport", () => {
       },
       KEY_BYTES,
       CODE_HASH_BYTES,
+      PARAMS_BYTES,
     );
 
     reply = {
@@ -61,6 +63,12 @@ describe("delegate transport", () => {
     });
     expect(sent).toHaveLength(1);
 
+    // The node checks BLAKE3(code hash || params) against the delegate key.
+    const sentRequest = sent[0] as unknown as {
+      clientRequest: { delegateRequest: { params: number[] } };
+    };
+    expect(sentRequest.clientRequest.delegateRequest.params).toEqual(PARAMS_BYTES);
+
     const entry: Entry = {
       value: 12,
       label: "steps",
@@ -70,6 +78,52 @@ describe("delegate transport", () => {
     reply = { ok: true, sig: SIG };
     await expect(client.sign(3, 7, entry)).resolves.toBe(SIG);
     expect(sent).toHaveLength(2);
+  });
+
+  it("handles status, export, and import responses", async () => {
+    let reply: object = {};
+    let client!: DelegateClient;
+    client = new DelegateClient(
+      () => client.handleResponse(response(reply)),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    reply = { ok: true, hasSeed: false };
+    await expect(client.status()).resolves.toEqual({
+      hasSeed: false,
+      identity: null,
+    });
+
+    reply = {
+      ok: true,
+      hasSeed: true,
+      pubkey: "ab".repeat(32),
+      nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
+    };
+    await expect(client.status()).resolves.toEqual({
+      hasSeed: true,
+      identity: {
+        pubkey: "ab".repeat(32),
+        nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
+      },
+    });
+
+    reply = {
+      ok: true,
+      seed: "cd".repeat(32),
+      nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
+    };
+    await expect(client.exportSecrets()).resolves.toEqual({
+      seed: "cd".repeat(32),
+      nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
+    });
+
+    reply = { ok: true };
+    await expect(
+      client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1]),
+    ).resolves.toBeUndefined();
   });
 
   it("extracts only application messages from outbound responses", () => {
@@ -88,6 +142,7 @@ describe("delegate transport", () => {
       },
       KEY_BYTES,
       CODE_HASH_BYTES,
+      PARAMS_BYTES,
     );
 
     const pending = client.identity();
@@ -100,7 +155,7 @@ describe("delegate transport", () => {
   });
 
   it("rejects a missing build configuration before sending", async () => {
-    const client = new DelegateClient(() => {}, [], []);
+    const client = new DelegateClient(() => {}, [], [], []);
     await expect(client.identity()).rejects.toMatchObject({ code: "Config" });
   });
 
@@ -109,6 +164,7 @@ describe("delegate transport", () => {
       () => client.handleResponse(response({ ok: true, sig: "not-a-sig" })),
       KEY_BYTES,
       CODE_HASH_BYTES,
+      PARAMS_BYTES,
     );
     await expect(
       client.sign(0, 1, {

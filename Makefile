@@ -1,11 +1,12 @@
 SHELL := /bin/bash
 FDEV ?= $(HOME)/.local/bin/fdev
 FREENET ?= $(HOME)/.local/bin/freenet
+WS_PORT ?= 7510
 UI := ui
 CONTRACT := contract
 DELEGATE := delegate
 
-.PHONY: all build check test contract delegate ui dev node publish-delegate verify-merge clean
+.PHONY: all build check test contract delegate ui dev node publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -35,9 +36,14 @@ dev:
 node:
 	$(FREENET) local
 
-# Publish the delegate to the node the UI talks to (default port 7509).
-publish-delegate:
-	$(FDEV) publish --code $(DELEGATE)/build/freenet/number-delegate delegate
+# Publish the delegate to the node the UI talks to, pinned to the webapp id in
+# delegate/webapp_contract_id.txt. Re-running this with a changed id/code
+# re-keys the delegate and starts a fresh owner identity (board).
+publish-delegate: build
+	$(FDEV) --port $(WS_PORT) publish \
+	  --code $(DELEGATE)/build/freenet/number_delegate \
+	  --parameters $(DELEGATE)/webapp_contract_id.bin \
+	  delegate
 
 # Merge-law corpus check (contract crate example generates it).
 verify-merge: contract
@@ -51,6 +57,15 @@ verify-merge: contract
 	  --state /tmp/opencode/number-corpus/s3.bin \
 	  --transition /tmp/opencode/number-corpus/s1.bin /tmp/opencode/number-corpus/s2.bin \
 	  --transition /tmp/opencode/number-corpus/s2.bin /tmp/opencode/number-corpus/s3.bin
+
+# Offline browser smoke: real built UI + mock backend, no Freenet node.
+e2e-offline:
+	cd $(UI) && npm run test:e2e:offline
+
+# Gateway smoke: set FREENET_BASE_URL to a /v1/contract/web/<id>/ URL.
+e2e-gateway:
+	@[ -n "$$FREENET_BASE_URL" ] || { echo "set FREENET_BASE_URL to the gateway webapp URL" >&2; exit 1; }
+	cd $(UI) && npm run test:e2e:gateway
 
 clean:
 	cd $(CONTRACT) && cargo clean

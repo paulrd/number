@@ -377,7 +377,7 @@ fn owner_key(parameters: &Parameters<'_>) -> Result<VerifyingKey, ContractError>
     let bytes: [u8; 32] = parameters
         .as_ref()
         .try_into()
-        .map_err(|_| ContractError::Other("parameters must be exactly 32 bytes".into()))?;
+        .map_err(|_| ContractError::Other("parameters must be 32 bytes".into()))?;
     VerifyingKey::from_bytes(&bytes)
         .map_err(|_| ContractError::Other("parameters are not a valid Ed25519 point".into()))
 }

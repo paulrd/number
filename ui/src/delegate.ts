@@ -63,6 +63,18 @@ export interface DelegateIdentity {
   nextSeq: number[];
 }
 
+export interface DelegateStatus {
+  hasSeed: boolean;
+  /** Present only when `hasSeed` is true. */
+  identity: DelegateIdentity | null;
+}
+
+export interface ExportedSecrets {
+  /** 32-byte Ed25519 seed as 64 lowercase hex characters. */
+  seed: string;
+  nextSeq: number[];
+}
+
 type ResponseRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is ResponseRecord {
@@ -127,7 +139,7 @@ function classifyDelegateFailure(message: string): DelegateError {
 }
 
 interface PendingRequest {
-  kind: "identity" | "sign";
+  kind: "identity" | "sign" | "status" | "export" | "import";
   resolve: (payload: ResponseRecord) => void;
   reject: (error: DelegateError) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -136,6 +148,7 @@ interface PendingRequest {
 export class DelegateClient {
   private readonly keyBytes: number[];
   private readonly codeHashBytes: number[];
+  private readonly paramsBytes: number[];
   private pending: PendingRequest[] = [];
   private readonly configError: DelegateError | null;
 
@@ -143,16 +156,22 @@ export class DelegateClient {
     private readonly send: (request: ClientRequestTable) => void,
     keyBytes: number[],
     codeHashBytes: number[],
+    paramsBytes: number[],
   ) {
     this.keyBytes = [...keyBytes];
     this.codeHashBytes = [...codeHashBytes];
+    this.paramsBytes = [...paramsBytes];
 
-    if (this.keyBytes.length !== 32 || this.codeHashBytes.length !== 32) {
+    if (
+      this.keyBytes.length !== 32 ||
+      this.codeHashBytes.length !== 32 ||
+      this.paramsBytes.length !== 32
+    ) {
       this.configError = new DelegateError(
         "Config",
         "Delegate build configuration is missing or invalid: expected 32-byte " +
-          "delegate key and 32-byte delegate code hash. Rebuild the UI after " +
-          "publishing the delegate.",
+          "delegate key, 32-byte delegate code hash, and 32-byte webapp id " +
+          "parameters. Rebuild the UI after publishing the delegate.",
       );
     } else {
       this.configError = null;
@@ -162,6 +181,40 @@ export class DelegateClient {
   identity(timeoutMs = 12_000): Promise<DelegateIdentity> {
     return this.request("identity", { cmd: "identity" }, timeoutMs).then(
       (payload) => this.parseIdentity(payload),
+    );
+  }
+
+  /** Report whether a seed exists without creating one. */
+  status(timeoutMs = 5_000): Promise<DelegateStatus> {
+    return this.request("status", { cmd: "status" }, timeoutMs).then((payload) =>
+      this.parseStatus(payload),
+    );
+  }
+
+  /** Ask a predecessor delegate for its seed and sequence counters. */
+  exportSecrets(timeoutMs = 5_000): Promise<ExportedSecrets> {
+    return this.request("export", { cmd: "export" }, timeoutMs).then((payload) =>
+      this.parseExport(payload),
+    );
+  }
+
+  /** Restore a predecessor's seed into this fresh delegate. */
+  async importSecrets(
+    seed: string,
+    nextSeq: number[],
+    timeoutMs = 5_000,
+  ): Promise<void> {
+    if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
+      throw new DelegateError(
+        "Protocol",
+        "Refusing to import a seed that is not 32 bytes of hex.",
+      );
+    }
+    this.validateNextSeq(nextSeq);
+    await this.request(
+      "import",
+      { cmd: "import", seed: seed.toLowerCase(), nextSeq },
+      timeoutMs,
     );
   }
 
@@ -220,10 +273,16 @@ export class DelegateClient {
       let index = -1;
       if (payload.ok === false) {
         index = 0; // error responses carry no command discriminator
+      } else if (typeof payload.hasSeed === "boolean") {
+        index = this.pending.findIndex((pending) => pending.kind === "status");
+      } else if (typeof payload.seed === "string") {
+        index = this.pending.findIndex((pending) => pending.kind === "export");
       } else if (typeof payload.pubkey === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "identity");
       } else if (typeof payload.sig === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "sign");
+      } else if (payload.ok === true) {
+        index = this.pending.findIndex((pending) => pending.kind === "import");
       }
       if (index === -1 && isRecord(payload) && typeof payload.error === "string") {
         index = 0;
@@ -304,7 +363,10 @@ export class DelegateClient {
       appMessage,
     );
     const delegateKey = new DelegateKeyT(this.keyBytes, this.codeHashBytes);
-    const appMessages = new ApplicationMessagesT(delegateKey, [], [inbound]);
+    // The node checks BLAKE3(code_hash || params) against the key on every
+    // request. The delegate was published with the webapp id as its params,
+    // so omitting them here makes the node refuse the request.
+    const appMessages = new ApplicationMessagesT(delegateKey, this.paramsBytes, [inbound]);
     const delegateRequest = new DelegateRequest(
       DelegateRequestType.ApplicationMessages,
       appMessages,
@@ -327,27 +389,69 @@ export class DelegateClient {
       );
     }
 
-    const nextSeq = payload.nextSeq;
-    if (
-      !Array.isArray(nextSeq) ||
-      nextSeq.length !== 8 ||
-      nextSeq.some(
-        (value) =>
-          typeof value !== "number" ||
-          !Number.isSafeInteger(value) ||
-          value < 1,
-      )
-    ) {
+    return {
+      pubkey: pubkey.toLowerCase(),
+      nextSeq: this.validateNextSeq(payload.nextSeq),
+    };
+  }
+
+  private parseStatus(payload: ResponseRecord): DelegateStatus {
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string" ? payload.error : "status was rejected",
+      );
+    }
+    if (typeof payload.hasSeed !== "boolean") {
       throw new DelegateError(
         "Protocol",
-        "Delegate identity response has malformed nextSeq (expected 8 positive integers).",
+        "Delegate status response is missing a boolean hasSeed.",
+      );
+    }
+    if (!payload.hasSeed) return { hasSeed: false, identity: null };
+
+    return {
+      hasSeed: true,
+      identity: this.parseIdentity(payload),
+    };
+  }
+
+  private parseExport(payload: ResponseRecord): ExportedSecrets {
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string" ? payload.error : "export was rejected",
+      );
+    }
+    const seed = payload.seed;
+    if (typeof seed !== "string" || !/^[0-9a-fA-F]{64}$/.test(seed)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate export response has a malformed seed (expected 64 hex characters).",
       );
     }
 
     return {
-      pubkey: pubkey.toLowerCase(),
-      nextSeq: [...(nextSeq as number[])],
+      seed: seed.toLowerCase(),
+      nextSeq: this.validateNextSeq(payload.nextSeq),
     };
+  }
+
+  private validateNextSeq(value: unknown): number[] {
+    if (
+      !Array.isArray(value) ||
+      value.length !== 8 ||
+      value.some(
+        (entry) =>
+          typeof entry !== "number" ||
+          !Number.isSafeInteger(entry) ||
+          entry < 1,
+      )
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate response has malformed nextSeq (expected 8 positive integers).",
+      );
+    }
+    return [...(value as number[])];
   }
 
   private rejectAll(error: DelegateError): void {

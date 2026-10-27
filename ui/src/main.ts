@@ -27,6 +27,7 @@ const BOARD_CONFIG = {
   contractWasmUrl: __CONTRACT_WASM_URL__,
   delegateKeyBytes: __DELEGATE_KEY_BYTES__,
   delegateCodeHashBytes: __DELEGATE_CODE_HASH_BYTES__,
+  delegateParamsBytes: __WEBAPP_CONTRACT_ID_BYTES__,
 };
 
 function byId<T extends HTMLElement>(id: string): T {

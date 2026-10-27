@@ -13,12 +13,14 @@ optional metadata (label, unit, note).
   creates the instance on first use (PUT), subscribes, and sends signed deltas.
 
 Design and exact wire formats: [DESIGN.md](./DESIGN.md).
+Current deployment state, done work, and the remaining backlog:
+[BACKLOG.md](./BACKLOG.md).
 
 ## Prerequisites
 
 - Rust 1.85+ with the `wasm32-unknown-unknown` target
 - `fdev` and `freenet` on `PATH`
-- Node.js 20+
+- Node.js 22.12+ (Playwright/axe requirement)
 
 ## Build
 
@@ -28,11 +30,49 @@ make check     # fmt, clippy, unit tests (contract, delegate, UI)
 make verify-merge   # fdev merge-law corpus check
 ```
 
+Browser smoke:
+
+```bash
+cd ui && npm ci && npx playwright install chromium
+make e2e-offline    # built UI + mock backend, no node
+FREENET_BASE_URL=http://127.0.0.1:7510/v1/contract/web/<id>/ \
+  make e2e-gateway  # gateway shell + sandboxed iframe
+```
+
+`make e2e-offline` also runs an axe accessibility check. The gateway spec is
+skipped unless `FREENET_BASE_URL` points at a `/v1/contract/web/...` URL.
+CI runs the contract/delegate/UI suites, the offline browser smoke, and
+`fdev verify-merge`; see `.github/workflows/ci.yml`.
+
 `scripts/build.sh` records the contract/delegate code hashes exactly as `fdev`
 reports them, copies the raw contract WASM into `ui/public/`, and writes the
 delegate key bytes for the UI. Contract and delegate are standalone crates with
 their own `Cargo.lock` (see DESIGN §9): a dependency change must not silently
 move the contract's address.
+
+The delegate is pinned to one web container contract instance. Its parameters
+are the 32 raw bytes of that webapp's contract id, read from
+`delegate/webapp_contract_id.txt` (base58; `fdev website list` prints it) or
+from `WEBAPP_CONTRACT_ID`. The build writes
+`delegate/webapp_contract_id.bin` for publishing and derives the parameterised
+delegate key for the UI. Changing the id or the delegate code re-keys the
+delegate; without a migration path that also starts a fresh owner identity.
+
+### Before changing the WASM
+
+Append the outgoing artifact to `ui/src/migrations.ts` **before** rebuilding:
+
+- contract change: append the current contract code hash to
+  `LEGACY_CONTRACT_CODE_HASHES`;
+- delegate change: append the current delegate key, code hash, and webapp id
+  to `LEGACY_DELEGATES`.
+
+The UI probes these on first load: the delegate export/import path carries the
+owner seed forward, and the contract path re-PUTs old signed state into the new
+instance. Delegate migration is forward-only — a predecessor shipped without
+the `export` command cannot answer and is unrecoverable. Never remove an entry.
+A predecessor pinned to a different webapp id cannot be called from the new UI
+(its origin policy refuses); migrate before changing the webapp id.
 
 ## Run locally
 
@@ -43,8 +83,9 @@ freenet local --ws-api-port 7510 \
   --config-dir /tmp/number-node/config \
   --log-dir /tmp/number-node/logs
 
-# 2. register the delegate with that node
-fdev --port 7510 publish --code delegate/build/freenet/number_delegate delegate
+# 2. register the delegate with that node, pinned to this webapp id
+fdev --port 7510 publish --code delegate/build/freenet/number_delegate \
+  --parameters delegate/webapp_contract_id.bin delegate
 
 # 3. publish the UI as a webapp (the URL is permanent; updates are in-place)
 fdev website init number-local            # once; back up the key file
@@ -55,6 +96,11 @@ fdev --port 7510 website publish --key number-local ui/dist
 Open the printed `/v1/contract/web/<id>/` URL on the node's port. The board is
 created on first load (the UI PUTs the bundled `number_contract.wasm` with the
 owner key as parameters).
+
+`delegate/webapp_contract_id.txt` must match the site being served. The
+checked-in value is the `number-local` id; a production site key has a
+different id, so update the file and re-publish the delegate before building
+the UI for that site.
 
 For frontend iteration, `npm --prefix ui run dev` serves the UI at :8080; point
 it at a node with a `/v1` proxy and an auth token (the gateway shell normally

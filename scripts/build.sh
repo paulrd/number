@@ -12,6 +12,21 @@ FDEV="${FDEV:-$HOME/.local/bin/fdev}"
 export FDEV
 command -v "$FDEV" >/dev/null || { echo "fdev not found (set FDEV=...)" >&2; exit 1; }
 
+# The delegate is pinned to one web container contract instance. Its params
+# are the 32 raw bytes of that contract's instance id. `fdev website list`
+# prints the base58 id; the file is the checked-in source of truth for the
+# local site. Override with WEBAPP_CONTRACT_ID for another deployment.
+WEBAPP_ID_FILE="${WEBAPP_ID_FILE:-$ROOT/delegate/webapp_contract_id.txt}"
+WEBAPP_ID="${WEBAPP_CONTRACT_ID:-}"
+if [ -z "$WEBAPP_ID" ]; then
+  [ -f "$WEBAPP_ID_FILE" ] || {
+    echo "missing $WEBAPP_ID_FILE (or set WEBAPP_CONTRACT_ID)" >&2
+    exit 1
+  }
+  WEBAPP_ID="$(tr -d '[:space:]' < "$WEBAPP_ID_FILE")"
+fi
+[ -n "$WEBAPP_ID" ] || { echo "webapp contract id is empty" >&2; exit 1; }
+
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
 
 # fdev names its packaged output after the crate's lib target, which is not
@@ -47,17 +62,19 @@ DELEGATE_WASM="$ROOT/delegate/target/wasm32-unknown-unknown/release/number_deleg
 [ -f "$DELEGATE_WASM" ] || { echo "missing raw delegate wasm: $DELEGATE_WASM" >&2; exit 1; }
 
 DELEGATE_CODE_HASH="$("$FDEV" inspect "$DELEGATE_PKG" delegate | strip_ansi | awk -F': ' '/^code hash:/{print $2; exit}')"
-DELEGATE_KEY="$("$FDEV" inspect "$DELEGATE_PKG" key | strip_ansi | awk -F': ' '/^code key:/{print $2; exit}')"
 [ -n "$DELEGATE_CODE_HASH" ] || { echo "could not read delegate code hash" >&2; exit 1; }
-[ -n "$DELEGATE_KEY" ] || { echo "could not read delegate key" >&2; exit 1; }
 
 echo "==> ui constants"
 cd "$ROOT/ui"
-node --input-type=module - "$CONTRACT_CODE_HASH" "$DELEGATE_KEY" "$DELEGATE_CODE_HASH" <<'NODE'
+node --input-type=module - \
+  "$CONTRACT_CODE_HASH" "$DELEGATE_CODE_HASH" "$WEBAPP_ID" \
+  "$ROOT/delegate/webapp_contract_id.bin" <<'NODE'
 import { writeFileSync } from "node:fs";
+import { blake3 } from "@noble/hashes/blake3";
 import bs58 from "bs58";
 
-const [contractHashB58, delegateKeyB58, delegateCodeHashB58] = process.argv.slice(2);
+const [contractHashB58, delegateCodeHashB58, webappIdB58, paramsPath] =
+  process.argv.slice(2);
 const bytes = (b58, what) => {
   const b = bs58.decode(b58);
   if (b.length !== 32) throw new Error(`${what} is not 32 bytes`);
@@ -65,12 +82,25 @@ const bytes = (b58, what) => {
 };
 const json = (u8) => JSON.stringify(Array.from(u8));
 
+const webappId = bytes(webappIdB58, "webapp contract id");
+const delegateCodeHash = bytes(delegateCodeHashB58, "delegate code hash");
+
+// Delegate key = BLAKE3(code_hash || params), exactly as the node computes it.
+// `fdev inspect <pkg> key` has no --parameters option, so it cannot report
+// this key once the delegate is published with params.
+const delegateKey = blake3(new Uint8Array([...delegateCodeHash, ...webappId]));
+const delegateKeyB58 = bs58.encode(delegateKey);
+
+writeFileSync(paramsPath, Buffer.from(webappId));
+writeFileSync("webapp_contract_id_bytes.json", json(webappId));
 writeFileSync("contract_code_hash_bytes.json", json(bytes(contractHashB58, "contract code hash")));
 writeFileSync("delegate_key.txt", delegateKeyB58);
-writeFileSync("delegate_key_bytes.json", json(bytes(delegateKeyB58, "delegate key")));
-writeFileSync("delegate_code_hash_bytes.json", json(bytes(delegateCodeHashB58, "delegate code hash")));
+writeFileSync("delegate_key_bytes.json", json(delegateKey));
+writeFileSync("delegate_code_hash_bytes.json", json(delegateCodeHash));
 
 console.log(`contract code hash: ${contractHashB58}`);
+console.log(`webapp contract id: ${webappIdB58}`);
+console.log(`delegate params:    ${paramsPath}`);
 console.log(`delegate key:       ${delegateKeyB58}`);
 NODE
 

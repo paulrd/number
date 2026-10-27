@@ -143,6 +143,9 @@ Request:
 { "cmd": "identity" }
 { "cmd": "sign", "slot": 3, "seq": 7, "entry": { "value": 12, "label": null, "unit": null, "note": null } }
 { "cmd": "sign", "slot": 3, "seq": 8, "entry": null }
+{ "cmd": "status" }
+{ "cmd": "export" }
+{ "cmd": "import", "seed": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1] }
 ```
 
 Response (outbound `ApplicationMessage`):
@@ -150,6 +153,10 @@ Response (outbound `ApplicationMessage`):
 ```json
 { "ok": true, "pubkey": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1] }   // identity
 { "ok": true, "sig": "<128 hex>" }                                   // sign
+{ "ok": true, "hasSeed": false }                                     // status, fresh
+{ "ok": true, "hasSeed": true, "pubkey": "<64 hex>", "nextSeq": [...] } // status, initialized
+{ "ok": true, "seed": "<64 hex>", "nextSeq": [...] }                 // export
+{ "ok": true }                                                       // import
 { "ok": false, "error": "..." }                                      // any failure
 ```
 
@@ -159,22 +166,60 @@ Secrets (delegate secret store):
   `freenet_stdlib::rand::rand_bytes(32)` on first use.
 - `number.v1.nextseq.<i>` — 8-byte little-endian u64, per slot, default 1.
 
+Parameters:
+
+- The delegate is parameterised by exactly the **32 raw bytes of the web
+  container contract instance id** it serves. Empty or malformed parameters
+  fail closed before any request is handled.
+- `delegate/webapp_contract_id.txt` holds the base58 id (the value in the
+  gateway's `/v1/contract/web/<id>/` URL); the build writes the raw bytes to
+  `delegate/webapp_contract_id.bin` for `fdev publish --parameters`.
+
 Rules:
 
 - `slot` must be `0..7`; `seq >= nextseq[slot]`; `seq > 0`.
 - Enforce the §2 metadata bounds; sign §2 canonical bytes; then store
   `nextseq[slot] = seq + 1`.
-- Only accept messages whose `origin` is `Some(MessageOrigin::WebApp(_))`;
-  reject everything else.
+- Only accept messages whose `origin` is
+  `Some(MessageOrigin::WebApp(id))` and `id` equals the pinned webapp contract
+  id. Reject a different `WebApp(id)`, `MessageOrigin::Delegate`, `None`, and
+  unknown variants at the single gate before dispatch.
 - Core signing/storage logic must be testable without a host, e.g. a
   `sign_with(store: &mut impl SecretStore, ..)` seam (see delegate-patterns →
   "Take `impl SecretStore`").
+
+### Delegate and contract migration
+
+- Delegate migration is **forward-only**. A successor delegate starts with an
+  empty secret store; the UI asks each predecessor in the committed
+  `ui/src/migrations.ts` registry for `export`, then sends `import` to the
+  current delegate **before** calling `identity` (identity would create a fresh
+  seed and make import impossible).
+- `status` reports `hasSeed` without creating one. `import` is refused if a
+  seed already exists, and writes counters before the seed so a failed import
+  can be retried.
+- A predecessor published before `export` existed cannot answer; that
+  generation is permanently unrecoverable. Append the current delegate key,
+  code hash, and webapp id to `LEGACY_DELEGATES` **before** changing the
+  delegate WASM.
+- A predecessor pinned to a different webapp id cannot be called from the new
+  UI: its origin policy refuses the request. Migrate before changing the
+  webapp id, or export from the old UI.
+- Contract migration uses the owner key as the stable anchor. Append the
+  outgoing contract code hash to `LEGACY_CONTRACT_CODE_HASHES` before changing
+  the contract WASM. On first load, if the current instance is missing, the UI
+  probes each old hash with the same owner pubkey, GETs the old state, and PUTs
+  it into the current contract; `validate_state` re-checks every signature.
+  Only list versions whose state/signing bytes the current contract accepts.
 
 ## 8. UI flow
 
 1. Connect `FreenetWsApi` to `${ws(s)}://${location.host}/v1/contract/command`
    with `base: "./"` assets and empty auth token.
-2. Ask the delegate for `identity` (delegate key + code hash injected at build).
+2. Ask the current delegate for `status` (without creating a seed). If it has
+   no seed, walk `LEGACY_DELEGATES`: ask each predecessor for `export`, then
+   `import` the first answer. Then ask for `identity` (delegate key + code hash
+   injected at build).
 3. `params = pubkey bytes`; `instance = blake3(code_hash_bytes || params)`;
    build `ContractKey(instance, code_hash_bytes)`.
 4. `GET`; on not-found, `PUT` the bundled `number_contract.wasm` with params and
@@ -190,16 +235,25 @@ Rules:
 Build-time constants (Vite `define`):
 
 - `__CONTRACT_CODE_HASH__` — base58 string (contract code hash)
-- `__DELEGATE_KEY_BYTES__`, `__DELEGATE_CODE_HASH_BYTES__` — number arrays
+- `__DELEGATE_KEY_BYTES__` — number array; derived as
+  `BLAKE3(delegate_code_hash_bytes || webapp_id_bytes)`, because the delegate
+  is published with the webapp id as parameters
+- `__DELEGATE_CODE_HASH_BYTES__` — number array
+- `__WEBAPP_CONTRACT_ID_BYTES__` — number array; sent as the
+  `ApplicationMessages.params` on every delegate request, because the node
+  checks it against the parameterised delegate key
 - `__CONTRACT_WASM_URL__` — `./number_contract.wasm`
+
+The webapp id itself comes from `delegate/webapp_contract_id.txt`; see §7.
 
 ## 9. Layout and ownership
 
 ```
 contract/     # standalone crate, own Cargo.lock (NOT a workspace member)
 delegate/     # standalone crate, own Cargo.lock
-ui/           # Vite app
+ui/           # Vite app; e2e/ holds the Playwright specs
 scripts/      # build/publish helpers
+.github/      # CI (contract, delegate, UI, offline browser smoke, merge laws)
 Makefile
 ```
 
@@ -212,12 +266,24 @@ Contract and delegate are excluded from any workspace (see build-system →
   seq-0 invariant, merkle-free summary/delta round-trip, empty delta when
   converged, property tests for merge comm/assoc/idempotence/absorption.
 - `cargo test` in `delegate/` covers: identity creation/stability, sign golden
-  vector, seq monotonicity, bounds, origin rejection.
+  vector, seq monotonicity, bounds, pinned-webapp acceptance, foreign webapp /
+  `Delegate` / missing-origin rejection, malformed delegate parameters failing
+  closed, `status` without seed creation, export/import round-trip preserving
+  identity and counters, and import refusing to overwrite an existing seed.
 - `fdev verify-merge` on generated corpus: no violations.
-- `npm run build` in `ui/`, then Playwright smoke against `vite preview`
-  (offline/mock mode) with a clean console.
+- `npm run build` in `ui/`, then the in-repo Playwright offline spec
+  (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:
+  mount, one save, axe, clean console.
+- Gateway spec (`ui/e2e/gateway.spec.ts`) with `FREENET_BASE_URL` pointing at a
+  `/v1/contract/web/<id>/` URL: shell bridge, sandboxed iframe, identity and
+  board mount, no fatal console/network errors.
 - Local node: publish delegate + contract, PUT/UPDATE via the UI, reload and
   confirm persistence; tombstone a slot and confirm it does not resurrect.
+- Migration: publish a successor delegate, confirm the UI exports the
+  predecessor seed and imports it before identity creation (same owner key and
+  board); change the contract WASM with the outgoing hash in
+  `LEGACY_CONTRACT_CODE_HASHES`, confirm the new instance receives the old
+  signed state.
 
 ## 11. Verified behaviours (local-node findings)
 
@@ -245,3 +311,13 @@ These are not design preferences; each was observed against `freenet` 0.2.150
   WASM.** It is `BLAKE3(BLAKE3(wasm) || owner_pubkey)`. Any contract change
   (including a dependency bump) creates a new instance; the owner key remains
   the stable anchor for a future migration.
+- **A delegate published with parameters must receive them on every request.**
+  `ApplicationMessages.params` is checked against `BLAKE3(code_hash || params)`;
+  omitting them makes the node refuse with `parameters do not match the
+  delegate key` before the WASM runs. The UI now sends
+  `__WEBAPP_CONTRACT_ID_BYTES__` on every delegate request.
+- **Migration was exercised locally.** A successor delegate exported a
+  predecessor's seed and imported it before identity creation, preserving the
+  owner key, board contract key, and slot value. A contract WASM change with
+  the outgoing hash in `LEGACY_CONTRACT_CODE_HASHES` re-PUT the old signed
+  state into the new instance; the owner identity and slot value survived.
