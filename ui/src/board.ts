@@ -18,6 +18,7 @@ import {
 import {
   DelegateClient,
   type DelegateIdentity,
+  type ExportedSecrets,
 } from "./delegate";
 import {
   decodeDelta,
@@ -47,6 +48,14 @@ export interface BoardCallbacks {
   onContractKey: (keyBase58: string) => void;
   onError: (error: Error) => void;
   onWarning?: (message: string) => void;
+  /**
+   * Called once, before the first identity is created, when the delegate has
+   * no seed and no legacy predecessor answered. The UI offers "create a new
+   * identity" or "import a backup"; it resolves when the user has chosen or a
+   * successful import has happened. The board then continues (and creates a
+   * seed only if one still does not exist).
+   */
+  onIdentityRequired?: () => Promise<void>;
 }
 
 export interface BoardConfig {
@@ -66,6 +75,10 @@ export interface BoardBackend {
   save(slotIndex: number, entry: Entry): Promise<void>;
   clear(slotIndex: number): Promise<void>;
   retry(): Promise<StateV1>;
+  /** Export the owner seed and counters for a backup. */
+  exportIdentity(): Promise<ExportedSecrets>;
+  /** Restore a seed into a delegate that has none (a new device). */
+  importIdentity(seed: string, nextSeq: number[]): Promise<void>;
   close(): void;
 }
 
@@ -237,6 +250,15 @@ export class OnlineBoard implements BoardBackend {
         this.migrating = false;
       }
 
+      // First run, and no legacy predecessor answered: let the user create an
+      // identity or import a backup before anything creates a seed. A delegate
+      // refuses import once a seed exists, so this is the only safe moment.
+      const status = await this.delegate.status().catch(() => null);
+      if (status && !status.hasSeed && this.callbacks.onIdentityRequired) {
+        this.callbacks.onStatus("identity", "no identity on this device yet");
+        await this.callbacks.onIdentityRequired();
+      }
+
       this.callbacks.onStatus("identity", "asking the delegate for the owner key");
       const identity = await this.delegate.identity();
       this.identity = identity;
@@ -328,6 +350,20 @@ export class OnlineBoard implements BoardBackend {
 
   async clear(slotIndex: number): Promise<void> {
     await this.write(slotIndex, null);
+  }
+
+  /** Ask the delegate for the seed and counters behind this identity. */
+  exportIdentity(): Promise<ExportedSecrets> {
+    return this.delegate.exportSecrets();
+  }
+
+  /**
+   * Restore a backup into this delegate. The delegate refuses when a seed
+   * already exists, so this only succeeds on a fresh device (normally from the
+   * first-run prompt, before `identity()` creates anything).
+   */
+  async importIdentity(seed: string, nextSeq: number[]): Promise<void> {
+    await this.delegate.importSecrets(seed, nextSeq);
   }
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {

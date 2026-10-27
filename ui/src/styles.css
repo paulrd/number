@@ -1264,12 +1264,14 @@ body:has(#editor[open]) {
   opacity: 0.55;
 }
 
-.field input[aria-invalid="true"] {
+.field input[aria-invalid="true"],
+.field textarea[aria-invalid="true"] {
   border-color: var(--danger);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
 }
 
-.field input[aria-invalid="true"]:focus-visible {
+.field input[aria-invalid="true"]:focus-visible,
+.field textarea[aria-invalid="true"]:focus-visible {
   border-color: var(--danger);
   outline-color: var(--danger);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 24%, transparent);
@@ -1397,6 +1399,362 @@ body:has(#editor[open]) {
   to {
     transform: rotate(1turn);
   }
+}
+
+/* Identity dialogs -------------------------------------------------------- */
+
+html:has(#identity-setup[open]),
+body:has(#identity-setup[open]),
+html:has(#identity-manage[open]),
+body:has(#identity-manage[open]) {
+  overflow: hidden;
+}
+
+.identity-dialog {
+  width: min(38rem, calc(100vw - 2rem));
+}
+
+.identity-dialog--manage {
+  width: min(41rem, calc(100vw - 2rem));
+}
+
+.identity-dialog .identity-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.identity-dialog h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
+.identity-intro {
+  max-width: 35rem;
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.identity-dialog .editor-actions {
+  justify-content: flex-end;
+}
+
+/* First-run choice -------------------------------------------------------- */
+
+.identity-stage {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.identity-choices {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.identity-choice {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem 0.95rem;
+  justify-items: start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.identity-choice--primary {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 62%, var(--surface-raised)),
+      var(--surface-raised) 72%
+    );
+}
+
+.identity-choice-kicker {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.57rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.identity-choice-kicker span {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.identity-choice h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.18rem;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+}
+
+.identity-choice p:not(.identity-choice-kicker) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.identity-choice .button {
+  margin-top: 0.35rem;
+}
+
+.identity-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+/* First-run restore ------------------------------------------------------- */
+
+.identity-restore-form {
+  position: relative;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.identity-restore-form[aria-busy="true"]::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: -0.1rem 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 50% 100%;
+  animation: progress 1s linear infinite;
+}
+
+.identity-restore-form h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.12rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.identity-restore-lede {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.identity-form-actions {
+  display: flex;
+  margin-top: 0.1rem;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.field-hint code {
+  color: var(--muted);
+  font-size: 0.95em;
+}
+
+#identity-restore-input,
+#identity-code {
+  min-height: 8.5rem;
+  padding: 0.6rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  line-height: 1.5;
+}
+
+#identity-restore-input {
+  min-height: 7rem;
+}
+
+/* Backup and restore note ------------------------------------------------- */
+
+.identity-key {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.identity-label {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.identity-pubkey {
+  display: block;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.identity-warning {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+}
+
+.identity-warning-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--warning);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.identity-warning-title::before {
+  content: "!";
+  display: inline-grid;
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+.identity-warning p {
+  margin: 0.35rem 0 0;
+  color: var(--text);
+  font-size: 0.79rem;
+  line-height: 1.5;
+}
+
+.identity-reveal {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.identity-reveal-start {
+  display: grid;
+  gap: 0.4rem;
+  justify-items: start;
+}
+
+.identity-secret {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--border);
+}
+
+.identity-secret:not([hidden]) {
+  animation: identity-reveal-in 160ms var(--ease);
+}
+
+@keyframes identity-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.identity-secret-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.button.is-copied {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.identity-restore-note {
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--rule);
+}
+
+.identity-restore-note h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.identity-restore-note p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.79rem;
+  line-height: 1.5;
+}
+
+/* Identity affordance in the connection plate ----------------------------- */
+
+.meta-value {
+  display: grid;
+  min-width: 0;
+  gap: 0.05rem;
+}
+
+.meta-action {
+  display: inline-flex;
+  min-height: 2rem;
+  margin-left: -0.35rem;
+  padding: 0.2rem 0.4rem;
+  align-items: center;
+  justify-self: start;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition:
+    background-color 140ms var(--ease),
+    border-color 140ms var(--ease),
+    color 140ms var(--ease);
+}
+
+.meta-action:hover {
+  border-color: var(--border);
+  background: var(--surface-muted);
+  color: var(--text);
 }
 
 /* Footer ------------------------------------------------------------------ */
@@ -1632,6 +1990,23 @@ body:has(#editor[open]) {
 
   .field-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .identity-choice {
+    padding: 0.8rem 0.85rem 0.85rem;
+  }
+
+  .identity-form-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .identity-form-actions .button {
+    width: 100%;
+  }
+
+  .identity-secret-actions .button {
+    flex: 1 1 auto;
   }
 
   .site-footer {

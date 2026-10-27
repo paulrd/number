@@ -218,8 +218,10 @@ Rules:
    with `base: "./"` assets and empty auth token.
 2. Ask the current delegate for `status` (without creating a seed). If it has
    no seed, walk `LEGACY_DELEGATES`: ask each predecessor for `export`, then
-   `import` the first answer. Then ask for `identity` (delegate key + code hash
-   injected at build).
+   `import` the first answer. If it still has no seed, the UI blocks on a
+   first-run choice (create vs. restore) and only continues after an explicit
+   create or a successful restore; then ask for `identity` (delegate key +
+   code hash injected at build).
 3. `params = pubkey bytes`; `instance = blake3(code_hash_bytes || params)`;
    build `ContractKey(instance, code_hash_bytes)`.
 4. `GET`; on not-found, `PUT` the bundled `number_contract.wasm` with params and
@@ -231,6 +233,26 @@ Rules:
 6. Send `UpdateRequest(key, DeltaUpdate(delta bytes))`; update UI from the
    response / subscription notification.
 7. Clearing a slot sends `entry: null` with a higher `seq` (tombstone).
+
+### Identity backup and restore (user-facing)
+
+- `ui/src/identity.ts` wraps the delegate's `export` payload in versioned JSON:
+  `{v: 1, kind: "number-identity", seed, nextSeq, pubkey, createdAt}`. `pubkey`
+  and `createdAt` are informational; the delegate validates the seed and
+  counters. `nextSeq` must be 8 positive safe integers, matching the delegate.
+- The first-run dialog is a blocker: `status.hasSeed == false` after legacy
+  migration pauses the board until the user creates a key or imports a backup.
+  Escape and backdrop cannot dismiss it into an implicit new key, because the
+  delegate refuses imports once a seed exists (`ui/src/identity-dialog.ts`).
+- The seed is rendered only after an explicit reveal, in a readonly textarea,
+  and cleared on hide or close. It is never written to storage, the URL, or the
+  console. Restore validates the code before calling the delegate, and any
+  codec or delegate error stays inline so the user can retry.
+- Imported counters are used as-is; the first write takes
+  `max(contract.seq + 1, nextSeq[i])`, so a restore cannot replay a lower seq.
+- The backup carries no board data. Another device derives the same contract
+  key from the restored pubkey and loads the board over Freenet; a local-only
+  node will show an empty board until it can reach the network.
 
 Build-time constants (Vite `define`):
 

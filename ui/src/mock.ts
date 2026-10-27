@@ -82,6 +82,14 @@ export class OfflineBoard implements BoardBackend {
     await this.write(slotIndex, null);
   }
 
+  async exportIdentity(): Promise<never> {
+    throw new Error("Offline mode has no identity to export.");
+  }
+
+  async importIdentity(): Promise<never> {
+    throw new Error("Offline mode cannot import an identity.");
+  }
+
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
     if (!this.started || !this.currentState) {
       throw new Error("Offline board is not ready yet");

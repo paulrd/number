@@ -8,6 +8,7 @@ import {
 } from "./board";
 import { DelegateError } from "./delegate";
 import { ContractBuildError } from "./freenet";
+import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import {
   I64_MAX,
@@ -41,6 +42,7 @@ const statusText = byId<HTMLSpanElement>("status-text");
 const statusDetail = byId<HTMLParagraphElement>("status-detail");
 const identityShort = byId<HTMLElement>("identity-short");
 const identityCopy = byId<HTMLButtonElement>("identity-copy");
+const identityBackup = byId<HTMLButtonElement>("identity-backup");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
@@ -223,6 +225,9 @@ function renderWarnings(): void {
 }
 
 function renderIdentity(): void {
+  identityBackup.hidden = isOffline || identity === null;
+  identityBackup.disabled = identity === null;
+
   if (!identity) {
     identityShort.textContent = "Not available";
     identityCopy.disabled = true;
@@ -629,7 +634,11 @@ async function handleClear(): Promise<void> {
   }
 }
 
-async function copyToClipboard(text: string, label: string, button: HTMLButtonElement): Promise<void> {
+async function copyToClipboard(
+  text: string,
+  label: string,
+  button: HTMLButtonElement,
+): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -639,12 +648,14 @@ async function copyToClipboard(text: string, label: string, button: HTMLButtonEl
     button.classList.add("is-copied");
     window.setTimeout(() => button.classList.remove("is-copied"), 1_300);
     announce(`${label} copied.`);
+    return true;
   } catch (error) {
     showNotice(
       "warning",
       "Copy failed",
       `Clipboard access was blocked (${errorMessage(error)}). Select the key and copy it manually.`,
     );
+    return false;
   }
 }
 
@@ -706,6 +717,32 @@ const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
 
+const identityDialogs = createIdentityDialogs({
+  offline: isOffline,
+  getIdentity: () => identity,
+  exportIdentity: () => backend.exportIdentity(),
+  importIdentity: (seed, nextSeq) => backend.importIdentity(seed, nextSeq),
+  announce,
+  copy: copyToClipboard,
+  onRestored: () => {
+    showNotice(
+      "info",
+      "Identity restored",
+      "This device now uses the restored owner key. The board is loading; " +
+        "check that the Identity in the header matches your other device.",
+    );
+  },
+  onCreate: () => {
+    announce("Creating a new identity.");
+  },
+});
+
+// Offline mode never asks for an identity, and must never show the setup
+// dialog. Leaving the callback unset also keeps the board from waiting on one.
+if (!isOffline) {
+  callbacks.onIdentityRequired = () => identityDialogs.requestIdentity();
+}
+
 buildSlots();
 renderBoard();
 renderWarnings();
@@ -733,6 +770,9 @@ editor.addEventListener("click", (event) => {
 
 identityCopy.addEventListener("click", () => {
   if (identity) void copyToClipboard(identity.pubkey, "Owner public key", identityCopy);
+});
+identityBackup.addEventListener("click", () => {
+  identityDialogs.openManagement();
 });
 contractCopy.addEventListener("click", () => {
   if (contractKeyFull) {

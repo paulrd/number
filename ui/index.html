@@ -44,9 +44,21 @@
             <div class="meta-row">
               <dt>Identity</dt>
               <dd>
-                <button id="identity-copy" class="copy-button" type="button" disabled>
-                  <code id="identity-short">Not available</code>
-                </button>
+                <div class="meta-value">
+                  <button id="identity-copy" class="copy-button" type="button" disabled>
+                    <code id="identity-short">Not available</code>
+                  </button>
+                  <button
+                    id="identity-backup"
+                    class="meta-action"
+                    type="button"
+                    aria-haspopup="dialog"
+                    aria-controls="identity-manage"
+                    hidden
+                  >
+                    Back up identity
+                  </button>
+                </div>
               </dd>
             </div>
             <div class="meta-row">
@@ -170,6 +182,233 @@
             </div>
           </footer>
         </form>
+      </dialog>
+
+      <dialog
+        id="identity-setup"
+        class="editor identity-dialog identity-dialog--setup"
+        aria-labelledby="identity-setup-title"
+        aria-describedby="identity-setup-desc"
+      >
+        <div class="identity-shell">
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Owner identity</p>
+              <h2 id="identity-setup-title" tabindex="-1">Set up this device</h2>
+              <p id="identity-setup-desc" class="identity-intro">
+                This device has no owner key yet. The key signs every board change and
+                decides which board you see. It is kept in this device's Freenet
+                delegate, not on a server.
+              </p>
+            </div>
+          </header>
+
+          <div class="editor-body">
+            <div id="identity-setup-choice" class="identity-stage">
+              <div class="identity-choices">
+                <section
+                  class="identity-choice identity-choice--primary"
+                  aria-labelledby="identity-create-title"
+                >
+                  <p class="identity-choice-kicker">
+                    <span aria-hidden="true">01</span> Start fresh
+                  </p>
+                  <h3 id="identity-create-title">Create a new identity</h3>
+                  <p>
+                    Starts an empty board owned by a new key on this device. Choose this
+                    if you have not used number before.
+                  </p>
+                  <button id="identity-create" class="button button--primary" type="button">
+                    Create a new identity
+                  </button>
+                </section>
+
+                <section class="identity-choice" aria-labelledby="identity-restore-title">
+                  <p class="identity-choice-kicker">
+                    <span aria-hidden="true">02</span> Already have a board
+                  </p>
+                  <h3 id="identity-restore-title">Restore from a backup</h3>
+                  <p>
+                    Use the backup code from the device that owns your board. Restore
+                    first: this device can hold only one identity, and it will not replace
+                    one later.
+                  </p>
+                  <button id="identity-show-restore" class="button" type="button">
+                    Restore from a backup
+                  </button>
+                </section>
+              </div>
+              <p class="identity-note">
+                Nothing is created until you choose. You can back up the key later from
+                the Identity row.
+              </p>
+            </div>
+
+            <form
+              id="identity-restore-form"
+              class="identity-restore-form"
+              aria-labelledby="identity-restore-heading"
+              aria-describedby="identity-restore-lede"
+              novalidate
+              hidden
+            >
+              <div>
+                <h3 id="identity-restore-heading">Paste your backup code</h3>
+                <p id="identity-restore-lede" class="identity-restore-lede">
+                  Paste the JSON code exactly as it was saved. The board uses the key
+                  inside it, so only do this on a device you trust.
+                </p>
+              </div>
+
+              <label class="field">
+                <span>Backup code</span>
+                <textarea
+                  id="identity-restore-input"
+                  name="identity-backup"
+                  rows="7"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  aria-describedby="identity-restore-hint"
+                  placeholder='{ "v": 1, "kind": "number-identity", … }'
+                  required
+                ></textarea>
+              </label>
+              <p id="identity-restore-hint" class="field-hint">
+                The code is JSON whose <code>kind</code> is
+                <code>number-identity</code>, and it contains the private key. Do not
+                paste it anywhere you do not control.
+              </p>
+              <p id="identity-restore-error" class="form-error" role="alert" hidden></p>
+
+              <div class="identity-form-actions">
+                <button id="identity-restore-back" class="button button--quiet" type="button">
+                  Back
+                </button>
+                <button
+                  id="identity-restore-submit"
+                  class="button button--primary"
+                  type="submit"
+                >
+                  Restore identity
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog
+        id="identity-manage"
+        class="editor identity-dialog identity-dialog--manage"
+        aria-labelledby="identity-manage-title"
+        aria-describedby="identity-manage-desc"
+      >
+        <div class="identity-shell">
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Owner identity</p>
+              <h2 id="identity-manage-title" tabindex="-1">Back up your identity</h2>
+              <p id="identity-manage-desc" class="identity-intro">
+                The backup code carries this board's owner key to another device. Keep it
+                somewhere safe; there is no recovery server.
+              </p>
+            </div>
+            <button
+              id="identity-manage-close"
+              class="icon-button"
+              type="button"
+              aria-label="Close identity backup"
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="editor-body">
+            <div class="identity-key">
+              <p class="identity-label">Owner public key</p>
+              <code id="identity-manage-pubkey" class="identity-pubkey">Not available</code>
+              <p class="field-hint">
+                Compare this with the Identity in the header on your other device.
+              </p>
+            </div>
+
+            <div class="identity-warning">
+              <strong class="identity-warning-title">
+                The backup code is the private key
+              </strong>
+              <p>
+                Anyone who has it can sign changes as this owner and reach this board.
+                Save it in a password manager and never share it.
+              </p>
+            </div>
+
+            <div class="identity-reveal">
+              <div id="identity-reveal-start" class="identity-reveal-start">
+                <button id="identity-reveal" class="button button--primary" type="button">
+                  Reveal backup code
+                </button>
+                <p class="field-hint">The code stays hidden until you ask for it.</p>
+              </div>
+              <p id="identity-export-error" class="form-error" role="alert" hidden></p>
+
+              <div id="identity-secret" class="identity-secret" hidden>
+                <label class="field" for="identity-code">
+                  <span>Backup code (private key)</span>
+                  <textarea
+                    id="identity-code"
+                    rows="8"
+                    readonly
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    aria-describedby="identity-code-hint"
+                  ></textarea>
+                </label>
+                <p id="identity-code-hint" class="field-hint">
+                  Downloaded as <code id="identity-filename">number-identity.json</code>.
+                  If the download is blocked, copy the code instead.
+                </p>
+                <div class="identity-secret-actions">
+                  <button
+                    id="identity-copy-code"
+                    class="button button--small"
+                    type="button"
+                  >
+                    Copy code
+                  </button>
+                  <button id="identity-download" class="button button--small" type="button">
+                    Download .json
+                  </button>
+                  <button
+                    id="identity-hide"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Hide code
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <section class="identity-restore-note" aria-labelledby="identity-here-title">
+              <h3 id="identity-here-title">Restore is not available here</h3>
+              <p>
+                This device already has an identity, so it cannot import a backup. To use
+                the same key on another device, open number there and choose Restore from
+                a backup before it creates an identity, then check that the Identity in
+                the header matches this one. The backup carries the key, not the board:
+                the new device loads the board from Freenet, so it needs network access.
+              </p>
+            </section>
+          </div>
+
+          <footer class="editor-actions">
+            <button id="identity-manage-done" class="button button--quiet" type="button">
+              Done
+            </button>
+          </footer>
+        </div>
       </dialog>
 
       <p id="sr-status" class="sr-only" aria-live="polite"></p>

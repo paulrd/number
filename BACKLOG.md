@@ -169,14 +169,39 @@ went to a forwarded VPS peer.)
   7510; both were stopped/left intact; dry-runs show the expected ports; no
   target or script invokes fdev without `--port`.
 
+### #10 — Identity export/import for users
+
+The seed lived only in the local delegate, so a user could not move to another
+device. The delegate already had `export`/`import`; the UI did not expose them.
+
+- `ui/src/identity.ts` is the versioned backup codec: JSON with `kind:
+  number-identity`, seed, 8 counters, and an informational pubkey/createdAt.
+  It validates shape and user-facing errors before anything reaches the
+  delegate.
+- First-run choice (`ui/src/identity-dialog.ts` + `onIdentityRequired`): when
+  the delegate has no seed after legacy migration, the board does not create
+  one. It waits for an explicit **Create a new identity** or **Restore from a
+  backup**. Escape/backdrop cannot fall through to creating a key; a failed
+  restore stays inline so it can be retried.
+- Backup (`Back up identity` in the Identity row): the code is only fetched
+  after **Reveal backup code**, shown in a readonly field, with copy/download;
+  cleared on hide or close. Never stored or logged.
+- Restore is only offered on first run, because the delegate refuses to replace
+  an existing seed; the backup dialog explains that and points at the new
+  device. The backup carries the key, not the board: the new device derives the
+  same contract key and loads the board from Freenet (needs network access).
+- Verified against real nodes: exported from the main node, imported into a
+  fresh delegate on the isolated node. Identity matched
+  (`7193df71…`), the first save on the empty board landed at `seq 2` (counters
+  carried from `nextSeq[0]=2`, not a fresh 1), a garbage code was rejected
+  inline without creating a key, and the code was cleared on hide/close. The
+  create path on a second fresh delegate produced a new identity and a working
+  backup. The deployed gateway app (sandboxed iframe) also reveals a valid
+  backup code with a clean console.
+
 ## Remaining
 
-### #10 — Identity export/import for users (next)
-
-The seed lives only in the local delegate. Export/import across devices is not
-exposed in the UI. This is user-facing portability, not automatic migration.
-
-### #11 — Exact i64 beyond `Number.MAX_SAFE_INTEGER`
+### #11 — Exact i64 beyond `Number.MAX_SAFE_INTEGER` (next)
 
 The UI rejects values it cannot represent exactly. Supporting the full i64
 range needs a schema change (e.g. decimal string) and therefore a contract
@@ -248,10 +273,14 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #9 work: `Makefile`, `README.md`, `scripts/build.sh` and
-`scripts/record-artifacts.sh` (port docs/hints), `BACKLOG.md`. #8 is committed
-in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Uncommitted #10 work: `ui/src/identity.ts`, `ui/src/identity.test.ts`,
+`ui/src/identity-dialog.ts`, and edits to `ui/src/board.ts`, `ui/src/mock.ts`,
+`ui/src/main.ts`, `ui/index.html`, `ui/src/styles.css`, `README.md`,
+`DESIGN.md`, `BACKLOG.md`. #9 is committed in `2f6ee8c`, #8 in `5c9a84e`, #7 in
+`72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
-No WASM changed, so `published/` and the local deployment still match
-(`make check-artifacts` passes). Commit this tree before clearing context.
+No WASM changed, so `published/` and the re-key are untouched. The local site
+was updated in place with the new UI (`fdev --port 7510 website update --key
+number-local ui/dist`), so the served app has the backup feature. Commit this
+tree before clearing context.
 

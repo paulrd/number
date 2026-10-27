@@ -159,6 +159,29 @@ server after restarting the node. None of this runs for `npm run build`,
 The dev server proxies a node credential, so keep it on loopback: do not pass
 `--host 0.0.0.0` on a machine where other users can reach the port.
 
+## Identity backup and restore
+
+The owner identity is an Ed25519 seed held in this device's Freenet delegate.
+The board's contract key is derived from its public key, so the seed *is* the
+account: anyone with it can sign updates as the owner.
+
+- **Back up:** open **Back up identity** in the Identity row, choose **Reveal
+  backup code**, then copy it or download `number-identity-<pubkey>.json`. The
+  code is versioned JSON (`"kind": "number-identity"`) containing the seed and
+  the per-slot sequence counters. Store it in a password manager; there is no
+  recovery server.
+- **Restore:** on a device where number has not created an identity yet, the
+  first-run dialog offers **Restore from a backup**. Paste the code there. This
+  is the only moment restore is possible — the delegate refuses to replace an
+  existing seed, so a device that already has an identity cannot import one.
+- The backup carries the key, not the board. Another device restores the same
+  key, derives the same board address, and loads the board from Freenet, so it
+  needs network access. A local-only node will show an empty board even though
+  the identity is correct (live deployment is #12).
+- The code is never stored by the app: it is fetched only when you reveal it,
+  kept in a readonly field, and cleared when you hide the code or close the
+  dialog.
+
 ## Behaviour notes
 
 - **Clearing a slot tombstones it** (`seq > 0`, `entry: null`), so an older peer
