@@ -368,9 +368,9 @@ make verify-merge
 
 ## Working tree
 
-Clean; #13 is committed in `c7e7abe` (report) with #14 in `1da4fa3`, #12 in
-`0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in
-`5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Clean. #13's report is committed; #14 is in `1da4fa3`, #12 in `0658c1c`, #11 in
+`cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`,
+#3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
 No WASM changed, so `published/` and the re-key are untouched. The local and
 live sites serve the #14 build (delegate bundled). The VPS test seed from #12
