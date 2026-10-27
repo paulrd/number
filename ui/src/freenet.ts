@@ -162,8 +162,9 @@ export class ContractBuildError extends Error {
 /**
  * The node answered GET with NotFound. FreenetWsApi reports this through the
  * `onContractNotFound` handler rather than rejecting the `get()` promise, so
- * `getState()` races the request against this signal; without it a first-run
- * GET would simply time out and the app could never create its board.
+ * `getState()` races the request against this signal. In practice the node
+ * often does not deliver NotFound within the probe window (see DESIGN §11), so
+ * any GET failure is treated as "maybe missing" and followed by a PUT.
  */
 export class ContractNotFoundError extends Error {
   constructor() {
@@ -620,11 +621,12 @@ export class NumberContract {
         "Timed out subscribing to the contract",
       );
     } catch (error) {
-      // The gateway's sandbox shim does not always deliver SubscribeResponse
-      // even though the subscription becomes active — verified against a local
-      // node: deltas arrive in a second browser without a reload. A refusal is
-      // reported by `onSubscribeResponse(subscribed: false)`; only that is an
-      // error. Treat the timeout as "unconfirmed" rather than failed.
+      // The node currently serializes SubscribeResponse as PutResponse
+      // (freenet-stdlib; see reports/upstream-subscribe-response.md), so the
+      // SDK never sees a confirmation and a refusal is indistinguishable from
+      // a timeout. The subscription still becomes active — deltas arrive in a
+      // second browser without a reload — so treat the timeout as
+      // "unconfirmed", not failed.
       if (!/Timed out subscribing/i.test(errorMessage(error))) throw error;
       console.warn("[freenet] subscription unconfirmed; live deltas may still arrive");
     }

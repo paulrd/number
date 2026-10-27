@@ -279,10 +279,27 @@ from the network).
 
 ## Remaining
 
-### #13 — Upstream shim report (next)
+### #13 — Upstream response report
 
-The gateway shell shim drops `SubscribeResponse`/`NotFound`; the UI works around
-it with probe-then-PUT and a timeout downgrade. Report a repro upstream.
+The original note blamed the gateway shell for dropping
+`SubscribeResponse`/`NotFound`. A frame capture corrected that: the shell
+forwards every frame. The real defect is in freenet-stdlib's client-event
+serializer — `SubscribeResponse` is sent with the `PutResponse` union tag (a
+stale "not yet in generated code" workaround), so clients never see the
+confirmation or a refusal and `subscribed` is dropped. The missing `NotFound`
+observation is separate: a GET for a missing board got `Ok` acknowledgements
+and no `NotFound` within the 4 s probe (possibly GET latency), not a dropped
+frame.
+
+- Report with the captured timeline, source pointer, impact and suggested fix:
+  `reports/upstream-subscribe-response.md`.
+- **Filing blocked here:** no `gh` binary and no GitHub token in this
+  environment. File at
+  <https://github.com/freenet/freenet-stdlib/issues/new> using that file (or
+  install/auth `gh`), then link the issue here.
+- The UI workaround stays: subscribe timeout = "unconfirmed"; probe-then-PUT.
+  The `freenet.ts` comments, README and DESIGN §11 now describe the real cause
+  instead of blaming the shell.
 
 ### #15 — Atlas listing (blocked)
 

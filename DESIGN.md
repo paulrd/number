@@ -370,15 +370,19 @@ These are not design preferences; each was observed against `freenet` 0.2.150
   updates.
 - **GET for a missing instance may time out rather than report not-found.**
   `freenet-stdlib` 0.4.0 delivers not-found through the `onContractNotFound`
-  handler, not by rejecting `get()`, and the gateway's sandbox shim does not
-  always forward it. The UI probes with a short budget (4 s); any failure is
-  followed by a PUT. PUT over an existing instance is a merge no-op (the empty
-  initial state loses every slot merge), so a spurious PUT only costs bandwidth.
-- **`SubscribeResponse` is not always delivered through the shell shim.** A
-  long-lived local test showed the subscribe promise timing out while deltas
-  continued to arrive in a second browser. A timeout is therefore treated as
-  "unconfirmed"; a real refusal arrives via `onSubscribeResponse(subscribed:
-  false)` and is reported.
+  handler, not by rejecting `get()`. In captures, the node answered a GET for a
+  missing board with `Ok` acknowledgements and no `NotFound` within the 4 s
+  probe; the gateway shell forwards frames verbatim, so this is not a shim
+  drop. The UI probes with a short budget and follows any failure with a PUT.
+  PUT over an existing instance is a merge no-op (the empty initial state loses
+  every slot merge), so a spurious PUT only costs bandwidth.
+- **`SubscribeResponse` is serialized as `PutResponse`.** The gateway shell is
+  not involved: freenet-stdlib's client-event serializer still sends the
+  `PutResponse` union tag (a stale "not yet in generated code" workaround),
+  dropping `subscribed`. Clients cannot confirm a subscription or see a
+  refusal; a long-lived local test showed the subscribe promise timing out
+  while deltas continued to arrive. The UI treats a timeout as "unconfirmed".
+  Report and repro: `reports/upstream-subscribe-response.md`.
 - **The board's contract key is stable per owner but moves with the contract
   WASM.** It is `BLAKE3(BLAKE3(wasm) || owner_pubkey)`. Any contract change
   (including a dependency bump) creates a new instance; the owner key remains

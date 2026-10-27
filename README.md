@@ -216,7 +216,8 @@ updates are in place. Any node that can fetch the contract serves it at
   exactly.** The wire format stays a JSON number; the UI parses and emits it
   losslessly (BigInt), so `-9223372036854775808` and `9223372036854775807`
   survive editing, signing, and reload unchanged.
-- **Live updates** arrive through subscription deltas. A subscription timeout in
-  the gateway shell is treated as "unconfirmed", not failed — refusals surface
-  through the `SubscribeResponse` callback, and live deltas have been verified
-  against a local node.
+- **Live updates** arrive through subscription deltas. The node currently
+  serializes `SubscribeResponse` as `PutResponse` (upstream freenet-stdlib bug;
+  see `reports/upstream-subscribe-response.md`), so a subscribe timeout is
+  treated as "unconfirmed", not failed. Live deltas have been verified against
+  a local node.
