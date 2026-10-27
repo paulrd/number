@@ -291,13 +291,9 @@ frame.
 
 - Report with the captured timeline, source pointer, impact and suggested fix:
   `reports/upstream-subscribe-response.md`.
-- **Filing deferred by the owner:** no `gh` binary or GitHub token here, and
-  the owner chose to leave the report in the repo. To file, use
-  <https://github.com/freenet/freenet-stdlib/issues/new> and paste from
-  "## Summary" onward, or use `gh issue create --repo freenet/freenet-stdlib
-  --title "flatbuffer client API serializes SubscribeResponse as PutResponse"
-  --body-file reports/upstream-subscribe-response.md`. Link the issue here if
-  it is ever filed.
+- **Filed:** <https://github.com/freenet/freenet-stdlib/issues/140>
+  (2026-10-27), with cross-references to #131 (the GET/NotFound observation)
+  and #106 (request ids, which would contain the stray `PutResponse` hazard).
 - Re-verified on 0.2.151 (2026-10-27): still present. Subscribe → `PutResponse`
   at 44 ms, no `SubscribeResponse`, timeout at 12.4 s; the serializer arm is
   unchanged on `main`.
@@ -371,7 +367,8 @@ make verify-merge
 
 ## Working tree
 
-Clean. #13's report is committed; #14 is in `1da4fa3`, #12 in `0658c1c`, #11 in
+Clean. #13's report is committed and filed as freenet-stdlib#140; #14 is in
+`1da4fa3`, #12 in `0658c1c`, #11 in
 `cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`,
 #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
