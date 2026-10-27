@@ -118,6 +118,26 @@ drops out is not a clean bill of health.
   violations, 0 inconclusive, 14/14 laws covered. WASM bytes unchanged, so no
   re-key (`make check-artifacts` still matches `published/`).
 
+### #8 — Dev proxy
+
+`npm run dev` could not reach a node: it talked to `:8080`, which has no `/v1`.
+
+- `ui/dev-proxy.ts` plus `vite.config.ts`: a dev-only proxy for `/v1` (HTTP and
+  WebSocket) to `FREENET_NODE_URL` (default `http://127.0.0.1:7510`).
+- Auth: mint a token the way the gateway shell does — load
+  `/v1/contract/web/<id>/` and read `freenetBridge("<token>")` — then send it as
+  a Bearer header on the upgrade, which the node treats like `authToken`.
+  `FREENET_AUTH_TOKEN` skips minting; `FREENET_WEBAPP_ID` overrides the pin.
+- Disabled for `vite build`, unit tests, `vite preview` and offline mode, so
+  none of those need a node. If minting fails the server still starts with a
+  warning: contract reads work, delegate actions fail until the site is
+  published or a token is supplied.
+- Verified: `npm run dev` connects through the proxy, delegate attestation
+  works, identity `7193df71…` and board `4JkW…` / slot 7 render with a clean
+  console; `make e2e-offline` still runs with no node and no mint delay.
+- Tokens are in-memory on the node, so restart the dev server after restarting
+  the node.
+
 ### #5/#6 — Browser smoke and CI
 
 - `ui/e2e/offline.spec.ts` — built UI + mock backend, save, axe, clean console.
@@ -128,12 +148,7 @@ drops out is not a clean bill of health.
 
 ## Remaining
 
-### #8 — Dev proxy (next)
-
-`npm run dev` cannot reach a node: no `/v1` proxy and no auth-token path in
-`vite.config.ts`.
-
-### #9 — Port consistency
+### #9 — Port consistency (next)
 
 `make node` runs default `:7509`; README/local verification use `:7510`.
 Make the port a variable and add an isolated target.
@@ -215,13 +230,10 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #7 work: `contract/examples/gen_corpus.rs`,
-`scripts/verify-merge.sh`, and edits to `contract/Cargo.toml`,
-`contract/Cargo.lock`, `Makefile`, `README.md`, `DESIGN.md`, `BACKLOG.md`.
-The #3 build gate is committed in `8bba3e2`; #1/#2/#4/#5/#6 in `ba81747`.
+Uncommitted #8 work: `ui/dev-proxy.ts`, `ui/src/dev-proxy.test.ts`,
+`ui/vite.config.ts`, `ui/tsconfig.json`, `README.md`, `BACKLOG.md`. #7 is
+committed in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
-#7 did not change either WASM (`make check-artifacts` still matches
-`published/`), so no re-key and no re-publish. The local node still serves the
-#3 artifacts: `delegate/webapp_contract_id.bin`, `ui/*` constants and the site
-match `published/`. Commit this tree before clearing context.
+No WASM changed, so `published/` and the local deployment still match
+(`make check-artifacts` passes). Commit this tree before clearing context.
 

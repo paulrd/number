@@ -127,9 +127,29 @@ checked-in value is the `number-local` id; a production site key has a
 different id, so update the file and re-publish the delegate before building
 the UI for that site.
 
-For frontend iteration, `npm --prefix ui run dev` serves the UI at :8080; point
-it at a node with a `/v1` proxy and an auth token (the gateway shell normally
-does both — see `references` in the dapp-builder skill).
+### Frontend iteration (dev server)
+
+`npm --prefix ui run dev` serves the UI at `:8080` and proxies `/v1` (HTTP and
+WebSocket) to the local node, so the app uses the real delegate and board
+instead of talking to `:8080`.
+
+On startup it mints a dev auth token the way the gateway shell does: it loads
+the node's shell page for the webapp in `delegate/webapp_contract_id.txt` and
+presents that credential on the WebSocket upgrade. The node uses it to attest
+`MessageOrigin::WebApp`, which the delegate requires, so the site must be
+installed on the node. Overrides:
+
+- `FREENET_NODE_URL` — node origin (default `http://127.0.0.1:7510`; see #9)
+- `FREENET_WEBAPP_ID` — the webapp whose origin the delegate is pinned to
+- `FREENET_AUTH_TOKEN` — use an explicit token instead of minting one
+
+If minting fails the server still starts: contract reads work, delegate actions
+fail with a visible error. Tokens live in the node's memory, so restart the dev
+server after restarting the node. None of this runs for `npm run build`,
+`npm test`, `vite preview`, or offline mode.
+
+The dev server proxies a node credential, so keep it on loopback: do not pass
+`--host 0.0.0.0` on a machine where other users can reach the port.
 
 ## Behaviour notes
 
