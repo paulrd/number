@@ -1,0 +1,33 @@
+[package]
+name = "number-delegate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Standalone crate: own Cargo.lock (delegate key = BLAKE3(BLAKE3(wasm)||params)).
+[workspace]
+
+[dependencies]
+freenet-stdlib = { version = "=0.12.1", features = ["contract"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+hex = "=0.4.3"
+ed25519-dalek = "=2.1.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-delegate"]
+freenet-main-delegate = []
+trace = ["freenet-stdlib/trace"]
+
+[dev-dependencies]
+proptest = "=1.12.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

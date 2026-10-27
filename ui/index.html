@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      No CSP meta here: the gateway already sets the effective policy for the
+      sandboxed iframe, and a stricter meta CSP in this document blocks the
+      gateway's inline WebSocket shim (which is how the sandboxed app reaches
+      the node). Vendoring all assets is what keeps the app compatible.
+    -->
+    <meta name="description" content="A personal Freenet board with eight signed integer slots." />
+    <meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#11120f" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <title>number</title>
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="title-block">
+          <p class="eyebrow">Personal Freenet board</p>
+          <div class="wordmark-row">
+            <h1 class="wordmark">number</h1>
+            <p class="wordmark-tag" aria-hidden="true">
+              <span class="wordmark-count">08</span>
+              <span class="wordmark-word">slots</span>
+            </p>
+          </div>
+          <p class="tagline">Eight slots. One owner. Change a value, keep it.</p>
+        </div>
+
+        <div class="connection-block">
+          <div class="status-row">
+            <span id="status-pill" class="status-pill" data-status="starting" role="status" aria-live="polite">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="status-text">Starting…</span>
+            </span>
+            <button id="reconnect" class="button button--quiet" type="button">Reconnect</button>
+          </div>
+          <p id="status-detail" class="status-detail" aria-live="polite">Preparing the board</p>
+
+          <dl class="meta-list">
+            <div class="meta-row">
+              <dt>Identity</dt>
+              <dd>
+                <button id="identity-copy" class="copy-button" type="button" disabled>
+                  <code id="identity-short">Not available</code>
+                </button>
+              </dd>
+            </div>
+            <div class="meta-row">
+              <dt>Contract</dt>
+              <dd>
+                <button id="contract-copy" class="copy-button" type="button" disabled>
+                  <code id="contract-short">Not derived</code>
+                </button>
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" role="alert" aria-atomic="true" hidden>
+        <div class="notice-body">
+          <strong id="notice-title"></strong>
+          <p id="notice-text"></p>
+        </div>
+        <div class="notice-actions">
+          <button id="notice-action" class="button button--small" type="button" hidden>Retry</button>
+          <button id="notice-dismiss" class="icon-button" type="button" aria-label="Dismiss message">×</button>
+        </div>
+      </div>
+
+      <div id="warnings" class="warnings" role="status" hidden>
+        <strong>Heads up</strong>
+        <ul id="warning-list"></ul>
+      </div>
+
+      <main class="board-section">
+        <div class="board-head">
+          <h2 class="board-title">The board</h2>
+          <p class="board-meta">Signed i64</p>
+        </div>
+        <div
+          id="board"
+          class="slot-grid"
+          role="group"
+          aria-label="Number board"
+          aria-describedby="board-hint"
+        ></div>
+        <p id="board-hint" class="board-hint">
+          Select a slot to edit its value, label, unit, or note. Every change is signed by
+          the owner key and merged by the contract. Clearing a slot sends a tombstone.
+        </p>
+      </main>
+
+      <footer class="site-footer">
+        <p>Runs on Freenet.</p>
+        <a href="https://github.com/paulrd/number" target="_blank" rel="noopener">
+          Source on GitHub
+          <span class="external-mark" aria-hidden="true">↗</span>
+          <span class="sr-only"> (opens in a new tab)</span>
+        </a>
+      </footer>
+
+      <dialog id="editor" class="editor" aria-labelledby="editor-title" aria-describedby="editor-seq">
+        <form id="editor-form" class="editor-form" novalidate>
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Slot <span id="editor-slot">1</span></p>
+              <h2 id="editor-title">Edit slot</h2>
+              <p id="editor-seq" class="editor-meta"></p>
+            </div>
+            <button id="editor-close" class="icon-button" type="button" aria-label="Close editor">×</button>
+          </header>
+
+          <div class="editor-body">
+            <label class="field">
+              <span>Value</span>
+              <input
+                id="value-input"
+                name="value"
+                type="text"
+                inputmode="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="e.g. -42"
+                required
+              />
+            </label>
+            <p id="value-warning" class="field-warning" role="status" hidden></p>
+
+            <div class="field-row">
+              <label class="field">
+                <span>Label</span>
+                <input id="label-input" name="label" type="text" maxlength="64" placeholder="weight" />
+              </label>
+              <label class="field">
+                <span>Unit</span>
+                <input id="unit-input" name="unit" type="text" maxlength="16" placeholder="kg" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span>Note</span>
+              <textarea
+                id="note-input"
+                name="note"
+                rows="3"
+                maxlength="512"
+                placeholder="Optional context"
+              ></textarea>
+            </label>
+          </div>
+
+          <p id="editor-error" class="form-error" role="alert" hidden></p>
+
+          <footer class="editor-actions">
+            <button id="clear-button" class="button button--danger" type="button">Clear slot</button>
+            <div class="editor-actions-right">
+              <button id="cancel-button" class="button button--quiet" type="button">Cancel</button>
+              <button id="save-button" class="button button--primary" type="submit">Save</button>
+            </div>
+          </footer>
+        </form>
+      </dialog>
+
+      <p id="sr-status" class="sr-only" aria-live="polite"></p>
+      <noscript>
+        <p class="noscript">This board needs JavaScript enabled.</p>
+      </noscript>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
