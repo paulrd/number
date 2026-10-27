@@ -1,14 +1,25 @@
 SHELL := /bin/bash
 FDEV ?= $(HOME)/.local/bin/fdev
 FREENET ?= $(HOME)/.local/bin/freenet
+
+# Ports and node directories. Every node-facing target takes its port from
+# here, and every fdev invocation passes --port explicitly: fdev defaults to
+# 7509, which on a dev box may be an SSH forward or a system service rather
+# than the node this project is using.
 WS_PORT ?= 7510
+NETWORK_PORT ?= 31337
+NODE_ROOT ?= /tmp/opencode/number-node
+ISOLATED_WS_PORT ?= 7511
+ISOLATED_NETWORK_PORT ?= 31338
+ISOLATED_NODE_ROOT ?= /tmp/opencode/number-node-isolated
+
 BUILD_DIR ?= .build
 UI := ui
 CONTRACT := contract
 DELEGATE := delegate
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -45,12 +56,31 @@ ui:
 	cd $(UI) && npm run build
 
 dev:
-	cd $(UI) && npm run dev
+	cd $(UI) && FREENET_NODE_URL=http://127.0.0.1:$(WS_PORT) npm run dev
 
-# Local node on the default ports (7509 WS API, 31337 network).
-# Use `freenet local` for a loopback-only node; see the local-dev skill.
+# Loopback-only node on WS_PORT (default 7510) with its own data/config/log
+# dirs. `freenet local` is the right mode for this app: the UI does its own
+# contract PUT/GET, and the delegate only holds and signs (it issues no
+# contract requests, which local mode would not service).
 node:
-	$(FREENET) local
+	mkdir -p $(NODE_ROOT)/data $(NODE_ROOT)/config $(NODE_ROOT)/logs
+	$(FREENET) local \
+	  --ws-api-port $(WS_PORT) \
+	  --network-port $(NETWORK_PORT) \
+	  --data-dir $(NODE_ROOT)/data \
+	  --config-dir $(NODE_ROOT)/config \
+	  --log-dir $(NODE_ROOT)/logs
+
+# A second node on its own port and dirs, so publishing and migration tests
+# cannot touch the node the UI and dev server use.
+node-isolated:
+	mkdir -p $(ISOLATED_NODE_ROOT)/data $(ISOLATED_NODE_ROOT)/config $(ISOLATED_NODE_ROOT)/logs
+	$(FREENET) local \
+	  --ws-api-port $(ISOLATED_WS_PORT) \
+	  --network-port $(ISOLATED_NETWORK_PORT) \
+	  --data-dir $(ISOLATED_NODE_ROOT)/data \
+	  --config-dir $(ISOLATED_NODE_ROOT)/config \
+	  --log-dir $(ISOLATED_NODE_ROOT)/logs
 
 # Publish the delegate to the node the UI talks to, pinned to the webapp id in
 # delegate/webapp_contract_id.txt. Re-running this with a changed id/code

@@ -147,5 +147,5 @@ echo "    delegate key:       $DELEGATE_KEY"
 echo "    webapp id:          $WEBAPP_ID"
 echo
 echo "Next: re-publish the delegate (make publish-delegate) and update the site"
-echo "      (fdev website update --key number-local ui/dist) so the served UI"
+echo "      (fdev --port 7510 website update --key number-local ui/dist) so the served UI"
 echo "      carries these constants."

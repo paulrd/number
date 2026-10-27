@@ -146,14 +146,32 @@ drops out is not a clean bill of health.
   and `fdev verify-merge`.
 - `make e2e-offline` and `make e2e-gateway`.
 
+### #9 — Port consistency
+
+`make node` started the default `:7509` while README/local verification used
+`:7510`, and `fdev` defaults to `7509` too. On a dev box 7509 can be an SSH
+forward or a system service, so a command relying on the default writes to the
+wrong node. (Hit in practice: a read-only `fdev website list` without `--port`
+went to a forwarded VPS peer.)
+
+- Ports and directories are variables: `WS_PORT` (7510), `NETWORK_PORT`
+  (31337), `NODE_ROOT` (`/tmp/opencode/number-node`), plus
+  `ISOLATED_WS_PORT` (7511), `ISOLATED_NETWORK_PORT` (31338) and
+  `ISOLATED_NODE_ROOT`.
+- `make node` uses them, creates the directories (freenet refuses a missing
+  config dir) and stays loopback. `make node-isolated` starts a second node on
+  7511 for publish/migration tests that must not touch the UI's node.
+- `make dev` derives `FREENET_NODE_URL` from `WS_PORT`.
+- Every fdev invocation passes `--port` (`publish-delegate`, and the README and
+  `record-artifacts` recipes); the README explains why fdev's 7509 default is
+  unsafe here.
+- Verified: `make node-isolated` served 7511 while the UI node stayed up on
+  7510; both were stopped/left intact; dry-runs show the expected ports; no
+  target or script invokes fdev without `--port`.
+
 ## Remaining
 
-### #9 — Port consistency (next)
-
-`make node` runs default `:7509`; README/local verification use `:7510`.
-Make the port a variable and add an isolated target.
-
-### #10 — Identity export/import for users
+### #10 — Identity export/import for users (next)
 
 The seed lives only in the local delegate. Export/import across devices is not
 exposed in the UI. This is user-facing portability, not automatic migration.
@@ -230,9 +248,9 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #8 work: `ui/dev-proxy.ts`, `ui/src/dev-proxy.test.ts`,
-`ui/vite.config.ts`, `ui/tsconfig.json`, `README.md`, `BACKLOG.md`. #7 is
-committed in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Uncommitted #9 work: `Makefile`, `README.md`, `scripts/build.sh` and
+`scripts/record-artifacts.sh` (port docs/hints), `BACKLOG.md`. #8 is committed
+in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
 No WASM changed, so `published/` and the local deployment still match
 (`make check-artifacts` passes). Commit this tree before clearing context.

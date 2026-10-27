@@ -72,7 +72,7 @@ push. `make record-artifacts` is the only supported way to change `published/`.
 
 The delegate is pinned to one web container contract instance. Its parameters
 are the 32 raw bytes of that webapp's contract id, read from
-`delegate/webapp_contract_id.txt` (base58; `fdev website list` prints it) or
+`delegate/webapp_contract_id.txt` (base58; `fdev --port 7510 website list` prints it) or
 from `WEBAPP_CONTRACT_ID`. The build writes
 `delegate/webapp_contract_id.bin` for publishing and derives the parameterised
 delegate key for the UI. Changing the id or the delegate code re-keys the
@@ -101,22 +101,29 @@ A predecessor pinned to a different webapp id cannot be called from the new UI
 
 ## Run locally
 
+`make node` runs a loopback-only node on `:7510` (WS API) with data, config
+and logs under `/tmp/opencode/number-node`. `make node-isolated` starts a
+second node on `:7511` / `:31338` with its own directories, for publish and
+migration tests that must not touch the node the UI uses. Override with
+`WS_PORT`, `NETWORK_PORT`, `NODE_ROOT`, or the `ISOLATED_*` equivalents.
+
 ```bash
-# 1. isolated node on :7510 (default 7509 may be a system service)
-freenet local --ws-api-port 7510 \
-  --data-dir /tmp/number-node/data \
-  --config-dir /tmp/number-node/config \
-  --log-dir /tmp/number-node/logs
+# 1. the node the UI talks to
+make node
 
 # 2. register the delegate with that node, pinned to this webapp id
 fdev --port 7510 publish --code delegate/build/freenet/number_delegate \
   --parameters delegate/webapp_contract_id.bin delegate
 
 # 3. publish the UI as a webapp (the URL is permanent; updates are in-place)
-fdev website init number-local            # once; back up the key file
+fdev --port 7510 website init number-local      # once; back up the key file
 fdev --port 7510 website publish --key number-local ui/dist
 # later: fdev --port 7510 website update --key number-local ui/dist
 ```
+
+Always pass `--port`: `fdev` defaults to `7509`, which on a development
+machine may be an SSH forward or a system service rather than this node. The
+same applies to `fdev --port 7510 website list`.
 
 Open the printed `/v1/contract/web/<id>/` URL on the node's port. The board is
 created on first load (the UI PUTs the bundled `number_contract.wasm` with the
@@ -139,7 +146,8 @@ presents that credential on the WebSocket upgrade. The node uses it to attest
 `MessageOrigin::WebApp`, which the delegate requires, so the site must be
 installed on the node. Overrides:
 
-- `FREENET_NODE_URL` — node origin (default `http://127.0.0.1:7510`; see #9)
+- `FREENET_NODE_URL` — node origin (default `http://127.0.0.1:7510`, i.e.
+  `WS_PORT`; `make dev` sets it for you)
 - `FREENET_WEBAPP_ID` — the webapp whose origin the delegate is pinned to
 - `FREENET_AUTH_TOKEN` — use an explicit token instead of minting one
 

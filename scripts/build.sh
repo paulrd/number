@@ -136,9 +136,10 @@ fi
 if [ "$WITH_UI" -eq 1 ]; then
   echo "==> ui constants"
   # The delegate is pinned to one web container contract instance. Its params
-  # are the 32 raw bytes of that contract's instance id. `fdev website list`
-  # prints the base58 id; the file is the checked-in source of truth for the
-  # local site. Override with WEBAPP_CONTRACT_ID for another deployment.
+  # are the 32 raw bytes of that contract's instance id. `fdev --port 7510
+  # website list` prints the base58 id; the file is the checked-in source of
+  # truth for the local site. Override with WEBAPP_CONTRACT_ID for another
+  # deployment.
   WEBAPP_ID_FILE="${WEBAPP_ID_FILE:-$ROOT/delegate/webapp_contract_id.txt}"
   WEBAPP_ID="${WEBAPP_CONTRACT_ID:-}"
   if [ -z "$WEBAPP_ID" ]; then
