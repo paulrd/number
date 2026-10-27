@@ -61,18 +61,11 @@ publish-delegate: build
 	  --parameters $(DELEGATE)/webapp_contract_id.bin \
 	  delegate
 
-# Merge-law corpus check (contract crate example generates it).
+# Merge-law check: generated bundle carries states, deltas, summaries and
+# transitions, so every law (including the delta laws) generates cases; the
+# script fails if any law is left with nothing to check.
 verify-merge: contract
-	rm -rf /tmp/opencode/number-corpus
-	cd $(CONTRACT) && cargo run --locked --example gen_corpus -- /tmp/opencode/number-corpus
-	$(FDEV) verify-merge \
-	  --wasm $(CONTRACT_WASM) \
-	  --params /tmp/opencode/number-corpus/params.bin \
-	  --state /tmp/opencode/number-corpus/s1.bin \
-	  --state /tmp/opencode/number-corpus/s2.bin \
-	  --state /tmp/opencode/number-corpus/s3.bin \
-	  --transition /tmp/opencode/number-corpus/s1.bin /tmp/opencode/number-corpus/s2.bin \
-	  --transition /tmp/opencode/number-corpus/s2.bin /tmp/opencode/number-corpus/s3.bin
+	FDEV="$(FDEV)" ./scripts/verify-merge.sh "$(CONTRACT_WASM)"
 
 # Offline browser smoke: real built UI + mock backend, no Freenet node.
 e2e-offline:

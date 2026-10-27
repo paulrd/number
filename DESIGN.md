@@ -276,7 +276,9 @@ Contract and delegate are excluded from any workspace (see build-system →
 - `make check-artifacts` rebuilds both WASMs reproducibly and byte-compares
   them to `published/`; `migrations.test.ts` proves every superseded generation
   in `published/manifest.json` is still in the migration registry.
-- `fdev verify-merge` on generated corpus: no violations.
+- `make verify-merge`: the generated bundle carries states, deltas, summaries
+  and transitions; 0 violations, 0 inconclusive, and each of the 14 laws
+  generates at least one case.
 - `npm run build` in `ui/`, then the in-repo Playwright offline spec
   (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:
   mount, one save, axe, clean console.

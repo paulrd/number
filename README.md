@@ -30,7 +30,7 @@ make build            # reproducible WASMs, UI constants, UI bundle
 make check            # fmt, clippy, unit tests (contract, delegate, UI)
 make check-artifacts  # rebuild and byte-compare against published/
 make record-artifacts # promote the current build to published/ (gated)
-make verify-merge     # fdev merge-law corpus check
+make verify-merge     # every merge law, with deltas/summaries/transitions
 ```
 
 Browser smoke:

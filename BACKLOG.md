@@ -91,6 +91,33 @@ Verified end-to-end locally:
 - Delegate v2 (`4BBh…`) → v4 (`BPjm…`) preserved identity, board key, and slot.
 - Contract `7aK2…` → `3f15…` preserved identity and slot `7`.
 
+### #7 — Make `verify-merge` meaningful
+
+`--state`/`--transition` cannot supply deltas or summaries, so
+`delta_idempotence` and `delta_permutation_invariance` generated **zero cases**
+and `delta_determinism` only ever tested the self-summary. A law that silently
+drops out is not a clean bill of health.
+
+- `contract/examples/gen_corpus.rs` now writes a `ReplayBundle` (schema 1) with
+  states, deltas, summaries and transitions. Deltas come from the contract's own
+  `get_state_delta(sender, recipient_summary)`; every transition is re-applied
+  (twice, for idempotence) before it is written, so the corpus cannot claim a
+  step the contract does not take.
+- Three concurrent updates share base `s2`, which is what makes
+  `delta_permutation_invariance` a genuine same-base pair rather than a
+  causally-sequenced one. A second base (`s3`) carries its own delta.
+- The bundle struct mirrors `freenet::conformance::bundle::ReplayBundle` field
+  for field. Bincode encodes fields in declaration order, so this needs no
+  node-crate dependency; the schema-1 magic makes a core-side change a loud
+  decode failure.
+- `scripts/verify-merge.sh` (behind `make verify-merge`) asserts 0 violations,
+  **0 inconclusive**, non-empty deltas/summaries, no code diagnostics, then runs
+  each of the 14 laws alone and requires at least one case. That last step is
+  what stops a law silently disappearing from the run.
+- Result: 7 states, 5 deltas, 7 summaries, 5 transitions → 264 cases, 0
+  violations, 0 inconclusive, 14/14 laws covered. WASM bytes unchanged, so no
+  re-key (`make check-artifacts` still matches `published/`).
+
 ### #5/#6 — Browser smoke and CI
 
 - `ui/e2e/offline.spec.ts` — built UI + mock backend, save, axe, clean console.
@@ -101,12 +128,7 @@ Verified end-to-end locally:
 
 ## Remaining
 
-### #7 — Make `verify-merge` meaningful (next)
-
-Current result: 34 cases, 0 violations, **0 enforceable**. Add delta/summary/
-transition corpus entries so the delta-to-current-peer law is actually checked.
-
-### #8 — Dev proxy
+### #8 — Dev proxy (next)
 
 `npm run dev` cannot reach a node: no `/v1` proxy and no auth-token path in
 `vite.config.ts`.
@@ -193,14 +215,13 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #3 work: `rust-toolchain.toml`, `published/`,
-`scripts/check-artifacts.sh`, `scripts/record-artifacts.sh`,
-`ui/src/migrations.test.ts`, and edits to `scripts/build.sh`, `Makefile`,
-`.gitignore`, `.github/workflows/ci.yml`, `ui/src/migrations.ts`, `README.md`,
-`DESIGN.md`, `BACKLOG.md`. Everything through #1/#2/#4/#5/#6 is committed in
-`ba81747`.
+Uncommitted #7 work: `contract/examples/gen_corpus.rs`,
+`scripts/verify-merge.sh`, and edits to `contract/Cargo.toml`,
+`contract/Cargo.lock`, `Makefile`, `README.md`, `DESIGN.md`, `BACKLOG.md`.
+The #3 build gate is committed in `8bba3e2`; #1/#2/#4/#5/#6 in `ba81747`.
 
-The local node has already been re-published with the #3 delegate and site, so
-`delegate/webapp_contract_id.bin`, `ui/*` constants and the served site match
-`published/`. Commit this tree before clearing context.
+#7 did not change either WASM (`make check-artifacts` still matches
+`published/`), so no re-key and no re-publish. The local node still serves the
+#3 artifacts: `delegate/webapp_contract_id.bin`, `ui/*` constants and the site
+match `published/`. Commit this tree before clearing context.
 
