@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FREENET_VERSION: "0.2.150"
+  FREENET_VERSION: "0.2.151"
 
 jobs:
   contract:

@@ -298,6 +298,9 @@ frame.
   --title "flatbuffer client API serializes SubscribeResponse as PutResponse"
   --body-file reports/upstream-subscribe-response.md`. Link the issue here if
   it is ever filed.
+- Re-verified on 0.2.151 (2026-10-27): still present. Subscribe → `PutResponse`
+  at 44 ms, no `SubscribeResponse`, timeout at 12.4 s; the serializer arm is
+  unchanged on `main`.
 - The UI workaround stays: subscribe timeout = "unconfirmed"; probe-then-PUT.
   The `freenet.ts` comments, README and DESIGN §11 now describe the real cause
   instead of blaming the shell.

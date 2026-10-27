@@ -18,7 +18,8 @@ a `subscribed: false` refusal is indistinguishable from a timeout.
 
 ## Environment
 
-- `freenet` / `fdev` 0.2.150, `freenet local` on a loopback WS API
+- `freenet` 0.2.151 / `fdev` 0.3.313 (re-verified after the update from
+  0.2.150; unchanged), `freenet local` on a loopback WS API
 - `@freenetorg/freenet-stdlib` 0.4.0 (TypeScript client)
 - Chromium via Playwright; the app was served through the gateway shell, but
   the shell forwards WebSocket frames verbatim — this is a server-side
@@ -39,6 +40,10 @@ socket opened):
   ... [freenet] subscription unconfirmed; live deltas may still arrive
  12393 READY (subscribe() gave up after its 12s timeout)
 ```
+
+Re-verified on 0.2.151: `Subscribe` at 44 ms, `PutResponse` at 44 ms, no
+`SubscribeResponse`, timeout at 12.4 s. The arm below is still present on
+`main` (line ~1469).
 
 Deltas continue to arrive, so the subscription itself is active. A
 `subscribed: false` response (subscriber limit, refusal) can never be observed.
