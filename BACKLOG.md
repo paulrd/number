@@ -12,12 +12,13 @@ Local-only deployment; not published on the live Freenet network.
 | Local node | `127.0.0.1:7510` (loopback-only) |
 | Webapp id | `BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k` |
 | Local URL | `http://127.0.0.1:7510/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
-| Current delegate key | `BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX` |
-| Current delegate code hash | `7GQ6yxU9x7KKBKfGyTx5MJysQQJjbYj8WQsG6L42xedh` |
-| Current contract code hash | `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd` |
+| Current delegate key | `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` |
+| Current delegate code hash | `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY` |
+| Current contract code hash | `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
-| Board contract id | `EgbCX4Csk7nmA4cNB7CGQ4sxLKwtJPjjcEF1HntpgZkF` |
-| Slot 1 | `7` (left by migration verification) |
+| Board contract id | `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk` |
+| Slot 1 | `7` (preserved by the #3 re-key migration) |
+| Published artifacts | `published/manifest.json` (source of truth for the address) |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -39,6 +40,33 @@ still recommended.
 - `~/.config/freenet/website-keys/number-local.toml` is mode `600`.
 - Key is in KeePass on four synced devices.
 - Fingerprint: `afb33101d4a47f6dcf2aeb5af70f62db186997c214755aa73fb8a681b968f943`.
+
+### #3 — Reproducible WASM build gate
+
+- `rust-toolchain.toml` pins rustc 1.98.0 with `wasm32-unknown-unknown`; CI
+  mirrors it.
+- `scripts/build.sh` is the single supported build: `cargo build --locked`,
+  per-crate target dirs under `--target-dir` (default `.build/`), one frozen
+  `--remap-path-prefix` namespace (`/cargo`, `/rustup`, `/build`), and a
+  post-build scan that fails if a build-machine path survived. Sealed off from
+  ambient `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS`.
+- `published/` commits both WASMs and `manifest.json` (active hashes, delegate
+  key, webapp id, generation history, toolchain). `make check-artifacts`
+  rebuilds in a throwaway dir and byte-compares; the CI `reproducible` job runs
+  it. `make record-artifacts` is the only way to change `published/`.
+- Migration guard: `record-artifacts` refuses to supersede a generation missing
+  from `ui/src/migrations.ts`, and `ui/src/migrations.test.ts` fails if any
+  superseded generation in the manifest is unregistered or the committed bytes
+  stop matching the recorded hashes. Runs in `make check` and CI's UI job.
+- Consequence, verified locally: the old artifacts embedded the build machine's
+  cargo registry paths, so excluding them re-keyed both components. Appended
+  `3f15…` to `LEGACY_CONTRACT_CODE_HASHES`; `BPjm…` was already registered.
+  Re-published the delegate (`3ViR…`) and updated the site in place. On reload
+  the UI recovered identity `7193df71…` from the old delegate and migrated the
+  board from `EgbC…` to `4JkW…`, preserving slot 0 = `7` / seq 1.
+- Reproducibility proven locally: two throwaway target dirs, and cargo vs
+  `fdev build`, all produced identical bytes (sha256
+  `e6d59ce2…` contract, `2ec258f6…` delegate).
 
 ### #4 — Delegate and contract migration
 
@@ -73,17 +101,7 @@ Verified end-to-end locally:
 
 ## Remaining
 
-### #3 — Reproducible WASM build gate (next)
-
-- Canonical build script remaps `CARGO_HOME`, `RUSTUP_HOME`, and the repo root;
-  fail if a build-machine path survives into the WASM.
-- Commit `rust-toolchain.toml`; build with `--locked` and per-crate target dirs.
-- Commit published contract artifacts and parameters, or a code-hash registry.
-- CI byte-equality check against the committed artifact.
-- Add the migration-registry guard left over from #4: a contract/delegate WASM
-  change must be accompanied by an appended registry entry.
-
-### #7 — Make `verify-merge` meaningful
+### #7 — Make `verify-merge` meaningful (next)
 
 Current result: 34 cases, 0 violations, **0 enforceable**. Add delta/summary/
 transition corpus entries so the delta-to-current-peer law is actually checked.
@@ -129,20 +147,34 @@ it with probe-then-PUT and a timeout downgrade. Report a repro upstream.
 - `44uPSHVviSrNmtmLYVfudL6sVEptdEtrmMCBP6jebboH` — test-only intermediate
   from a failed first migration attempt; not registered. Its seed/board are
   abandoned.
-- `BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX` — current, export-capable;
+- `BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX` — previous, export-capable;
   registered. Code hash `7GQ6yxU9x7KKBKfGyTx5MJysQQJjbYj8WQsG6L42xedh`.
+  Superseded by the #3 reproducible build; migrated its seed forward.
+- `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` — **current**, code hash
+  `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY`, pinned to the webapp above.
+  Recorded in `published/manifest.json`; append to `LEGACY_DELEGATES` before the
+  next delegate change (the record gate enforces it).
 - Contract `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` — old v1 hash,
   registered as legacy. Board `9UpJtiFg…`.
-- Contract `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd` — current.
-  **Append this before the next contract change.**
+- Contract `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd` — pre-remap build,
+  registered as legacy. Board `EgbCX4Csk7nmA4cNB7CGQ4sxLKwtJPjjcEF1HntpgZkF`.
+- Contract `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` — **current**,
+  reproducible. Board `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk`. Recorded
+  in `published/manifest.json`; append to `LEGACY_CONTRACT_CODE_HASHES` before
+  the next contract change.
 
 ## Rules that must not be broken
 
+- `published/` is the deployed address. Change it only with
+  `make record-artifacts`, and only after the outgoing generation is in
+  `ui/src/migrations.ts`; `make check-artifacts` must pass.
 - Before changing contract WASM, append the outgoing hash to
   `LEGACY_CONTRACT_CODE_HASHES`.
 - Before changing delegate WASM, append the outgoing key, code hash, and webapp
   id to `LEGACY_DELEGATES`.
 - Never remove a migration registry entry.
+- The build remap namespace (`/cargo`, `/rustup`, `/build`) is frozen: changing
+  a replacement root re-keys everything.
 - A predecessor pinned to a different webapp id cannot be called from the new
   UI; migrate before changing the webapp id.
 - Delegates and contracts are content-addressed: any WASM change re-keys them.
@@ -153,6 +185,7 @@ it with probe-then-PUT and a timeout downgrade. Report a repro upstream.
 
 ```bash
 make check
+make check-artifacts
 make e2e-offline
 FREENET_BASE_URL=http://127.0.0.1:7510/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/ make e2e-gateway
 make verify-merge
@@ -160,13 +193,14 @@ make verify-merge
 
 ## Working tree
 
-The code work from #1, #4, #5/#6 and the migration registry is uncommitted
-(#2 was an operational key backup). The new files are:
+Uncommitted #3 work: `rust-toolchain.toml`, `published/`,
+`scripts/check-artifacts.sh`, `scripts/record-artifacts.sh`,
+`ui/src/migrations.test.ts`, and edits to `scripts/build.sh`, `Makefile`,
+`.gitignore`, `.github/workflows/ci.yml`, `ui/src/migrations.ts`, `README.md`,
+`DESIGN.md`, `BACKLOG.md`. Everything through #1/#2/#4/#5/#6 is committed in
+`ba81747`.
 
-- `.github/workflows/ci.yml`
-- `delegate/webapp_contract_id.txt`
-- `ui/e2e/`
-- `ui/playwright.config.ts`
-- `ui/src/migrations.ts`
+The local node has already been re-published with the #3 delegate and site, so
+`delegate/webapp_contract_id.bin`, `ui/*` constants and the served site match
+`published/`. Commit this tree before clearing context.
 
-Commit them before clearing context or starting a new branch.

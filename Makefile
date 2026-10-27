@@ -2,28 +2,44 @@ SHELL := /bin/bash
 FDEV ?= $(HOME)/.local/bin/fdev
 FREENET ?= $(HOME)/.local/bin/freenet
 WS_PORT ?= 7510
+BUILD_DIR ?= .build
 UI := ui
 CONTRACT := contract
 DELEGATE := delegate
+CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build check test contract delegate ui dev node publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
+# Canonical, reproducible build (frozen path remap + --locked) plus the UI.
 build:
-	FDEV=$(FDEV) ./scripts/build.sh
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR)
 	cd $(UI) && npm run build
 
-check:
-	cd $(CONTRACT) && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-	cd $(DELEGATE) && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-	cd $(UI) && npm run build && npm test
+# WASMs only. `--no-ui` skips node/npm, so CI targets stay dependency-free.
+wasm:
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --no-ui
 
 contract:
-	cd $(CONTRACT) && CARGO_TARGET_DIR=$$PWD/target $(FDEV) build --features contract
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate contract --no-ui
 
 delegate:
-	cd $(DELEGATE) && CARGO_TARGET_DIR=$$PWD/target $(FDEV) build --package-type delegate
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate delegate --no-ui
+
+check:
+	cd $(CONTRACT) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	cd $(DELEGATE) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	cd $(UI) && npm run build && npm test
+
+# Byte-equality gate: a fresh reproducible build must match published/.
+check-artifacts:
+	./scripts/check-artifacts.sh
+
+# Record the current build as the published artifact set (refuses to orphan a
+# generation that is missing from ui/src/migrations.ts).
+record-artifacts:
+	FDEV=$(FDEV) ./scripts/record-artifacts.sh
 
 ui:
 	cd $(UI) && npm run build
@@ -48,9 +64,9 @@ publish-delegate: build
 # Merge-law corpus check (contract crate example generates it).
 verify-merge: contract
 	rm -rf /tmp/opencode/number-corpus
-	cd $(CONTRACT) && cargo run --example gen_corpus -- /tmp/opencode/number-corpus
+	cd $(CONTRACT) && cargo run --locked --example gen_corpus -- /tmp/opencode/number-corpus
 	$(FDEV) verify-merge \
-	  --wasm $(CONTRACT)/target/wasm32-unknown-unknown/release/number_contract.wasm \
+	  --wasm $(CONTRACT_WASM) \
 	  --params /tmp/opencode/number-corpus/params.bin \
 	  --state /tmp/opencode/number-corpus/s1.bin \
 	  --state /tmp/opencode/number-corpus/s2.bin \
@@ -70,6 +86,8 @@ e2e-gateway:
 clean:
 	cd $(CONTRACT) && cargo clean
 	cd $(DELEGATE) && cargo clean
-	rm -rf $(UI)/dist $(UI)/node_modules
+	rm -rf $(BUILD_DIR) $(UI)/dist $(UI)/node_modules
 	rm -f $(UI)/contract_code_hash*.json $(UI)/contract_code_hash.txt \
-	      $(UI)/delegate_key*.json $(UI)/delegate_key.txt $(UI)/public/number_contract.wasm
+	      $(UI)/delegate_key*.json $(UI)/delegate_key.txt \
+	      $(UI)/delegate_code_hash*.json $(UI)/delegate_code_hash.txt \
+	      $(UI)/public/number_contract.wasm

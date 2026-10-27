@@ -23,8 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to match rust-toolchain.toml; byte equality depends on the exact rustc.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -41,8 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -53,6 +56,20 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
+
+  reproducible:
+    name: Reproducible WASM (byte equality)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          targets: wasm32-unknown-unknown
+      # No Swatinem/rust-cache and no cached target dir here on purpose:
+      # a stale or cached target dir changes the emitted WASM bytes.
+      - name: Check committed WASM artifacts
+        run: ./scripts/check-artifacts.sh
 
   ui:
     name: UI (build, unit tests)
@@ -106,8 +123,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:

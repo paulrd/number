@@ -1,0 +1,11 @@
+# Pinned so a rebuild produces the same WASM bytes (and therefore the same
+# contract id / delegate key). rustc version changes the output.
+#
+# Update this only as a deliberate re-key: append the outgoing contract code
+# hash / delegate entry to ui/src/migrations.ts first, then rebuild and run
+# `make record-artifacts`. CI mirrors this version and fails on byte drift.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

@@ -252,8 +252,11 @@ The webapp id itself comes from `delegate/webapp_contract_id.txt`; see §7.
 contract/     # standalone crate, own Cargo.lock (NOT a workspace member)
 delegate/     # standalone crate, own Cargo.lock
 ui/           # Vite app; e2e/ holds the Playwright specs
-scripts/      # build/publish helpers
-.github/      # CI (contract, delegate, UI, offline browser smoke, merge laws)
+published/    # committed reproducible WASMs + manifest.json (the address)
+scripts/      # canonical build, byte-equality gate, artifact recorder
+rust-toolchain.toml  # pinned rustc; a bump is a deliberate re-key
+.build/       # throwaway per-crate cargo target dirs (ignored)
+.github/      # CI (contract, delegate, UI, smoke, merge laws, byte equality)
 Makefile
 ```
 
@@ -270,6 +273,9 @@ Contract and delegate are excluded from any workspace (see build-system →
   `Delegate` / missing-origin rejection, malformed delegate parameters failing
   closed, `status` without seed creation, export/import round-trip preserving
   identity and counters, and import refusing to overwrite an existing seed.
+- `make check-artifacts` rebuilds both WASMs reproducibly and byte-compares
+  them to `published/`; `migrations.test.ts` proves every superseded generation
+  in `published/manifest.json` is still in the migration registry.
 - `fdev verify-merge` on generated corpus: no violations.
 - `npm run build` in `ui/`, then the in-repo Playwright offline spec
   (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:

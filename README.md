@@ -18,16 +18,19 @@ Current deployment state, done work, and the remaining backlog:
 
 ## Prerequisites
 
-- Rust 1.85+ with the `wasm32-unknown-unknown` target
+- Rust per the committed `rust-toolchain.toml` (1.98.0, with the
+  `wasm32-unknown-unknown` target; `rustup` reads the file)
 - `fdev` and `freenet` on `PATH`
 - Node.js 22.12+ (Playwright/axe requirement)
 
 ## Build
 
 ```bash
-make build     # contract + delegate WASMs, UI constants, UI bundle
-make check     # fmt, clippy, unit tests (contract, delegate, UI)
-make verify-merge   # fdev merge-law corpus check
+make build            # reproducible WASMs, UI constants, UI bundle
+make check            # fmt, clippy, unit tests (contract, delegate, UI)
+make check-artifacts  # rebuild and byte-compare against published/
+make record-artifacts # promote the current build to published/ (gated)
+make verify-merge     # fdev merge-law corpus check
 ```
 
 Browser smoke:
@@ -41,14 +44,31 @@ FREENET_BASE_URL=http://127.0.0.1:7510/v1/contract/web/<id>/ \
 
 `make e2e-offline` also runs an axe accessibility check. The gateway spec is
 skipped unless `FREENET_BASE_URL` points at a `/v1/contract/web/...` URL.
-CI runs the contract/delegate/UI suites, the offline browser smoke, and
-`fdev verify-merge`; see `.github/workflows/ci.yml`.
+CI runs the contract/delegate/UI suites, the offline browser smoke,
+`fdev verify-merge`, and the WASM byte-equality gate; see
+`.github/workflows/ci.yml`.
 
-`scripts/build.sh` records the contract/delegate code hashes exactly as `fdev`
-reports them, copies the raw contract WASM into `ui/public/`, and writes the
-delegate key bytes for the UI. Contract and delegate are standalone crates with
-their own `Cargo.lock` (see DESIGN §9): a dependency change must not silently
-move the contract's address.
+### Reproducible WASM
+
+A contract's id is `BLAKE3(BLAKE3(wasm) || parameters)` and a delegate's key is
+`BLAKE3(BLAKE3(wasm) || parameters)`, so the WASM bytes **are** the address.
+`scripts/build.sh` is the only supported way to produce them:
+
+- one frozen `--remap-path-prefix` namespace for `CARGO_HOME`, `RUSTUP_HOME`
+  and the repo root, so no build-machine path reaches the bytes;
+- `--locked`, so a stale `Cargo.lock` fails instead of silently re-resolving;
+- a per-crate target dir under `--target-dir` (default `.build/`), so a hash
+  you record can be built in a throwaway directory;
+- a post-build scan that fails if a build-machine path survives in the WASM.
+
+Contract and delegate are standalone crates with their own `Cargo.lock` (see
+DESIGN §9), and `rust-toolchain.toml` pins rustc: a dependency or toolchain
+change must not silently move the address.
+
+The current artifacts and their generations are committed in `published/`
+(`manifest.json` plus both WASMs). `make check-artifacts` rebuilds into a
+throwaway dir and fails unless the bytes match exactly; CI runs it on every
+push. `make record-artifacts` is the only supported way to change `published/`.
 
 The delegate is pinned to one web container contract instance. Its parameters
 are the 32 raw bytes of that webapp's contract id, read from
@@ -67,10 +87,15 @@ Append the outgoing artifact to `ui/src/migrations.ts` **before** rebuilding:
 - delegate change: append the current delegate key, code hash, and webapp id
   to `LEGACY_DELEGATES`.
 
-The UI probes these on first load: the delegate export/import path carries the
-owner seed forward, and the contract path re-PUTs old signed state into the new
-instance. Delegate migration is forward-only — a predecessor shipped without
-the `export` command cannot answer and is unrecoverable. Never remove an entry.
+This is enforced, not just documented: `scripts/record-artifacts.sh` refuses to
+supersede a generation missing from the registry, and `migrations.test.ts`
+fails if any superseded generation recorded in `published/manifest.json` is
+missing. Never remove an entry.
+
+The UI probes the registry on first load: the delegate export/import path
+carries the owner seed forward, and the contract path re-PUTs old signed state
+into the new instance. Delegate migration is forward-only — a predecessor
+shipped without the `export` command cannot answer and is unrecoverable.
 A predecessor pinned to a different webapp id cannot be called from the new UI
 (its origin policy refuses); migrate before changing the webapp id.
 

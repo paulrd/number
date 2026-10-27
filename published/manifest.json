@@ -1,0 +1,41 @@
+{
+  "note": "Committed reproducible artifacts. These bytes are the contract code hash and the delegate key. `make check-artifacts` rebuilds and compares bytes; `make record-artifacts` is the only supported way to change this file. Generations are newest-first and must stay in ui/src/migrations.ts.",
+  "toolchain": "1.98.0",
+  "remap": {
+    "cargoHome": "/cargo",
+    "rustupHome": "/rustup",
+    "repoRoot": "/build"
+  },
+  "contract": {
+    "codeHash": "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
+    "file": "published/contract/number_contract.wasm",
+    "generations": [
+      "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
+      "3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd",
+      "7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez"
+    ]
+  },
+  "delegate": {
+    "codeHash": "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",
+    "key": "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
+    "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+    "file": "published/delegate/number_delegate.wasm",
+    "generations": [
+      {
+        "key": "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
+        "codeHash": "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
+      {
+        "key": "BPjm4EX38ag6SJG7ABA1H494nWCxVXo1GRM7UzC74SVX",
+        "codeHash": "7GQ6yxU9x7KKBKfGyTx5MJysQQJjbYj8WQsG6L42xedh",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
+      {
+        "key": "4BBhEqP7m5aU3Z8UcDuWZ5ubc1jGZBSTwmxtSkca3SAE",
+        "codeHash": "FMjnDNpcFVEJs64iGffFXRktbQDF8f1HgGdDQZ4EHdKW",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      }
+    ]
+  }
+}
