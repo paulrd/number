@@ -498,6 +498,12 @@ function parseValueInput(raw: string): number {
   if (!Number.isFinite(value) || !Number.isInteger(value)) {
     throw new Error("That value could not be represented as an integer.");
   }
+  if (!Number.isSafeInteger(value)) {
+    // See updateValueWarning: the JSON wire format would round this silently.
+    throw new Error(
+      "This board accepts values up to ±9,007,199,254,740,991 exactly.",
+    );
+  }
   return Object.is(value, -0) ? 0 : value;
 }
 
@@ -544,9 +550,14 @@ function updateValueWarning(): void {
 
   const numeric = Number(raw);
   if (!Number.isSafeInteger(numeric)) {
+    // The wire format carries a JSON number, so anything outside this range
+    // would be silently rounded before signing. The contract accepts the full
+    // i64 range; this UI does not, until the state encoder can emit the exact
+    // typed digits.
     setValueWarning(
-      "Outside JavaScript's safe integer range (±9,007,199,254,740,991); " +
-        "the value may be rounded when sent.",
+      "Beyond JavaScript's exact integer range (±9,007,199,254,740,991); " +
+        "enter a smaller whole number.",
+      true,
     );
     return;
   }

@@ -844,7 +844,7 @@ textarea:focus-visible {
 
 .slot:hover:not(:disabled),
 .slot:focus-visible {
-  background: var(--surface-raised);
+  background-color: var(--surface-raised);
 }
 
 .slot:hover:not(:disabled)::before,
@@ -1236,7 +1236,7 @@ body:has(#editor[open]) {
   background: var(--surface-muted);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 0.94rem;
+  font-size: 1rem;
   font-weight: 400;
   letter-spacing: normal;
   line-height: 1.4;
@@ -1553,8 +1553,17 @@ body:has(#editor[open]) {
     font-size: clamp(1.3rem, 5.5vw, 1.6rem);
   }
 
+  .slot-value-line {
+    flex-wrap: wrap;
+  }
+
   .slot-value.is-xlong {
+    flex: 1 0 100%;
     font-size: clamp(0.98rem, 4.1vw, 1.2rem);
+  }
+
+  .slot-value.is-xlong + .slot-unit {
+    padding-bottom: 0;
   }
 
   .slot-unit {

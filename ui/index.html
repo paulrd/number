@@ -91,13 +91,19 @@
         ></div>
         <p id="board-hint" class="board-hint">
           Select a slot to edit its value, label, unit, or note. Every change is signed by
-          the owner key and merged by the contract. Clearing a slot sends a tombstone.
+          the owner key and merged by the contract. Clearing a slot records a tombstone, so
+          an older copy cannot bring it back.
         </p>
       </main>
 
       <footer class="site-footer">
         <p>Runs on Freenet.</p>
-        <a href="https://github.com/paulrd/number" target="_blank" rel="noopener">
+        <a
+          class="footer-link"
+          href="https://github.com/paulrd/number"
+          target="_blank"
+          rel="noopener"
+        >
           Source on GitHub
           <span class="external-mark" aria-hidden="true">↗</span>
           <span class="sr-only"> (opens in a new tab)</span>
