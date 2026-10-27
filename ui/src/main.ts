@@ -7,6 +7,7 @@ import {
   type BoardStatus,
 } from "./board";
 import { DelegateError } from "./delegate";
+import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
@@ -26,6 +27,7 @@ const isOffline = __OFFLINE_MODE__;
 const BOARD_CONFIG = {
   contractCodeHash: __CONTRACT_CODE_HASH__,
   contractWasmUrl: __CONTRACT_WASM_URL__,
+  delegateWasmUrl: __DELEGATE_WASM_URL__,
   delegateKeyBytes: __DELEGATE_KEY_BYTES__,
   delegateCodeHashBytes: __DELEGATE_CODE_HASH_BYTES__,
   delegateParamsBytes: __WEBAPP_CONTRACT_ID_BYTES__,
@@ -695,6 +697,12 @@ const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
 
+const delegateDialog = createDelegateDialog({
+  offline: isOffline,
+  installDelegate: () => backend.installDelegate(),
+  announce,
+});
+
 const identityDialogs = createIdentityDialogs({
   offline: isOffline,
   getIdentity: () => identity,
@@ -715,9 +723,11 @@ const identityDialogs = createIdentityDialogs({
   },
 });
 
-// Offline mode never asks for an identity, and must never show the setup
-// dialog. Leaving the callback unset also keeps the board from waiting on one.
+// Offline mode never asks for a delegate or an identity, and must never show
+// either first-run dialog. Leaving the callbacks unset also keeps the board
+// from waiting on one.
 if (!isOffline) {
+  callbacks.onDelegateRequired = () => delegateDialog.requestInstall();
   callbacks.onIdentityRequired = () => identityDialogs.requestIdentity();
 }
 

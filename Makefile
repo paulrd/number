@@ -113,4 +113,4 @@ clean:
 	rm -f $(UI)/contract_code_hash*.json $(UI)/contract_code_hash.txt \
 	      $(UI)/delegate_key*.json $(UI)/delegate_key.txt \
 	      $(UI)/delegate_code_hash*.json $(UI)/delegate_code_hash.txt \
-	      $(UI)/public/number_contract.wasm
+	      $(UI)/public/number_contract.wasm $(UI)/public/number_delegate.wasm

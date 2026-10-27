@@ -96,6 +96,10 @@ export class OfflineBoard implements BoardBackend {
     throw new Error("Offline mode cannot import an identity.");
   }
 
+  async installDelegate(): Promise<never> {
+    throw new Error("Offline mode cannot install a delegate.");
+  }
+
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
     if (!this.started || !this.currentState) {
       throw new Error("Offline board is not ready yet");

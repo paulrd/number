@@ -17,6 +17,7 @@ import {
 } from "./migrations";
 import {
   DelegateClient,
+  DelegateError,
   type DelegateIdentity,
   type ExportedSecrets,
 } from "./delegate";
@@ -49,6 +50,12 @@ export interface BoardCallbacks {
   onError: (error: Error) => void;
   onWarning?: (message: string) => void;
   /**
+   * Called when the node does not have the number-delegate installed. The UI
+   * asks the user to install the bundled delegate and resolves after
+   * `installDelegate()` succeeds. If it rejects, the board cannot continue.
+   */
+  onDelegateRequired?: () => Promise<void>;
+  /**
    * Called once, before the first identity is created, when the delegate has
    * no seed and no legacy predecessor answered. The UI offers "create a new
    * identity" or "import a backup"; it resolves when the user has chosen or a
@@ -61,6 +68,8 @@ export interface BoardCallbacks {
 export interface BoardConfig {
   contractCodeHash: string;
   contractWasmUrl: string;
+  /** Site-relative URL of the bundled delegate WASM, used for installation. */
+  delegateWasmUrl: string;
   delegateKeyBytes: number[];
   delegateCodeHashBytes: number[];
   delegateParamsBytes: number[];
@@ -79,6 +88,8 @@ export interface BoardBackend {
   exportIdentity(): Promise<ExportedSecrets>;
   /** Restore a seed into a delegate that has none (a new device). */
   importIdentity(seed: string, nextSeq: number[]): Promise<void>;
+  /** Register the bundled delegate on this node (a fresh device). */
+  installDelegate(): Promise<void>;
   close(): void;
 }
 
@@ -134,6 +145,36 @@ export class OnlineBoard implements BoardBackend {
    * published before the export handler existed cannot answer; that generation
    * is unrecoverable and is recorded as such in `migrations.ts`.
    */
+  /**
+   * Make sure the node has this app's delegate before anything asks it for an
+   * identity. A delegate is local to a node and is not fetched from the
+   * network, so a fresh node has neither the code nor a seed.
+   */
+  private async ensureDelegate(): Promise<void> {
+    const probe = await this.delegate
+      .status(10_000)
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    if (probe === null) return;
+    // A missing delegate is not answered at all by the client API (the node
+    // logs it and returns no application message), so the only signal a fresh
+    // node gives is a timeout. Treat that as "may need installing": the
+    // registration is idempotent, and a genuinely unresponsive node fails the
+    // post-install probe with the same error.
+    const needsInstall =
+      probe instanceof DelegateError &&
+      (probe.code === "Missing" || probe.code === "Timeout");
+    if (!needsInstall) throw probe;
+    if (!this.callbacks.onDelegateRequired) throw probe;
+
+    this.callbacks.onStatus("identity", "installing the local delegate");
+    await this.callbacks.onDelegateRequired();
+    // The prompt resolves only after a successful install; re-probe so a
+    // dismissed/failed prompt fails here with the delegate error, not later.
+    await this.delegate.status(10_000);
+  }
+
   private async migrateDelegateSecrets(): Promise<void> {
     if (LEGACY_DELEGATES.length === 0) return;
 
@@ -241,6 +282,7 @@ export class OnlineBoard implements BoardBackend {
 
       this.callbacks.onStatus("connecting", "opening WebSocket");
       await this.contract.connect();
+      await this.ensureDelegate();
 
       this.callbacks.onStatus("identity", "checking for a legacy identity");
       this.migrating = true;
@@ -364,6 +406,31 @@ export class OnlineBoard implements BoardBackend {
    */
   async importIdentity(seed: string, nextSeq: number[]): Promise<void> {
     await this.delegate.importSecrets(seed, nextSeq);
+  }
+
+  /**
+   * Fetch the delegate WASM shipped with this site, verify it against the
+   * injected code hash, and register it on the node.
+   */
+  async installDelegate(): Promise<void> {
+    if (!this.contract || !this.delegate) {
+      throw new Error("The Freenet connection is not open yet.");
+    }
+    let response: Response;
+    try {
+      response = await fetch(this.config.delegateWasmUrl);
+    } catch (error) {
+      throw new Error(
+        `Could not download the delegate from ${this.config.delegateWasmUrl}: ${errorMessage(error)}`,
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Could not download the delegate from ${this.config.delegateWasmUrl} (HTTP ${response.status}).`,
+      );
+    }
+    const code = new Uint8Array(await response.arrayBuffer());
+    await this.delegate.register(code);
   }
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {

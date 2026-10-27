@@ -185,6 +185,81 @@
       </dialog>
 
       <dialog
+        id="delegate-install"
+        class="editor identity-dialog delegate-dialog"
+        aria-labelledby="delegate-title"
+        aria-describedby="delegate-desc"
+      >
+        <div id="delegate-shell" class="identity-shell">
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">First run</p>
+              <h2 id="delegate-title" tabindex="-1">Install the local component</h2>
+              <p id="delegate-desc" class="identity-intro">
+                number keeps the key that signs your board on this device, in a
+                small Freenet component called a delegate. This node does not have
+                it yet, so number cannot create or open a board here.
+              </p>
+            </div>
+          </header>
+
+          <div id="delegate-body" class="editor-body" tabindex="0">
+            <ul class="delegate-points">
+              <li>
+                <span class="delegate-point-index" aria-hidden="true">01</span>
+                <div>
+                  <h3>What installs</h3>
+                  <p>
+                    The component is copied from this site onto this Freenet
+                    node. It runs locally, and only this app can call it.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span class="delegate-point-index" aria-hidden="true">02</span>
+                <div>
+                  <h3>What stays local</h3>
+                  <p>
+                    The signing key it holds stays on this device and is never
+                    sent to a server.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span class="delegate-point-index" aria-hidden="true">03</span>
+                <div>
+                  <h3>What comes next</h3>
+                  <p>
+                    Installing is a prerequisite, not your identity. Afterwards,
+                    number asks you to create a new owner key or restore a backup.
+                  </p>
+                </div>
+              </li>
+            </ul>
+
+            <p id="delegate-progress" class="delegate-progress" role="status" hidden>
+              Installing on this node. This can take a few seconds.
+            </p>
+          </div>
+
+          <p id="delegate-error" class="form-error delegate-error" role="alert" hidden></p>
+
+          <footer class="editor-actions">
+            <button id="delegate-not-now" class="button button--quiet" type="button">
+              Not now
+            </button>
+            <button
+              id="delegate-install-button"
+              class="button button--primary"
+              type="button"
+            >
+              Install number
+            </button>
+          </footer>
+        </div>
+      </dialog>
+
+      <dialog
         id="identity-setup"
         class="editor identity-dialog identity-dialog--setup"
         aria-labelledby="identity-setup-title"

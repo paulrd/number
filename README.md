@@ -111,7 +111,8 @@ migration tests that must not touch the node the UI uses. Override with
 # 1. the node the UI talks to
 make node
 
-# 2. register the delegate with that node, pinned to this webapp id
+# 2. optional: register the delegate up front. A fresh node can also install
+#    the copy bundled with the site on first load (first-run prompt).
 fdev --port 7510 publish --code delegate/build/freenet/number_delegate \
   --parameters delegate/webapp_contract_id.bin delegate
 
@@ -193,10 +194,14 @@ updates are in place. Any node that can fetch the contract serves it at
 - Update in place with
   `fdev --port <live node> website update --key number-local ui/dist`. The
   signing key is backed up; the id does not move.
-- The app needs `number-delegate` registered on the node it runs against. A
-  node without it stops at "Delegate did not respond", and the site cannot
-  install it yet (#14). For now:
-  `fdev --port <port> publish --code <number_delegate package> --parameters delegate/webapp_contract_id.bin delegate`.
+- The delegate is bundled with the site (`number_delegate.wasm`). On a node
+  that does not have it, the first-run dialog offers to install it: the app
+  fetches that file, verifies it against the code hash baked into the build,
+  and registers it on the node. No server and no `fdev` step is needed for a
+  visitor. The site archive grows by roughly 70 KB compressed.
+- `fdev --port <port> publish --code <number_delegate package> --parameters
+  delegate/webapp_contract_id.bin delegate` remains the explicit admin path
+  (and the fallback if a node blocks registration).
 - Atlas: the current Atlas is a read-only crawler index with no publisher
   submission, so the site is live but not listed yet (#15).
 

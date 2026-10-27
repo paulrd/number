@@ -140,6 +140,9 @@ export default defineConfig(async ({ command, isPreview }) => {
       __CONTRACT_WASM_URL__: JSON.stringify(
         process.env.CONTRACT_WASM_URL?.trim() || "./number_contract.wasm",
       ),
+      __DELEGATE_WASM_URL__: JSON.stringify(
+        process.env.DELEGATE_WASM_URL?.trim() || "./number_delegate.wasm",
+      ),
       __OFFLINE_MODE__: JSON.stringify(process.env.VITE_OFFLINE_MODE === "1"),
     },
     build: {

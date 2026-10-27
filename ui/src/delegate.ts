@@ -14,22 +14,28 @@ import {
 } from "@freenetorg/freenet-stdlib";
 import { OutboundDelegateMsgType } from "@freenetorg/freenet-stdlib/host-response";
 import { stringify as stringifyJsonLossless } from "lossless-json";
+import { blake3 } from "@noble/hashes/blake3";
 import { ApplicationMessageT } from "@freenetorg/freenet-stdlib/common";
 import {
   ApplicationMessagesT,
   ClientRequestT,
   ClientRequestType,
+  DelegateCodeT,
+  DelegateContainerT,
   DelegateKeyT,
   DelegateRequestType,
+  DelegateType,
   InboundDelegateMsgT,
   InboundDelegateMsgType,
+  RegisterDelegateT,
+  WasmDelegateV1T,
   type ClientRequestT as ClientRequestTable,
 } from "@freenetorg/freenet-stdlib/client-request";
 import {
   validateEntry,
   type Entry,
 } from "./state";
-import { errorMessage, isLowerHex } from "./util";
+import { delay, errorMessage, isLowerHex } from "./util";
 
 export type DelegateErrorCode =
   | "Missing"
@@ -189,6 +195,71 @@ export class DelegateClient {
   status(timeoutMs = 5_000): Promise<DelegateStatus> {
     return this.request("status", { cmd: "status" }, timeoutMs).then((payload) =>
       this.parseStatus(payload),
+    );
+  }
+
+  /**
+   * Install this delegate on the node from the app's bundled WASM.
+   *
+   * The code is verified against the code hash this build injected before it is
+   * sent, so a tampered asset cannot be installed under the app's delegate key.
+   * The node's registration response is not a JSON payload we can correlate, so
+   * success is confirmed by polling `status` (which only answers once the
+   * delegate is in the store).
+   */
+  async register(code: Uint8Array, timeoutMs = 25_000): Promise<void> {
+    if (this.configError) throw this.configError;
+    if (code.length === 0) {
+      throw new DelegateError("Protocol", "The bundled delegate is empty.");
+    }
+    const actual = blake3(code);
+    const expected = Uint8Array.from(this.codeHashBytes);
+    if (
+      actual.length !== expected.length ||
+      actual.some((byte, index) => byte !== expected[index])
+    ) {
+      throw new DelegateError(
+        "Config",
+        "The bundled delegate does not match the code hash this app was built " +
+          "for; refusing to install it.",
+      );
+    }
+
+    try {
+      this.send(this.buildRegisterRequest(code));
+    } catch (error) {
+      throw new DelegateError(
+        "Unavailable",
+        `Could not send the delegate installation request: ${errorMessage(error)}`,
+      );
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown = null;
+    while (Date.now() < deadline) {
+      await delay(400);
+      try {
+        await this.status(2_000);
+        return;
+      } catch (error) {
+        lastError = error;
+        // Missing is expected until the node finishes storing it; a timeout is
+        // also "not yet". Anything else (rejection) should stop immediately.
+        if (
+          !(error instanceof DelegateError) ||
+          (error.code !== "Missing" && error.code !== "Timeout")
+        ) {
+          throw error;
+        }
+      }
+    }
+
+    throw new DelegateError(
+      "Unavailable",
+      `The node did not register the number-delegate within ${Math.round(
+        timeoutMs / 1000,
+      )}s. Try again, or install it on the node with fdev.` +
+        (lastError ? ` Last response: ${errorMessage(lastError)}` : ""),
     );
   }
 
@@ -352,6 +423,25 @@ export class DelegateClient {
         );
       }
     });
+  }
+
+  private buildRegisterRequest(code: Uint8Array): ClientRequestTable {
+    const delegateCode = new DelegateCodeT(Array.from(code), this.codeHashBytes);
+    const delegateKey = new DelegateKeyT(this.keyBytes, this.codeHashBytes);
+    const wasm = new WasmDelegateV1T(this.paramsBytes, delegateCode, delegateKey);
+    const container = new DelegateContainerT(DelegateType.WasmDelegateV1, wasm);
+    // The node derives its own per-delegate key material and ignores these
+    // since freenet-core#4140; zeros are the documented placeholder.
+    const register = new RegisterDelegateT(
+      container,
+      new Array(32).fill(0),
+      new Array(24).fill(0),
+    );
+    const delegateRequest = new DelegateRequest(
+      DelegateRequestType.RegisterDelegate,
+      register,
+    );
+    return new ClientRequestT(ClientRequestType.DelegateRequest, delegateRequest);
   }
 
   private buildRequest(message: object): ClientRequestTable {

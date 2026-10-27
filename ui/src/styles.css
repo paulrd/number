@@ -1441,6 +1441,103 @@ body:has(#identity-manage[open]) {
   justify-content: flex-end;
 }
 
+/* Delegate install dialog ------------------------------------------------- */
+
+html:has(#delegate-install[open]),
+body:has(#delegate-install[open]) {
+  overflow: hidden;
+}
+
+.delegate-dialog {
+  width: min(37rem, calc(100vw - 2rem));
+}
+
+.delegate-dialog .identity-shell {
+  position: relative;
+}
+
+.delegate-dialog .editor-body:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+}
+
+/* The dialog waits on a local install, so a scan line marks the wait state. */
+.delegate-dialog .identity-shell[aria-busy="true"]::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 50% 100%;
+  animation: progress 1s linear infinite;
+}
+
+.delegate-points {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 0.8rem;
+  list-style: none;
+}
+
+.delegate-points li {
+  display: grid;
+  grid-template-columns: 1.9rem minmax(0, 1fr);
+  gap: 0.6rem;
+}
+
+.delegate-points li + li {
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--rule);
+}
+
+.delegate-point-index {
+  padding-top: 0.1rem;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+}
+
+.delegate-points h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.delegate-points p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.delegate-progress {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.delegate-progress::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.5s ease-in-out infinite;
+}
+
 /* First-run choice -------------------------------------------------------- */
 
 .identity-stage {

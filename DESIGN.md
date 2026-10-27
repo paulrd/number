@@ -190,6 +190,30 @@ Rules:
   `sign_with(store: &mut impl SecretStore, ..)` seam (see delegate-patterns →
   "Take `impl SecretStore`").
 
+### Delegate bootstrap (fresh nodes)
+
+A delegate is local to a node and is not fetched from the network. The site
+therefore ships the raw delegate WASM (`ui/public/number_delegate.wasm`, copied
+by `scripts/build.sh`; URL injected as `__DELEGATE_WASM_URL__`) and the UI can
+install it on first use.
+
+- On connect, `OnlineBoard.ensureDelegate()` probes `status`. A missing delegate
+  is **not answered** by the client API: the node logs a warning and sends no
+  application message, so the probe times out. A timeout is treated as "may
+  need installing"; a clear `Missing` is the same case.
+- The UI asks for consent before installing anything (`delegate-dialog.ts`); it
+  never auto-installs. Declining rejects the board with a clear message.
+- `OnlineBoard.installDelegate()` fetches the bundled file, requires
+  `BLAKE3(code) == delegateCodeHashBytes`, then sends `RegisterDelegate`
+  (`WasmDelegateV1` with code, code hash, the parameterised key, and the webapp
+  id as parameters; `cipher`/`nonce` are ignored by the node since #4140).
+  Success is confirmed by polling `status` until the delegate answers.
+- Registration is idempotent; a node that already has the delegate never sees
+  the prompt. No contract or delegate bytes change, so there is no re-key. The
+  site archive grows by ~70 KB compressed (the WASM is ~432 KB raw).
+- If a deployment blocks registration, the fallback remains `fdev publish
+  --code … delegate` on that node.
+
 ### Delegate and contract migration
 
 - Delegate migration is **forward-only**. A successor delegate starts with an
@@ -217,7 +241,9 @@ Rules:
 ## 8. UI flow
 
 1. Connect `FreenetWsApi` to `${ws(s)}://${location.host}/v1/contract/command`
-   with `base: "./"` assets and empty auth token.
+   with `base: "./"` assets and empty auth token, then ensure the delegate is
+   installed: probe `status`; on missing/timeout show the consent dialog and,
+   if accepted, register the bundled delegate (see §7).
 2. Ask the current delegate for `status` (without creating a seed). If it has
    no seed, walk `LEGACY_DELEGATES`: ask each predecessor for `export`, then
    `import` the first answer. If it still has no seed, the UI blocks on a
@@ -314,6 +340,10 @@ Contract and delegate are excluded from any workspace (see build-system →
 - Gateway spec (`ui/e2e/gateway.spec.ts`) with `FREENET_BASE_URL` pointing at a
   `/v1/contract/web/<id>/` URL: shell bridge, sandboxed iframe, identity and
   board mount, no fatal console/network errors.
+- Fresh-node bootstrap through the gateway: a node without the delegate shows
+  the install prompt, installs the bundled WASM (verified by code hash), then
+  continues into identity setup; create, save, reload and confirm persistence
+  with no prompt on the second load. Declining shows a clear error notice.
 - Local node: publish delegate + contract, PUT/UPDATE via the UI, reload and
   confirm persistence; tombstone a slot and confirm it does not resurrect.
 - Migration: publish a successor delegate, confirm the UI exports the
@@ -327,6 +357,11 @@ Contract and delegate are excluded from any workspace (see build-system →
 These are not design preferences; each was observed against `freenet` 0.2.150
 (`freenet local`, WS API on 7510) and are load-bearing for the UI.
 
+- **A missing delegate produces no reply.** `RegisterDelegate` installs code,
+  and the client API does not answer an `ApplicationMessages` request for a
+  delegate that is not in the store (only a node WARN). The UI therefore treats
+  a `status` timeout as "may need installing"; re-registering an existing
+  delegate is harmless.
 - **An empty summary means "I hold nothing".** The node presents an empty
   summary when a subscriber is first registered. `get_state_delta` therefore
   returns every non-empty slot for an empty (or undecodable) summary instead of

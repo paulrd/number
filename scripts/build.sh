@@ -195,6 +195,11 @@ NODE
 
   cp "$TARGET_ROOT/contract/wasm32-unknown-unknown/release/number_contract.wasm" \
      "$ROOT/ui/public/number_contract.wasm"
+  # The delegate is installed per node, not fetched from the network. Shipping
+  # it with the site lets the UI register it on a fresh node (see the first-run
+  # delegate prompt) instead of asking the user to run fdev.
+  cp "$TARGET_ROOT/delegate/wasm32-unknown-unknown/release/number_delegate.wasm" \
+     "$ROOT/ui/public/number_delegate.wasm"
 fi
 
 echo "==> done"

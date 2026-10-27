@@ -24,6 +24,7 @@ ui/delegate_key.txt
 ui/delegate_key_bytes.json
 ui/webapp_contract_id_bytes.json
 ui/public/number_contract.wasm
+ui/public/number_delegate.wasm
 
 # Test/Playwright output
 playwright-report

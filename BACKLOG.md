@@ -17,6 +17,7 @@ did not change). The local node remains the owner's node.
 | Live publish target | operator's VPS peer, API reached through the SSH-forwarded `:7509` |
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1) |
+| Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
 | Current delegate key | `3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ` |
 | Current delegate code hash | `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY` |
 | Current contract code hash | `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` |
@@ -247,36 +248,49 @@ exactly. The lossy layer was the UI's `Number` conversion.
   and its README says publisher self-submission is still taking shape. There is
   no submission action to perform; searching "number" or the contract id
   returns nothing yet. Tracked as #15.
-- Live usability gap: a node without the delegate shows "Delegate did not
-  respond" and cannot install it from the site. Tracked as #14.
+
+### #14 — Delegate bootstrap for live users
+
+The live site worked only on a node where `number-delegate` was registered;
+a fresh node had no way to install it (the client API does not fetch delegates
+from the network).
+
+- `scripts/build.sh` copies the raw delegate WASM into `ui/public`, and Vite
+  injects its URL. The site archive went from ~134 KB to ~204 KB compressed
+  (7 files).
+- `DelegateClient.register()` builds `RegisterDelegate` (`WasmDelegateV1`:
+  code, code hash, parameterised key, webapp id params; cipher/nonce zeros,
+  ignored by the node), verifies `BLAKE3(code) == delegateCodeHashBytes` first,
+  sends it, and polls `status` until the delegate answers.
+- `OnlineBoard.ensureDelegate()` runs after connect. A missing delegate is not
+  answered by the client API (the node only logs), so a status timeout is the
+  only signal; it is treated as "may need installing". The consent dialog
+  (`delegate-dialog.ts`) is explicit — no auto-install, no silent dismissal —
+  and declining stops the board with "Delegate not registered" plus a clear
+  sentence. Offline mode never shows it.
+- Verified through the gateway on a fresh isolated node: prompt → install →
+  identity setup → create → save `42` → reload persisted, no prompt on the
+  second load, clean console. Declining shows the error notice and no board.
+  The live and local sites were updated with the new build; the VPS node
+  already has the delegate and skips the prompt.
+- No WASM change: `make check-artifacts` still matches `published/`; no re-key.
+  `make check` (46 UI tests), both offline specs and the gateway spec pass.
+
 
 ## Remaining
 
-### #13 — Upstream shim report
+### #13 — Upstream shim report (next)
 
 The gateway shell shim drops `SubscribeResponse`/`NotFound`; the UI works around
 it with probe-then-PUT and a timeout downgrade. Report a repro upstream.
-
-### #14 — Delegate bootstrap for live users (next)
-
-The live site works only on a node where `number-delegate` is registered; a
-new user sees "Delegate did not respond" and has no way to install it. The
-client API supports `RegisterDelegate` and the TS stdlib has the request type,
-so the site can bundle `number_delegate.wasm` and register it on demand (ask
-the user first unless the node prompts). Needs: copy the delegate WASM into
-`ui/public` at build, expose its URL, build the delegate container (code +
-params + key), handle the response and retry identity, and test on a node
-without the delegate. No contract/delegate bytes change (no re-key); adds
-~430 KB to the site archive. Until this exists the site is effectively
-author-only and not ready for a public listing.
 
 ### #15 — Atlas listing (blocked)
 
 Atlas (2026-10-27) is a read-only, crawler-built index with no submission
 control; its README says publisher self-submission is still taking shape. The
-site is live but not listed (searching "number" or the contract id returns 0).
-Revisit when Atlas ships self-submission, or ask the Atlas operator to crawl
-it.
+site is live and now usable by a fresh node, but not listed (searching "number"
+or the contract id returns 0). Revisit when Atlas ships self-submission, or ask
+the Atlas operator to crawl it.
 
 ## Generation history
 
@@ -334,12 +348,16 @@ make verify-merge
 
 ## Working tree
 
-Uncommitted #12 work: `README.md`, `BACKLOG.md` (live deployment, Atlas
-finding, #14/#15). #11 is committed in `cce462a`, #10 in `9eb7a35`, #9 in
-`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6
-in `ba81747`.
+Uncommitted #14 work: `scripts/build.sh`, `Makefile`, `.gitignore`,
+`ui/vite.config.ts`, `ui/src/vite-env.d.ts`, `ui/src/delegate.ts`,
+`ui/src/board.ts`, `ui/src/mock.ts`, `ui/src/main.ts`, `ui/src/delegate-dialog.ts`,
+`ui/index.html`, `ui/src/styles.css`, `README.md`, `DESIGN.md`, `BACKLOG.md`.
+#12 is committed in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
+`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
+`ba81747`.
 
-The live site was published from the same `ui/dist`; no WASM changed, so
-`published/` and the re-key are untouched. The local site still serves the same
-build. Commit this tree before clearing context.
+No WASM changed, so `published/` and the re-key are untouched. The local and
+live sites were updated with the new build (delegate bundled). The VPS test
+seed from #12 remains; the isolated test nodes were wiped. Commit this tree
+before clearing context.
 
