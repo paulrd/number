@@ -28,7 +28,7 @@ peer; the live test identity opens the v3 contract as a root board.
 | Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity; root; slot 6 “Tim” = `44.40`) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v3 + board-name/header UI deployed (2026-10-28); gateway smoke passed on `:7509` |
+| Live site | v3 + board-name/header + parent-value/octal-address UI deployed (2026-10-28); gateway smoke passed on `:7511` and `:7509` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | v3 delegate + website and the UI-only board-name update published through the `:7509` SSH forward |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -411,9 +411,14 @@ frame.
   `octalAddress`; `ui/src/tree-view.test.ts` covers roots, 0-based digits,
   multi-level prefixes, pending/not-created/unreadable/loop cases, and a legacy
   parent. Offline mock fixture value is `8.50 kg` so e2e can assert the band.
-- Verified: UI unit tests (including 9 tree-view cases), `tsc`/build, offline
-  e2e tree assertions, axe. Not yet deployed; deploy the UI-only site update
-  with `fdev ... website update` when the node is up.
+- Verified: UI unit tests 106/106 (including 9 tree-view cases), `tsc`/build,
+  offline e2e 8/8 with axe while the parent band is visible. Committed as
+  `f1981cc`.
+- Deployed UI-only: `website update` through the forwarded `:7511` staging peer,
+  then confirmed the live `:7509` peer serves the same new assets
+  (`index-DhtyiHEf.js`, `index-C--X85rJ.css`). Gateway smoke passed on both
+  `:7511` (14.9 s) and `:7509` (13.6 s). No contract/delegate/artifact change,
+  so the webapp id, contract id, and delegate key are unchanged.
 
 ## Remaining
 
