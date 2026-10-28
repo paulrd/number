@@ -16,7 +16,7 @@ did not change). The local node remains the owner's node.
 | Live URL pattern | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API reached through the SSH-forwarded `:7509` |
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
-| Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 build) |
+| Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
 | Current delegate key | `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` (v2, recorded) |
 | Current delegate code hash | `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj` |
@@ -25,9 +25,9 @@ did not change). The local node remains the owner's node.
 | Board contract id | `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC` (v2, empty) |
 | Slot 1 | empty (v2 board is new; the v1 board `4JkW…` is not migratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | still the v1 build; update with the v2 `ui/dist` after publishing the new delegate |
+| Live site | v2 build deployed (2026-10-28); gateway smoke passed on `:7509` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
-| VPS peer | update instructions given; not updated from this environment — check `freenet --version` there |
+| VPS peer | v2 delegate + website published from this environment through the `:7509` SSH forward |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -404,20 +404,21 @@ make verify-merge
 
 ## Working tree
 
-Contains the v2 address-book change (not committed in this session). #13's
-report is committed and filed as freenet-stdlib#140; #14 is in `1da4fa3`, #12 in
-`0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`,
-#7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Clean; the v2 address-book change is committed as `e1301f5` and pushed to
+`origin/main`. #13's report is committed and filed as freenet-stdlib#140; #14 is
+in `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
+`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
+`ba81747`.
 
-`published/` now records the v2 generation; `make check-artifacts` proves the
-bytes. The **live site has not been updated** and still serves the #14 v1
-build. To deploy v2: publish the new delegate on the node
-(`make publish-delegate`) and run `fdev --port <port> website update --key
-number-local ui/dist`; the website id does not move, so the delegate pin is
-unchanged. A visitor's existing v1 board is not migrated (same owner key, new
-empty v2 board); the first-run flow should recover the seed from the v1
-delegate. The VPS test seed from #12 remains; the isolated test nodes were
-wiped. The only open backlog item is #15 (Atlas), blocked externally.
+`published/` records the v2 generation; `make check-artifacts` proves the bytes.
+The v2 delegate and website were published to both the local node (`:7510`) and
+the live VPS peer (`:7509` through the SSH forward); the gateway smoke passed on
+both (the first live attempt exceeded the 30 s smoke timeout while the new
+contract's initial PUT propagated; the retry took 13.5 s). The website id did
+not move, so the delegate pin is unchanged. A visitor's existing v1 board is not
+migrated (same owner key, new empty v2 board); the first-run flow recovers the
+seed from the v1 delegate. The VPS test seed from #12 remains; the isolated test
+nodes were wiped. The only open backlog item is #15 (Atlas), blocked externally.
 
 Handoff notes:
 - The local node was restarted on 0.2.151 with the same data/config dirs.
