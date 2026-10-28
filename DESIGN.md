@@ -38,6 +38,17 @@ choosing a current contact when saving.
   detection.
 - Other owners' boards are public/read-only in the UI; only the owner can sign.
   Labels on a viewed board come from that board's own address book.
+- A board's **octal address** is derived, not stored: the root is the empty
+  string, and a child's address is its parent's address with the child's
+  zero-based slot digit (`0`–`7`) appended, with no separator. The UI walks
+  mutual parent links (`octalAddress` in `ui/src/tree-view.ts`) and shows the
+  result in the board head. A pending, missing, unreadable, looping, or
+  over-deep chain leaves the address unsettled rather than guessing a digit.
+- The **parent's value for a child** comes from the parent's signed slot that
+  names the child (`parentValueFor`). When present, the child board shows that
+  entry's value, unit, note, and zero-based slot prominently above the grid;
+  a root, pending link, or cleared parent slot shows no such band. Both views
+  are read-only derivations; neither changes contract state or the wire format.
 
 v2 boards migrate to v3: the slot and contacts signing bytes are unchanged, and
 the client adds an empty parent when it re-PUTs the old signed state. v1 boards
@@ -468,6 +479,11 @@ install it on first use.
     then a shortened id. The header groups Identity, Board name (own) or
     Viewing (remote), Parent, Contacts, and a collapsed Details section with
     the Contract id; separators mark the groups.
+14. The board head shows the current board's octal address (empty for a root)
+    and the area above the grid shows the parent's value for it when the
+    parent's readable state has a slot for the board. Both use the same cached
+    board reads as the parent row and breadcrumbs; stale async renders are
+    discarded when the viewed board changes.
 
 ### Identity backup and restore (user-facing)
 

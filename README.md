@@ -218,6 +218,16 @@ id is under **Details**, not in the primary header.
 - **Navigate:** breadcrumbs follow mutual parent edges to the root; **Home**
   returns to your own board. Other owners' boards are read-only. The address
   book labels a board's own slots; a viewed board's labels come from its state.
+- **Parent value:** when a board has a parent and the parent's signed slot
+  points at it, the value the parent holds for that board is shown prominently
+  above the grid, with its unit, note, and zero-based slot. A root, a pending
+  link, or a cleared parent slot has nothing to show.
+- **Octal address:** every board shows an address made of zero-based slot digits
+  from the root, with no separator. A root is the empty string; each child
+  appends its slot digit (`0`–`7`) to its parent's address, so a board in slot 2
+  of a board in slot 5 of the root has address `52`. The address is derived
+  from mutual parent links, not stored; a pending, missing, unreadable, looping,
+  or over-deep chain leaves it unsettled.
 - **Cycles** are detected by the UI and are not followed. The contract enforces
   one signed parent per board and rejects a board parenting itself; it cannot
   enforce agreement or acyclicity across boards.

@@ -393,6 +393,28 @@ frame.
   required name dialog can add its self-entry; normal boards are capped at 63
   other contacts and the backend limit error is shown in the dialog.
 
+### #19 — Parent value and octal address
+
+- A board with a parent now shows the value the parent holds for it in a
+  prominent band above the slot grid: the parent's signed slot entry for the
+  child, with its value (two decimals), unit, note, and zero-based slot. It is
+  hidden for a root, a pending/unreadable/not-created parent, or a cleared
+  parent slot. Own and read-only boards both show it.
+- Every board displays an octal address: zero-based slot digits from the root
+  with no separator. A root is the empty string; a child appends its slot digit
+  (`0`–`7`) to its parent's address. The address is derived by walking mutual
+  parent links, not stored; a pending/missing/unreadable/looping/over-deep chain
+  is shown as unsettled rather than guessed.
+- UI-only: no contract, delegate, schema, wire, or signing change, so the
+  current WASM artifacts, delegate key, contract id, and webapp id are unchanged.
+- `ui/src/tree-view.ts` adds `childSlotIndex`, `parentValueFor`, and
+  `octalAddress`; `ui/src/tree-view.test.ts` covers roots, 0-based digits,
+  multi-level prefixes, pending/not-created/unreadable/loop cases, and a legacy
+  parent. Offline mock fixture value is `8.50 kg` so e2e can assert the band.
+- Verified: UI unit tests (including 9 tree-view cases), `tsc`/build, offline
+  e2e tree assertions, axe. Not yet deployed; deploy the UI-only site update
+  with `fdev ... website update` when the node is up.
+
 ## Remaining
 
 ### #15 — Atlas listing (blocked)

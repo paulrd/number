@@ -30,9 +30,13 @@ import {
   BoardCache,
   buildTrail,
   childLink,
+  MAX_TREE_DEPTH,
+  octalAddress,
   parentLink,
+  parentValueFor,
   selfContact,
   selfNameOf,
+  type AddressProblem,
   type LinkState,
   type TrailStep,
 } from "./tree-view";
@@ -96,6 +100,15 @@ const breadcrumbList = byId<HTMLOListElement>("breadcrumb-list");
 const breadcrumbWarning = byId<HTMLParagraphElement>("breadcrumb-warning");
 const boardTitle = byId<HTMLHeadingElement>("board-title");
 const boardMode = byId<HTMLParagraphElement>("board-mode");
+const boardAddress = byId<HTMLElement>("board-address");
+const boardAddressValue = byId<HTMLElement>("board-address-value");
+const boardAddressNote = byId<HTMLElement>("board-address-note");
+const parentValueBox = byId<HTMLElement>("parent-value");
+const parentValueBoard = byId<HTMLElement>("parent-value-board");
+const parentValueSlot = byId<HTMLElement>("parent-value-slot");
+const parentValueAmount = byId<HTMLElement>("parent-value-amount");
+const parentValueUnit = byId<HTMLElement>("parent-value-unit");
+const parentValueNote = byId<HTMLParagraphElement>("parent-value-note");
 const boardElement = byId<HTMLDivElement>("board");
 const boardHint = byId<HTMLParagraphElement>("board-hint");
 
@@ -158,6 +171,8 @@ let childLinkOpenable = false;
 let editorRequest = 0;
 let parentStatusRequest = 0;
 let trailRequest = 0;
+let addressRequest = 0;
+let parentValueRequest = 0;
 let noticeRetry: (() => void | Promise<void>) | null = null;
 /** True while the address book was opened from the parent dialog. */
 let addingForParent = false;
@@ -192,6 +207,24 @@ const LINK_TITLES: Record<LinkState, string> = {
   pending: "Only one side points at the other yet.",
   "not-created": "No board exists for this owner yet.",
   error: "This board could not be read.",
+};
+
+/** Short visible reasons for an unresolved octal address. */
+const ADDRESS_PROBLEM_LABELS: Record<AddressProblem, string> = {
+  pending: "pending",
+  "not-created": "not created",
+  unreadable: "unreadable",
+  loop: "loop",
+  truncated: "too deep",
+};
+
+/** One-line explanations, used in the chip's title and accessible name. */
+const ADDRESS_PROBLEM_REASONS: Record<AddressProblem, string> = {
+  pending: "the parent board has not added this board yet",
+  "not-created": "the parent board has not been created yet",
+  unreadable: "a parent board could not be read",
+  loop: "the parent links form a loop",
+  truncated: `the path is more than ${MAX_TREE_DEPTH} boards deep`,
 };
 
 const LEGACY_BOARD_TITLE =
@@ -645,6 +678,153 @@ function renderBoardHeader(): void {
   boardHint.textContent = current.isOwn ? OWN_BOARD_HINT : REMOTE_BOARD_HINT;
 }
 
+/**
+ * Derive the octal address and paint the chip. The walk is asynchronous, so a
+ * late read is ignored unless it still belongs to the current request and board.
+ */
+function renderBoardAddress(): void {
+  const request = ++addressRequest;
+  const current = view;
+
+  if (!current) {
+    boardAddress.hidden = true;
+    boardAddress.removeAttribute("data-address");
+    boardAddress.removeAttribute("data-state");
+    boardAddressValue.textContent = "";
+    boardAddressValue.classList.remove("is-long", "is-xlong");
+    boardAddressNote.textContent = "";
+    boardAddressNote.hidden = true;
+    boardAddress.removeAttribute("title");
+    boardAddress.setAttribute("aria-label", "Octal address");
+    return;
+  }
+
+  boardAddress.hidden = false;
+  delete boardAddress.dataset.address;
+  boardAddress.dataset.state = "checking";
+  boardAddressValue.textContent = "";
+  boardAddressValue.classList.remove("is-long", "is-xlong");
+  boardAddressNote.textContent = "checking";
+  boardAddressNote.hidden = false;
+  boardAddress.title = "Working out this board's octal address.";
+  boardAddress.setAttribute("aria-label", "Octal address: checking");
+
+  const board = current.isOwn ? (ownSnapshot() ?? current) : current;
+  void octalAddress(board, linkDeps).then((info) => {
+    if (request !== addressRequest || view !== current) return;
+
+    if (info.address === null) {
+      const problem: AddressProblem = info.problem ?? "unreadable";
+      const reason = ADDRESS_PROBLEM_REASONS[problem];
+      boardAddress.dataset.state = "unavailable";
+      delete boardAddress.dataset.address;
+      boardAddressValue.textContent = "—";
+      boardAddressValue.classList.remove("is-long", "is-xlong");
+      boardAddressNote.textContent = ADDRESS_PROBLEM_LABELS[problem];
+      boardAddressNote.hidden = false;
+      boardAddress.title = `Octal address unavailable: ${reason}.`;
+      boardAddress.setAttribute(
+        "aria-label",
+        `Octal address unavailable: ${reason}`,
+      );
+      return;
+    }
+
+    // A root's address is the empty string. Keep the attribute (and the value
+    // element's empty text) honest, and let CSS show the em dash.
+    boardAddress.dataset.address = info.address;
+    if (info.address === "") {
+      boardAddress.dataset.state = "root";
+      boardAddressValue.textContent = "";
+      boardAddressValue.classList.remove("is-long", "is-xlong");
+      boardAddressNote.textContent = "root";
+      boardAddressNote.hidden = false;
+      boardAddress.title =
+        "This board is a root, so its octal address is the empty string.";
+      boardAddress.setAttribute("aria-label", "Octal address: root (empty)");
+      return;
+    }
+
+    boardAddress.dataset.state = "known";
+    boardAddressValue.textContent = info.address;
+    boardAddressValue.classList.toggle(
+      "is-long",
+      info.address.length > 8 && info.address.length <= 16,
+    );
+    boardAddressValue.classList.toggle("is-xlong", info.address.length > 16);
+    boardAddressNote.textContent = "";
+    boardAddressNote.hidden = true;
+    boardAddress.title =
+      `Octal address ${info.address}. Each digit is a zero-based slot ` +
+      "number counted from the root.";
+    boardAddress.setAttribute("aria-label", `Octal address ${info.address}`);
+  });
+}
+
+/**
+ * The value the parent board holds for this board. Shown only for a mutual
+ * link whose readable parent has a signed entry in the matching slot.
+ */
+function renderParentValue(): void {
+  const request = ++parentValueRequest;
+  const current = view;
+
+  parentValueBox.hidden = true;
+  parentValueBoard.textContent = "";
+  parentValueBoard.removeAttribute("title");
+  parentValueSlot.textContent = "";
+  parentValueAmount.textContent = "—";
+  parentValueAmount.classList.remove("is-long", "is-xlong");
+  parentValueUnit.textContent = "";
+  parentValueUnit.hidden = true;
+  parentValueNote.textContent = "";
+  parentValueNote.removeAttribute("title");
+  parentValueNote.hidden = true;
+
+  if (!current) return;
+  const parentId = current.state.parent.userId;
+  if (parentId === null) return;
+
+  const board = current.isOwn ? (ownSnapshot() ?? current) : current;
+  void parentLink(board, linkDeps).then((info) => {
+    if (request !== parentValueRequest || view !== current) return;
+    if (info.state !== "linked" || info.snapshot === null) return;
+
+    const value = parentValueFor(info.snapshot, board.ownerId);
+    if (value === null) return;
+
+    const label = labelForOwner(
+      parentId,
+      [current.state.contacts.entries, ownContactsWithoutSelf()],
+      value.parentName,
+    );
+    parentValueBoard.textContent = label;
+    parentValueBoard.title = parentId;
+    parentValueSlot.textContent = `zero-based slot ${value.slot}`;
+    parentValueSlot.title =
+      "The slot number in the parent board. The grid's slot labels are one-based.";
+
+    const amount = formatCents(value.entry.value);
+    parentValueAmount.textContent = amount;
+    parentValueAmount.classList.toggle(
+      "is-long",
+      amount.length > 10 && amount.length <= 15,
+    );
+    parentValueAmount.classList.toggle("is-xlong", amount.length > 15);
+
+    const unit = value.entry.unit ?? "";
+    parentValueUnit.textContent = unit;
+    parentValueUnit.hidden = unit === "";
+
+    const note = value.entry.note ?? "";
+    parentValueNote.textContent = note;
+    parentValueNote.title = note;
+    parentValueNote.hidden = note === "";
+
+    parentValueBox.hidden = false;
+  });
+}
+
 function renderParentRow(): void {
   const request = ++parentStatusRequest;
   const current = view;
@@ -847,6 +1027,8 @@ function renderAll(): void {
   renderWarnings();
   renderContactCount();
   renderBoardHeader();
+  renderBoardAddress();
+  renderParentValue();
   renderControls();
   renderParentRow();
   void renderTrail();

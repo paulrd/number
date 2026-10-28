@@ -239,6 +239,11 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "My board",
   );
+  // A root's octal address is the empty string, and it has no parent value.
+  await expect(page.locator("#board-address")).toBeVisible();
+  await expect(page.locator("#board-address")).toHaveAttribute("data-address", "");
+  await expect(page.locator("#board-address-value")).toHaveText("");
+  await expect(page.locator("#parent-value")).toBeHidden();
 
   await addContact(page, "Child", MOCK_CHILD_ID);
   await addContact(page, "Parent", MOCK_PARENT_ID);
@@ -276,6 +281,14 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   );
   await expect(page.locator("#breadcrumb-list")).toContainText("My board");
   await expect(page.locator("#parent-name")).toHaveText("My board");
+  // The child's address is its parent's address plus the child's slot digit.
+  // The own board is still a root here, and slot 0 holds the child.
+  await expect(page.locator("#board-address")).toHaveAttribute("data-address", "0");
+  await expect(page.locator("#board-address-value")).toHaveText("0");
+  // The parent (the own board) holds 3.25 for this child; show it prominently.
+  await expect(page.locator("#parent-value")).toBeVisible();
+  await expect(page.locator("#parent-value")).toContainText("3.25");
+  await expect(page.locator("#parent-value")).toContainText("My board");
   // The fixture child has no slots, and they are not editable.
   await expect(page.locator(".slot").first()).toBeDisabled();
 
@@ -321,11 +334,29 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "Parent",
   );
+  // The parent fixture is a root: its own address is empty and it has no parent.
+  await expect(page.locator("#board-address")).toHaveAttribute("data-address", "");
+  await expect(page.locator("#parent-value")).toBeHidden();
   await page.locator("#board-home").click();
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#board-name-row")).toBeVisible();
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
+  // The own board's address is the parent's empty address plus slot digit 0,
+  // and the parent's value for it is shown prominently.
+  await expect(page.locator("#board-address")).toHaveAttribute("data-address", "0");
+  await expect(page.locator("#board-address-value")).toHaveText("0");
+  await expect(page.locator("#parent-value")).toBeVisible();
+  await expect(page.locator("#parent-value")).toContainText("8.50");
+  await expect(page.locator("#parent-value")).toContainText("kg");
+  await expect(page.locator("#parent-value")).toContainText("Parent");
+
+  // The new address chip and parent-value band must pass with a linked parent.
+  const parentAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    parentAccessibility.violations,
+    `axe violations:\n${JSON.stringify(parentAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
 
   // Duplicate child ids are rejected before saving.
   await page.locator(".slot").nth(2).click();

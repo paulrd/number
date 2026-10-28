@@ -13,7 +13,7 @@
  * reconnect; local writes do not change the remote snapshots it holds.
  */
 import type { BoardSnapshot } from "./board";
-import type { Contact, StateV3 } from "./state";
+import type { Contact, Entry, StateV3 } from "./state";
 import { errorMessage } from "./util";
 
 export const MAX_TREE_DEPTH = 32;
@@ -136,9 +136,52 @@ export function selfNameOf(state: StateV3, ownerId: string): string | null {
   return selfContact(state, ownerId)?.label ?? null;
 }
 
+/**
+ * Index of the slot in `state` whose contact is `childId`, or null when the
+ * board does not list that child. The address digit is this zero-based index;
+ * the UI's human slot labels are one-based, so callers must not reuse them.
+ */
+export function childSlotIndex(state: StateV3, childId: string): number | null {
+  const index = state.slots.findIndex(
+    (slot) => slot.entry?.contact === childId,
+  );
+  return index === -1 ? null : index;
+}
+
 /** True when a board has a slot pointing at `childId`. */
 export function hasChildSlot(state: StateV3, childId: string): boolean {
-  return state.slots.some((slot) => slot.entry?.contact === childId);
+  return childSlotIndex(state, childId) !== null;
+}
+
+/** The parent's signed slot for a child: the value it holds for that board. */
+export interface ParentValue {
+  /** Zero-based slot index in the parent, i.e. the child's address digit. */
+  slot: number;
+  entry: Entry;
+  parentOwnerId: string;
+  /** The parent's own name, when its address book has a self-entry. */
+  parentName: string | null;
+}
+
+/**
+ * The value a parent board holds for `childOwnerId`, or null when the parent
+ * has no slot for that child (a pending edge, a cleared slot, or a different
+ * child).
+ */
+export function parentValueFor(
+  parent: BoardSnapshot,
+  childOwnerId: string,
+): ParentValue | null {
+  const slot = childSlotIndex(parent.state, childOwnerId);
+  if (slot === null) return null;
+  const entry = parent.state.slots[slot].entry;
+  if (entry === null) return null;
+  return {
+    slot,
+    entry,
+    parentOwnerId: parent.ownerId,
+    parentName: selfNameOf(parent.state, parent.ownerId),
+  };
 }
 
 async function read(
@@ -193,6 +236,79 @@ export async function parentLink(
     snapshot: result.snapshot,
     error: null,
   };
+}
+
+export type AddressProblem =
+  | "pending"
+  | "not-created"
+  | "unreadable"
+  | "loop"
+  | "truncated";
+
+export interface AddressInfo {
+  /**
+   * Octal address as zero-based slot digits from the root, with no separator.
+   * The empty string is a root board. Null when the chain cannot be resolved.
+   */
+  address: string | null;
+  /** Why the address is unavailable; null when it is known. */
+  problem: AddressProblem | null;
+  /** The board at which resolution stopped; null when the address is known. */
+  blockedBy: string | null;
+}
+
+/**
+ * Derive a board's octal address by walking mutual parent links to the root.
+ * Each link contributes the parent's zero-based slot index for the child
+ * (`0`–`7`), appended to the parent's address. A root is the empty string.
+ *
+ * A one-sided (pending) link has no slot digit, so the address is not settled;
+ * a missing, unreadable, or looping ancestor has the same effect. The walk is
+ * independent of `buildTrail` so callers can show the address even when the
+ * breadcrumb path is truncated or broken.
+ */
+export async function octalAddress(
+  board: BoardSnapshot,
+  deps: LinkDeps,
+): Promise<AddressInfo> {
+  let node = board;
+  const digits: string[] = [];
+  const seen = new Set<string>([board.ownerId]);
+
+  for (let links = 0; ; links += 1) {
+    const parentId = node.state.parent.userId;
+    if (parentId === null) {
+      return {
+        address: digits.reverse().join(""),
+        problem: null,
+        blockedBy: null,
+      };
+    }
+    if (seen.has(parentId)) {
+      return { address: null, problem: "loop", blockedBy: parentId };
+    }
+    if (links >= MAX_TREE_DEPTH) {
+      return { address: null, problem: "truncated", blockedBy: parentId };
+    }
+
+    const result = await read(deps, parentId);
+    if (result.error !== null) {
+      return { address: null, problem: "unreadable", blockedBy: parentId };
+    }
+    if (result.snapshot === null) {
+      return { address: null, problem: "not-created", blockedBy: parentId };
+    }
+
+    const slot = childSlotIndex(result.snapshot.state, node.ownerId);
+    if (slot === null) {
+      return { address: null, problem: "pending", blockedBy: parentId };
+    }
+
+    // The address digit is the zero-based slot index, not the one-based label.
+    digits.push(String(slot));
+    seen.add(parentId);
+    node = result.snapshot;
+  }
 }
 
 /**

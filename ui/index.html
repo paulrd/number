@@ -202,9 +202,51 @@
           <p id="breadcrumb-warning" class="breadcrumb-warning" role="status" hidden></p>
         </nav>
         <div class="board-head">
-          <h2 id="board-title" class="board-title" tabindex="-1">The board</h2>
+          <div class="board-head-main">
+            <h2 id="board-title" class="board-title" tabindex="-1">The board</h2>
+            <div
+              id="board-address"
+              class="board-address"
+              role="group"
+              aria-label="Octal address"
+              hidden
+            >
+              <span class="board-address-label" aria-hidden="true">Octal address</span>
+              <code
+                id="board-address-value"
+                class="board-address-value"
+                aria-hidden="true"
+              ></code>
+              <span
+                id="board-address-note"
+                class="board-address-note"
+                aria-hidden="true"
+                hidden
+              ></span>
+            </div>
+          </div>
           <p id="board-mode" class="board-meta">Signed · two decimals</p>
         </div>
+        <section
+          id="parent-value"
+          class="parent-value"
+          aria-labelledby="parent-value-title"
+          hidden
+        >
+          <div class="parent-value-head">
+            <h3 id="parent-value-title" class="parent-value-title">Held by parent</h3>
+            <p class="parent-value-meta">
+              <span id="parent-value-board" class="parent-value-board"></span>
+              <span id="parent-value-slot" class="parent-value-slot"></span>
+            </p>
+          </div>
+          <p class="parent-value-figure">
+            <span class="sr-only">Value: </span>
+            <span id="parent-value-amount" class="parent-value-amount">—</span>
+            <span id="parent-value-unit" class="parent-value-unit" hidden></span>
+          </p>
+          <p id="parent-value-note" class="parent-value-note" hidden></p>
+        </section>
         <div
           id="board"
           class="slot-grid"

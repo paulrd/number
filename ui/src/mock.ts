@@ -303,7 +303,12 @@ export class OfflineBoard implements BoardBackend {
         sig: mockParentSignature(1, own),
       };
     } else {
-      const entry: Entry = { value: 0n, contact: own, unit: null, note: null };
+      const entry: Entry = {
+        value: 850n,
+        contact: own,
+        unit: "kg",
+        note: "Held by the parent board",
+      };
       fixture.slots[0] = {
         seq: 1,
         entry,
