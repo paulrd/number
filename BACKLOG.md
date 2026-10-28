@@ -359,6 +359,10 @@ frame.
   the v3 contract `BtZs…`, root with 8 empty slots, no console errors. Existing
   v2 boards migrate on first load by adding an empty parent; v2 delegate seeds
   and counters migrate through `LEGACY_DELEGATES`.
+- Header polish (`88e7602`): the Board meta row is hidden on the own board
+  (Identity + Back up identity is the single board/identity summary) and appears
+  as **Viewing** with the owner, read-only/version badges, and Home when another
+  owner's board is on screen. UI-only, deployed in place; no re-key.
 
 ## Remaining
 
@@ -449,8 +453,9 @@ make verify-merge
 ## Working tree
 
 Clean apart from the untracked empty `book.md`. The v3 tree change is committed
-as `a95ca9e` and pushed to `origin/main`; the v2 address-book change is
-`e1301f5`. #13's report is committed and filed as freenet-stdlib#140; #14 is in
+as `a95ca9e`, the header merge as `88e7602`, and both are pushed to
+`origin/main`; the v2 address-book change is `e1301f5`. #13's report is
+committed and filed as freenet-stdlib#140; #14 is in
 `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
 `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
 `ba81747`.
