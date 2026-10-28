@@ -25,12 +25,13 @@ peer; the live test identity opens the v3 contract as a root board.
 | Current contract code hash | `7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg` (v3) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
-| Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity, root, empty) |
+| Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity; root; slot 6 “Tim” = `44.40`) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v3 build deployed (2026-10-28); gateway smoke passed on `:7509` |
+| Live site | v3 + board-name/header UI deployed (2026-10-28); gateway smoke passed on `:7509` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
-| VPS peer | v3 delegate + website published through the `:7509` SSH forward |
+| VPS peer | v3 delegate + website and the UI-only board-name update published through the `:7509` SSH forward |
+| Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -383,8 +384,14 @@ frame.
   dialog surfaces the backend limit error.
 - Verified: UI 97 unit tests, offline e2e 8/8 (prompt, rename/duplicate/
   reservation, fallback names, Details, axe, clean console), build/tsc.
-- UI-only; no WASM/artifacts change. The local/live website update is the only
-  deployment step.
+- UI-only; no WASM/artifacts change. Committed as `5ddf3b7`; the live site was
+  updated and the live gateway smoke passed (14.0 s). The local node was stopped
+  at deploy time (connection refused), so its stored site still needs
+  `fdev --port 7510 website update --key number-local ui/dist` once it is up;
+  the source/dev server already has the change.
+- Known edge: a board at the 64-contact cap must remove one contact before the
+  required name dialog can add its self-entry; normal boards are capped at 63
+  other contacts and the backend limit error is shown in the dialog.
 
 ## Remaining
 
@@ -475,20 +482,29 @@ make verify-merge
 ## Working tree
 
 Clean apart from the untracked empty `book.md`. The v3 tree change is committed
-as `a95ca9e`, the header merge as `88e7602`, and both are pushed to
-`origin/main`; the v2 address-book change is `e1301f5`. #13's report is
+as `a95ca9e`, the header merge as `88e7602`, the current-generation tree-read
+timeout as `e0a64b5`, and the board-name/header UI as `5ddf3b7`; all are pushed
+to `origin/main`. The v2 address-book change is `e1301f5`. #13's report is
 committed and filed as freenet-stdlib#140; #14 is in
 `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
 `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
 `ba81747`.
 
 `published/` records the v3 generation; `make check-artifacts` proves the bytes.
-The v3 delegate and website were published to the local `:7510` and the live VPS
-`:7509`; the website id did not move. Gateway smoke passed on both. The live test
-identity is on v3 contract `BtZs…` (root, empty); the owner's v2 board `Ge6f…`
-migrates into `9x5e…` when opened with the owner seed. A v1 board remains
-unmigratable. The VPS test seed from #12 remains; the isolated test nodes were
-wiped. The only open backlog item is #15 (Atlas), blocked externally.
+The v3 delegate and website were published to the live VPS `:7509`; the website
+id did not move. The live site also carries the UI-only board-name/header update;
+gateway smoke passed (14.0 s). The live test identity (`3f841147…`) is on v3
+contract `BtZs…`, root, with slot 6 “Tim” = `44.40`; the local child is
+`a0cbac79…` / contract `SBnq…` with parent `3f841147…`. The local child node is
+currently stopped; when started, update its stored site with
+`fdev --port 7510 website update --key number-local ui/dist`. The local child
+node is ring-isolated on the phone hotspot (`zero ring connections` /
+`RING_TRANSPORT_DESYNC`), so the parent’s child side remains “Not created” and
+the child’s parent side reads a stale cached parent; this is environment/
+connectivity-limited, not a data mismatch. The owner's v2 board `Ge6f…` migrates
+into `9x5e…` when opened with the owner seed. A v1 board remains unmigratable.
+The VPS test seed from #12 remains; the isolated test nodes were wiped. The only
+open backlog item is #15 (Atlas), blocked externally.
 
 Handoff notes:
 - The local node was restarted on 0.2.151 with the same data/config dirs.
