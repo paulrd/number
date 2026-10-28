@@ -39,10 +39,13 @@ export { entryFromInputs };
 
 /**
  * Tree reads are best-effort. A missing instance can surface as a 12 s GET
- * timeout on this node, so do not let a missing child/parent stall navigation
- * for the full request budget; try the next legacy generation quickly.
+ * timeout on this node, so a legacy generation gets a short probe. The current
+ * generation must get the full GET budget: a slow first fetch of a real v3
+ * board is not a reason to fall back to an old legacy board (that produced a
+ * false "Pending" when the old board did not know the new child id).
  */
-const BOARD_READ_TIMEOUT_MS = 4_000;
+const CURRENT_BOARD_READ_TIMEOUT_MS = 12_000;
+const LEGACY_BOARD_READ_TIMEOUT_MS = 4_000;
 
 export type BoardStatus =
   | "starting"
@@ -595,9 +598,12 @@ export class OnlineBoard implements BoardBackend {
       ...LEGACY_CONTRACT_CODE_HASHES,
     ]) {
       const legacy = codeHash !== this.config.contractCodeHash;
+      const timeout = legacy
+        ? LEGACY_BOARD_READ_TIMEOUT_MS
+        : CURRENT_BOARD_READ_TIMEOUT_MS;
       try {
         const viewer = await this.viewerFor(codeHash);
-        const state = await viewer.readState(parameters, BOARD_READ_TIMEOUT_MS);
+        const state = await viewer.readState(parameters, timeout);
         return { ownerId, state, codeHash, legacy };
       } catch {
         // No instance, unreadable state, or a timeout: try the next generation.
