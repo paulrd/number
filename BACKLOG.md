@@ -7,8 +7,8 @@ This file is the durable state for the project. Read it with `README.md` and
 
 Published on the live Freenet network (same webapp id as local; the website key
 did not change). The local node remains the owner's node. v3 (boards as a tree)
-is recorded in `published/` but the live site still serves the v2 build until
-the deploy step below is run.
+is recorded in `published/` and deployed to both the local node and the live VPS
+peer; the live test identity opens the v3 contract as a root board.
 
 | Item | Value |
 |---|---|
@@ -24,12 +24,13 @@ the deploy step below is run.
 | Current delegate code hash | `FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH` |
 | Current contract code hash | `7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg` (v3) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
-| Board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
+| Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
+| Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity, root, empty) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | still the v2 build; v3 is recorded but not deployed |
+| Live site | v3 build deployed (2026-10-28); gateway smoke passed on `:7509` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
-| VPS peer | v2 delegate + website published; v3 delegate/site publish is the next deploy step |
+| VPS peer | v3 delegate + website published through the `:7509` SSH forward |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -353,9 +354,11 @@ frame.
   `FtdT…`. Verified: contract 75 tests, delegate 21, UI 97, `make check-artifacts`,
   `make verify-merge` (293 cases, 14 laws, 0 violations), offline e2e 4/4
   (including the tree, parent, read-only, pending, duplicate, axe).
-- Not deployed live yet. Deploy: `make publish-delegate` on `:7510` and the VPS
-  peer, then `fdev --port <port> website update --key number-local ui/dist`.
-  The v2→v3 migration runs when the owner opens the v3 site.
+- Deployed to the local node and the live VPS peer through `:7509`. Gateway
+  smoke passed on both (local 16.7 s, live 21.8 s). The live test identity is on
+  the v3 contract `BtZs…`, root with 8 empty slots, no console errors. Existing
+  v2 boards migrate on first load by adding an empty parent; v2 delegate seeds
+  and counters migrate through `LEGACY_DELEGATES`.
 
 ## Remaining
 
@@ -445,21 +448,20 @@ make verify-merge
 
 ## Working tree
 
-Contains the uncommitted v3 tree change. The v2 address-book change is committed
-as `e1301f5` and pushed to `origin/main`. #13's report is committed and filed as
-freenet-stdlib#140; #14 is in `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10
-in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in
-`8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
+Clean apart from the untracked empty `book.md`. The v3 tree change is committed
+as `a95ca9e` and pushed to `origin/main`; the v2 address-book change is
+`e1301f5`. #13's report is committed and filed as freenet-stdlib#140; #14 is in
+`1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
+`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
+`ba81747`.
 
 `published/` records the v3 generation; `make check-artifacts` proves the bytes.
-The live site still serves the v2 build. To deploy v3: publish
-`FtdT…` to the local `:7510` and the live VPS `:7509`, then
-`fdev --port <port> website update --key number-local ui/dist`. The v2 website id
-does not move. A v2 board migrates when its owner opens the v3 site: the client
-adds an empty parent, re-PUTs the signed v2 state, and the v3 contract accepts
-it; the delegate seed/counters migrate through `LEGACY_DELEGATES`. A v1 board
-remains unmigratable. The VPS test seed from #12 remains; the isolated test
-nodes were wiped. The only open backlog item is #15 (Atlas), blocked externally.
+The v3 delegate and website were published to the local `:7510` and the live VPS
+`:7509`; the website id did not move. Gateway smoke passed on both. The live test
+identity is on v3 contract `BtZs…` (root, empty); the owner's v2 board `Ge6f…`
+migrates into `9x5e…` when opened with the owner seed. A v1 board remains
+unmigratable. The VPS test seed from #12 remains; the isolated test nodes were
+wiped. The only open backlog item is #15 (Atlas), blocked externally.
 
 Handoff notes:
 - The local node was restarted on 0.2.151 with the same data/config dirs.
