@@ -129,6 +129,15 @@ second node on `:7511` / `:31338` with its own directories, for publish and
 migration tests that must not touch the node the UI uses. Override with
 `WS_PORT`, `NETWORK_PORT`, `NODE_ROOT`, or the `ISOLATED_*` equivalents.
 
+**Two-node tree testing needs network mode.** `make node` and
+`make node-isolated` run `freenet local`: a local-only node neither fetches
+contracts from another node nor publishes its own to the network, so a
+parent/child edge to/from a network peer shows **Not created yet**. For a
+two-node test, stop the local node and run `make node-network` (same data
+directories, so the identity, board, site and delegate survive), and make sure
+the other node is also on the network (the live `:7509` peer is). Both sides
+must be able to fetch the other board for the mutual link to resolve.
+
 ```bash
 # 1. the node the UI talks to
 make node

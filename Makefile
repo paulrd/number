@@ -19,7 +19,7 @@ CONTRACT := contract
 DELEGATE := delegate
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-network node-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -65,6 +65,21 @@ dev:
 node:
 	mkdir -p $(NODE_ROOT)/data $(NODE_ROOT)/config $(NODE_ROOT)/logs
 	$(FREENET) local \
+	  --ws-api-port $(WS_PORT) \
+	  --network-port $(NETWORK_PORT) \
+	  --data-dir $(NODE_ROOT)/data \
+	  --config-dir $(NODE_ROOT)/config \
+	  --log-dir $(NODE_ROOT)/logs
+
+# Network-mode node for cross-owner/tree testing. `make node` is local-only:
+# it neither fetches contracts from other nodes nor publishes its own to them,
+# so a parent/child edge between a local node and a network node resolves as
+# "Not created yet". Use this target (and a network-mode peer) for a two-node
+# tree test. Same data/config/log dirs as `make node`, so the identity, board,
+# installed site and delegate survive the switch.
+node-network:
+	mkdir -p $(NODE_ROOT)/data $(NODE_ROOT)/config $(NODE_ROOT)/logs
+	$(FREENET) network \
 	  --ws-api-port $(WS_PORT) \
 	  --network-port $(NETWORK_PORT) \
 	  --data-dir $(NODE_ROOT)/data \
