@@ -13,12 +13,18 @@ import { errorMessage, utf8Length } from "./util";
 
 export interface ContactsDialogDeps {
   getContacts(): Contact[];
-  /** How many slots store this user ID (for the remove warning). */
+  /** How many slots/parent links store this user ID (for the remove warning). */
   getUsedContactCount(userId: string): number;
   saveContacts(entries: Contact[]): Promise<void>;
   announce(message: string): void;
   /** Called after an add made while the dialog was opened from the editor. */
   onAdded(contact: Contact): void;
+  /** The self-entry counts toward the contract limit but is not listed here. */
+  getMaxContacts?(): number;
+  /** Labels reserved by board state, e.g. the board's own name. */
+  getReservedLabels?(): string[];
+  /** User ids reserved by board state, e.g. the owner's own id. */
+  getReservedUserIds?(): string[];
 }
 
 export interface ContactsDialog {
@@ -136,6 +142,12 @@ export function createContactsDialog(
     confirmText.textContent = "";
   }
 
+  function contactLimit(): number {
+    const requested = deps.getMaxContacts?.();
+    if (requested === undefined) return MAX_CONTACTS;
+    return Math.min(MAX_CONTACTS, Math.max(0, Math.floor(requested)));
+  }
+
   function renderList(): void {
     const contacts = deps.getContacts();
 
@@ -184,7 +196,7 @@ export function createContactsDialog(
 
     list.replaceChildren(...rows);
     empty.hidden = contacts.length > 0;
-    countLabel.textContent = `${contacts.length} of ${MAX_CONTACTS}`;
+    countLabel.textContent = `${contacts.length} of ${contactLimit()}`;
   }
 
   function requestRemove(contact: Contact): void {
@@ -269,11 +281,22 @@ export function createContactsDialog(
     }
 
     const contacts = deps.getContacts();
-    if (contacts.length >= MAX_CONTACTS) {
+    const limit = contactLimit();
+    if (contacts.length >= limit) {
       setError(
-        `The address book holds up to ${MAX_CONTACTS} contacts. Remove one before adding another.`,
+        `The address book holds up to ${limit} contacts. Remove one before adding another.`,
       );
       addButton.focus();
+      return;
+    }
+    const reservedUserIds = deps.getReservedUserIds?.() ?? [];
+    if (reservedUserIds.includes(userId)) {
+      setFieldWarning(
+        userIdInput,
+        userIdWarning,
+        "That is your own board's key. It is already saved as the board name.",
+      );
+      userIdInput.focus();
       return;
     }
     if (contacts.some((contact) => contact.userId === userId)) {
@@ -290,6 +313,16 @@ export function createContactsDialog(
         labelInput,
         labelWarning,
         "Another contact already uses this name.",
+      );
+      labelInput.focus();
+      return;
+    }
+    const reservedLabels = deps.getReservedLabels?.() ?? [];
+    if (reservedLabels.includes(label)) {
+      setFieldWarning(
+        labelInput,
+        labelWarning,
+        "This is your board's name. Choose a different name for the contact.",
       );
       labelInput.focus();
       return;

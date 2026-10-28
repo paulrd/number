@@ -197,6 +197,14 @@ The dev server proxies a node credential, so keep it on loopback: do not pass
 Every board is a node in a tree. Its 8 slots are its **children** (each slot's
 contact is the child board owner's user id) and it has at most one **parent**.
 
+Each board also has a **name**, owned by its owner and stored as the owner's own
+entry in that board's signed address book. When you look at another board, the
+label shown is your address-book label for that user if you have one, otherwise
+the target board's own name, otherwise a shortened id. The owner is asked to
+name their board on first load; the name is signed and replicated like any other
+contact, and the self-entry is hidden from the normal contact list. The Contract
+id is under **Details**, not in the primary header.
+
 - **Link a child:** open a slot, choose the child's contact, and save. The
   child's owner opens *their* board, sets its parent to your board, and adds
   your contact if needed.

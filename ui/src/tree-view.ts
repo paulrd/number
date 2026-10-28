@@ -49,6 +49,8 @@ export interface TrailStep {
    * deeper paths where the current board's contacts do not know the ancestor.
    */
   contacts: Contact[];
+  /** The target board's own name, from its self-entry. */
+  selfName: string | null;
   /**
    * True when this board was read from a previous (v2) contract generation.
    * Its slots still count as the parent side of an edge; only its missing
@@ -120,6 +122,18 @@ export async function walkParentChain(
   }
 
   return { hitOwnerId: null, loop: false, truncated: false, error: null };
+}
+
+/** The contact entry that names a board, i.e. its self-entry. */
+export function selfContact(state: StateV3, ownerId: string): Contact | null {
+  return (
+    state.contacts.entries.find((contact) => contact.userId === ownerId) ?? null
+  );
+}
+
+/** A board's own name, or null when it has no self-entry yet. */
+export function selfNameOf(state: StateV3, ownerId: string): string | null {
+  return selfContact(state, ownerId)?.label ?? null;
 }
 
 /** True when a board has a slot pointing at `childId`. */
@@ -258,6 +272,7 @@ export async function buildTrail(
         ownerId: parentId,
         kind: "unreadable",
         contacts: node.state.contacts.entries,
+        selfName: null,
         legacy: false,
       };
       warning = "Could not read part of this path. The path may be incomplete.";
@@ -268,6 +283,7 @@ export async function buildTrail(
         ownerId: parentId,
         kind: "not-created",
         contacts: node.state.contacts.entries,
+        selfName: null,
         legacy: false,
       };
       break;
@@ -277,6 +293,7 @@ export async function buildTrail(
         ownerId: parentId,
         kind: "pending",
         contacts: node.state.contacts.entries,
+        selfName: selfNameOf(result.snapshot.state, parentId),
         legacy: result.snapshot.legacy,
       };
       break;
@@ -287,6 +304,7 @@ export async function buildTrail(
       ownerId: parentId,
       kind: "ancestor",
       contacts: node.state.contacts.entries,
+      selfName: selfNameOf(result.snapshot.state, parentId),
       legacy: result.snapshot.legacy,
     });
     node = result.snapshot;
@@ -298,7 +316,11 @@ export async function buildTrail(
   steps.push({
     ownerId: current.ownerId,
     kind: "current",
-    contacts: current.state.contacts.entries,
+    // There is no board below the current step in the mutual chain, so the
+    // current board's own address book is not a "child names its parent"
+    // source. Its self-entry is exposed separately as `selfName`.
+    contacts: [],
+    selfName: selfNameOf(current.state, current.ownerId),
     legacy: current.legacy,
   });
   return { steps, warning };

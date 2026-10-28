@@ -56,6 +56,9 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#identity-short")).not.toHaveText("Not available");
+  await expect(page.locator("#board-name-row")).toBeVisible();
+  await expect(page.locator("#board-name")).toHaveText("My board");
+  await expect(page.locator("#board-name-dialog")).toBeHidden();
   await expect(page.locator("#contract-short")).not.toHaveText("Not derived");
   await expect(page.locator(".slot")).toHaveCount(8);
   await expect(page.locator("#contacts-count")).toHaveText("0");
@@ -71,6 +74,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await page.locator("#contact-add").click();
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-title")).toBeFocused();
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("0 of 63");
   await page.locator("#contact-label-input").fill("Alice");
   await page.locator("#contact-userid-input").fill(ALICE_ID);
   await page.locator("#contact-add-button").click();
@@ -97,6 +101,8 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await page.locator("#contacts-open").click();
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-list")).toContainText("Alice");
+  await expect(page.locator("#contacts-list")).not.toContainText("My board");
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("1 of 63");
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -122,6 +128,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   const firstLabel = page.locator(".slot .slot-label").first();
   await expect(firstLabel).toHaveText("Unknown · abcdef01");
   await expect(firstLabel).toHaveAttribute("title", aliceId);
+  await expect(page.locator("#board-name")).toHaveText("My board");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -225,10 +232,12 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#identity-short")).toBeVisible();
+  await expect(page.locator("#board-name-row")).toBeVisible();
+  await expect(page.locator("#board-name")).toHaveText("My board");
   await expect(page.locator("#read-only-badge")).toBeHidden();
   await expect(page.locator("#parent-name")).toHaveText("Root");
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
-    "Your board",
+    "My board",
   );
 
   await addContact(page, "Child", MOCK_CHILD_ID);
@@ -254,6 +263,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await page.locator("#child-open").click();
   await expect(page.locator("#board-meta")).toBeVisible();
   await expect(page.locator("#board-meta-label")).toHaveText("Viewing");
+  await expect(page.locator("#board-name-row")).toBeHidden();
   await expect(page.locator("#board-owner")).toContainText("Child");
   await expect(page.locator("#read-only-badge")).toBeVisible();
   await expect(page.locator("#board-home")).toBeVisible();
@@ -264,16 +274,18 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "Child",
   );
-  await expect(page.locator("#breadcrumb-list")).toContainText("Your board");
+  await expect(page.locator("#breadcrumb-list")).toContainText("My board");
+  await expect(page.locator("#parent-name")).toHaveText("My board");
   // The fixture child has no slots, and they are not editable.
   await expect(page.locator(".slot").first()).toBeDisabled();
 
   await page.locator("#board-home").click();
   await expect(page.locator("#read-only-badge")).toBeHidden();
   await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#board-name-row")).toBeVisible();
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
-    "Your board",
+    "My board",
   );
 
   // A one-sided child link is Pending: the parent fixture exists, but its own
@@ -303,6 +315,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await page.locator("#parent-open").click();
   await expect(page.locator("#board-meta")).toBeVisible();
   await expect(page.locator("#board-meta-label")).toHaveText("Viewing");
+  await expect(page.locator("#board-name-row")).toBeHidden();
   await expect(page.locator("#board-owner")).toContainText("Parent");
   await expect(page.locator("#read-only-badge")).toBeVisible();
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
@@ -310,6 +323,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   );
   await page.locator("#board-home").click();
   await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#board-name-row")).toBeVisible();
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
 
@@ -335,6 +349,201 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await page.locator("#parent-clear").click();
   await expect(page.locator("#parent-name")).toHaveText("Root");
   await expect(page.locator("#parent-clear")).toBeHidden();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("keeps the contract id in a closed Details section", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#contract-copy")).toBeHidden();
+  await expect(page.locator("#contract-short")).toBeHidden();
+
+  await page.locator("#details-summary").click();
+  await expect(page.locator("#details")).toHaveAttribute("open", "");
+  await expect(page.locator("#contract-short")).toBeVisible();
+  await expect(page.locator("#contract-short")).not.toHaveText("Not derived");
+  await expect(page.locator("#contract-copy")).toBeEnabled();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("requires a board name on first load and cannot be dismissed", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/?unnamed=1");
+  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#board-name-dialog")).toBeVisible();
+  await expect(page.locator("#board-name-title")).toHaveText("Name your board");
+  await expect(page.locator("#board-name-close")).toBeHidden();
+  await expect(page.locator("#board-name-cancel")).toBeHidden();
+
+  // Required mode: Escape and the backdrop must not dismiss it.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#board-name-dialog")).toBeVisible();
+  await page.mouse.click(8, 8);
+  await expect(page.locator("#board-name-dialog")).toBeVisible();
+
+  const promptAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    promptAccessibility.violations,
+    `axe violations:\n${JSON.stringify(promptAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  await page.locator("#board-name-save").click();
+  await expect(page.locator("#board-name-warning")).toContainText("Enter a name");
+
+  await page.locator("#board-name-input").fill("Test board");
+  await page.locator("#board-name-save").click();
+  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await expect(page.locator("#board-name-row")).toBeVisible();
+  await expect(page.locator("#board-name")).toHaveText("Test board");
+  await expect(page.locator("#contacts-count")).toHaveText("0");
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("renames the board and reserves that name in the address book", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await expect(page.locator("#board-name")).toHaveText("My board");
+
+  await page.locator("#board-name-edit").click();
+  await expect(page.locator("#board-name-dialog")).toBeVisible();
+  await expect(page.locator("#board-name-title")).toHaveText("Rename your board");
+  await expect(page.locator("#board-name-input")).toHaveValue("My board");
+  await expect(page.locator("#board-name-cancel")).toBeVisible();
+
+  await page.locator("#board-name-input").fill("Renamed board");
+  await page.locator("#board-name-save").click();
+  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await expect(page.locator("#board-name")).toHaveText("Renamed board");
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Renamed board",
+  );
+
+  // A name already used by a contact is rejected in the dialog.
+  await addContact(page, "Alice", ALICE_ID);
+  await page.locator("#board-name-edit").click();
+  await page.locator("#board-name-input").fill("Alice");
+  await page.locator("#board-name-save").click();
+  await expect(page.locator("#board-name-warning")).toContainText(
+    "Another contact",
+  );
+  await page.locator("#board-name-cancel").click();
+  await expect(page.locator("#board-name")).toHaveText("Renamed board");
+
+  // The board name is also reserved when adding a new contact.
+  await page.locator("#contacts-open").click();
+  await page.locator("#contact-label-input").fill("Renamed board");
+  await page.locator("#contact-userid-input").fill(BOB_ID);
+  await page.locator("#contact-add-button").click();
+  await expect(page.locator("#contact-label-warning")).toContainText(
+    "board's name",
+  );
+  await page.locator("#contacts-done").click();
+  await expect(page.locator("#contacts-count")).toHaveText("1");
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("falls back to fixture board names when contacts are removed", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+
+  // Set up the child slot and a mutual parent link.
+  await page.locator(".slot").first().click();
+  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
+  await page.locator("#value-input").fill("2.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
+
+  await page.locator(".slot").nth(1).click();
+  await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#value-input").fill("1.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
+
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await expect(page.locator("#parent-name")).toHaveText("Parent");
+
+  // Removing the child contact keeps the signed id and falls back to the
+  // child board's own name.
+  await page.locator("#contacts-open").click();
+  await page.getByRole("button", { name: "Remove Child" }).click();
+  await expect(page.locator("#contacts-confirm")).toBeVisible();
+  await page.locator("#contacts-confirm-remove").click();
+  await expect(page.locator("#contacts-list")).not.toContainText("Child");
+  await page.locator("#contacts-done").click();
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("Child board");
+
+  // The parent row replaces its initial Unknown label with the parent's name.
+  await page.locator("#contacts-open").click();
+  await page.getByRole("button", { name: "Remove Parent" }).click();
+  await expect(page.locator("#contacts-confirm")).toBeVisible();
+  await page.locator("#contacts-confirm-remove").click();
+  await expect(page.locator("#contacts-list")).not.toContainText("Parent");
+  await page.locator("#contacts-done").click();
+  await expect(page.locator("#parent-name")).toHaveText("Parent board");
+
+  // The Viewing row and path use the same fallback.
+  await page.locator(".slot").first().click();
+  await expect(page.locator("#child-link-status")).toHaveText("Linked");
+  await page.locator("#child-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Child board");
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Child board",
+  );
+  await expect(page.locator("#breadcrumb-list")).toContainText("My board");
+  await page.locator("#board-home").click();
+
+  await page.locator("#parent-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Parent board");
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Parent board",
+  );
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("My board");
+  await page.locator("#board-home").click();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(

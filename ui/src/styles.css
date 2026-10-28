@@ -1999,6 +1999,17 @@ body:has(#delegate-install[open]) {
   flex-wrap: wrap;
 }
 
+.meta-line > .meta-action {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
+.meta-row--group-start {
+  margin-top: 0.45rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--rule);
+}
+
 .meta-line .copy-button {
   min-width: 0;
   flex: 1 1 auto;
@@ -2040,6 +2051,87 @@ body:has(#delegate-install[open]) {
 
 .parent-name.is-root {
   color: var(--faint);
+}
+
+.board-name {
+  min-width: 0;
+  padding: 0.2rem 0.35rem;
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-name.is-empty {
+  color: var(--faint);
+  font-weight: 500;
+}
+
+.meta-details {
+  margin-top: 0.45rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--rule);
+}
+
+.meta-details > summary {
+  display: flex;
+  min-height: 2rem;
+  margin-left: -0.35rem;
+  padding: 0.2rem 0.35rem;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.meta-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.meta-details > summary::marker {
+  content: "";
+}
+
+.meta-details > summary::before {
+  content: "▸";
+  color: var(--accent);
+  font-size: 0.7rem;
+  line-height: 1;
+  transition: transform 140ms var(--ease);
+}
+
+.meta-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.meta-details > summary:hover {
+  border-color: var(--border);
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.meta-details > summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.meta-list--details {
+  margin-top: 0.25rem;
+  padding-top: 0.25rem;
+  border-top: 0;
 }
 
 .meta-note {
@@ -2259,6 +2351,27 @@ body:has(#parent-dialog[open]) {
 
 .parent-dialog .editor-actions {
   justify-content: flex-end;
+}
+
+html:has(#board-name-dialog[open]),
+body:has(#board-name-dialog[open]) {
+  overflow: hidden;
+}
+
+.board-name-dialog {
+  width: min(34rem, calc(100vw - 2rem));
+}
+
+.board-name-dialog .editor-actions {
+  justify-content: flex-end;
+}
+
+.board-name-dialog h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
+.board-name-dialog .form-error {
+  margin: 0;
 }
 
 html:has(#contacts-dialog[open]),
@@ -2569,7 +2682,7 @@ body:has(#contacts-dialog[open]) {
   }
 
   .meta-row {
-    grid-template-columns: 4.2rem minmax(0, 1fr);
+    grid-template-columns: 4.9rem minmax(0, 1fr);
   }
 
   .board-head {
@@ -2676,6 +2789,10 @@ body:has(#contacts-dialog[open]) {
     margin-left: 0;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.5rem;
+  }
+
+  .board-name-dialog.is-required .editor-actions-right {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .field-inline {

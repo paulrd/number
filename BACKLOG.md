@@ -364,6 +364,28 @@ frame.
   as **Viewing** with the owner, read-only/version badges, and Home when another
   owner's board is on screen. UI-only, deployed in place; no re-key.
 
+### #18 — Board names and header clarity
+
+- A board's name is the owner's own entry in the existing signed address book
+  (self-contact label). No contract/delegate change and no re-key. Other boards
+  read it from the target state and use the fallback order: relevant address-book
+  label → target board's own name → shortened id. This applies to the path,
+  Viewing row, parent/child link labels, and slot labels (lazy name resolution).
+- The owner is required to name their board on first load; the dialog cannot be
+  dismissed until saved. A Board name row renames it. The self-entry is hidden
+  from the contact list/pickers/count; every contacts save preserves it. The
+  address book reserves the board name/id and shows 63 other slots.
+- Header: Identity group, Board name (own) or Viewing (remote) + Parent,
+  Contacts, and a collapsed Details section. The Contract id is only under
+  Details now; group separators were added.
+- Edge: a board already at the 64-contact cap must remove one contact before it
+  can add its self-entry; normal boards are capped at 63 others. The required
+  dialog surfaces the backend limit error.
+- Verified: UI 97 unit tests, offline e2e 8/8 (prompt, rename/duplicate/
+  reservation, fallback names, Details, axe, clean console), build/tsc.
+- UI-only; no WASM/artifacts change. The local/live website update is the only
+  deployment step.
+
 ## Remaining
 
 ### #15 — Atlas listing (blocked)

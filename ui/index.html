@@ -64,8 +64,8 @@
                 </div>
               </dd>
             </div>
-            <div id="board-meta" class="meta-row">
-              <dt id="board-meta-label">Board</dt>
+            <div id="board-meta" class="meta-row meta-row--group-start" hidden>
+              <dt id="board-meta-label">Viewing</dt>
               <dd>
                 <div class="meta-value">
                   <div class="meta-line">
@@ -90,12 +90,22 @@
                 </div>
               </dd>
             </div>
-            <div class="meta-row">
-              <dt>Contract</dt>
+            <div id="board-name-row" class="meta-row meta-row--group-start" hidden>
+              <dt>Board name</dt>
               <dd>
-                <button id="contract-copy" class="copy-button" type="button" disabled>
-                  <code id="contract-short">Not derived</code>
-                </button>
+                <div class="meta-line">
+                  <span id="board-name" class="board-name">Not named</span>
+                  <button
+                    id="board-name-edit"
+                    class="meta-action"
+                    type="button"
+                    aria-haspopup="dialog"
+                    aria-controls="board-name-dialog"
+                    disabled
+                  >
+                    Rename
+                  </button>
+                </div>
               </dd>
             </div>
             <div class="meta-row">
@@ -135,7 +145,7 @@
                 </div>
               </dd>
             </div>
-            <div class="meta-row">
+            <div class="meta-row meta-row--group-start">
               <dt>Contacts</dt>
               <dd>
                 <button
@@ -153,6 +163,20 @@
               </dd>
             </div>
           </dl>
+
+          <details id="details" class="meta-details">
+            <summary id="details-summary">Details</summary>
+            <dl class="meta-list meta-list--details">
+              <div class="meta-row">
+                <dt>Contract</dt>
+                <dd>
+                  <button id="contract-copy" class="copy-button" type="button" disabled>
+                    <code id="contract-short">Not derived</code>
+                  </button>
+                </dd>
+              </div>
+            </dl>
+          </details>
         </div>
       </header>
 
@@ -356,6 +380,75 @@
               </button>
               <button id="parent-save" class="button button--primary" type="submit">
                 Save parent
+              </button>
+            </div>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog
+        id="board-name-dialog"
+        class="editor board-name-dialog"
+        aria-labelledby="board-name-title"
+        aria-describedby="board-name-desc board-name-hint"
+      >
+        <form id="board-name-form" class="editor-form" novalidate>
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Board name</p>
+              <h2 id="board-name-title" tabindex="-1">Name your board</h2>
+              <p id="board-name-desc" class="identity-intro">
+                This name is how other boards see yours in their path. It is
+                stored in your signed address book and can be changed later.
+              </p>
+            </div>
+            <button
+              id="board-name-close"
+              class="icon-button"
+              type="button"
+              aria-label="Close board name"
+              hidden
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="editor-body">
+            <label class="field">
+              <span>Name</span>
+              <input
+                id="board-name-input"
+                name="board-name"
+                type="text"
+                maxlength="64"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                placeholder="e.g. My board"
+                aria-describedby="board-name-desc board-name-hint"
+                aria-required="true"
+              />
+            </label>
+            <p id="board-name-hint" class="field-hint">
+              Up to 64 characters. This name is public and signed with the rest
+              of your address book.
+            </p>
+            <p id="board-name-warning" class="field-warning" role="status" hidden></p>
+            <p id="board-name-error" class="form-error" role="alert" hidden></p>
+          </div>
+
+          <footer class="editor-actions">
+            <div class="editor-actions-right">
+              <button
+                id="board-name-cancel"
+                class="button button--quiet"
+                type="button"
+                hidden
+              >
+                Cancel
+              </button>
+              <button id="board-name-save" class="button button--primary" type="submit">
+                Save name
               </button>
             </div>
           </footer>
@@ -678,7 +771,8 @@
               <p id="contacts-desc" class="contacts-intro">
                 A contact is a name for a public key. Slots store the key, so renaming
                 a label keeps the link. Removing a contact leaves its key on any slot
-                that already uses it.
+                that already uses it. Your board's own name is edited from the header
+                and is not listed here.
               </p>
             </div>
             <button

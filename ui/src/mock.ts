@@ -29,6 +29,12 @@ import type { DelegateIdentity } from "./delegate";
 
 const encoder = new TextEncoder();
 
+/** `?unnamed=1` starts without a self-entry so e2e can exercise the prompt. */
+function unnamedRequested(): boolean {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("unnamed") === "1";
+}
+
 function digest(label: string): Uint8Array {
   return blake3(encoder.encode(label));
 }
@@ -114,6 +120,18 @@ export class OfflineBoard implements BoardBackend {
     await delay(120);
 
     this.currentState = emptyState();
+    if (!unnamedRequested()) {
+      // The board name is the owner's self-entry in the signed address book.
+      const entries: Contact[] = [
+        { label: "My board", userId: this.identity.pubkey },
+      ];
+      this.currentState.contacts = {
+        seq: 1,
+        entries,
+        sig: mockContactsSignature(1, entries),
+      };
+      this.identity.contactsNextSeq = 2;
+    }
     this.started = true;
     this.callbacks.onIdentity(this.snapshotIdentity());
     this.callbacks.onContractKey(this.contractKeyBase58);
@@ -271,6 +289,13 @@ export class OfflineBoard implements BoardBackend {
 
     const own = this.identity.pubkey;
     const fixture = emptyState();
+    const selfName = ownerId === MOCK_CHILD_ID ? "Child board" : "Parent board";
+    const selfEntries: Contact[] = [{ label: selfName, userId: ownerId }];
+    fixture.contacts = {
+      seq: 1,
+      entries: selfEntries,
+      sig: mockContactsSignature(1, selfEntries),
+    };
     if (ownerId === MOCK_CHILD_ID) {
       fixture.parent = {
         seq: 1,

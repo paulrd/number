@@ -133,6 +133,15 @@ Rules:
 - A contact update replaces the whole record at a higher `seq`; the UI signs a
   new record for add or remove (re-adding the same user id under a new label is
   a rename). There are no per-contact counters.
+- **Board name convention.** A contact whose `userId` equals the board owner's
+  own user id is the board's self-entry; its `label` is the board's name. It is
+  an ordinary valid contact (counts toward the 64 limit, signed in the same
+  record), but the UI hides it from the contact list/selectors and manages it
+  with a dedicated Board name control. Other boards use it as the fallback label
+  for this board when their own address book has no entry: address-book label
+  first, target board's name second, shortened id last. This needs no schema or
+  signing change. The UI requires the owner to set a name on first load if the
+  self-entry is absent.
 
 ### Signing bytes — slot (canonical, hand-built)
 
@@ -453,6 +462,12 @@ install it on first use.
     the tree model). Breadcrumbs follow mutual parent edges, cache fetched
     boards, cap the depth, and stop on a cycle. Pending/not-created/legacy
     edges are shown but not followed as tree edges.
+13. If the own board has no self-entry, a blocking "Name your board" dialog
+    writes one via the contacts record. Labels for a user/board resolve as:
+    relevant address-book label, then the target board's own name (self-entry),
+    then a shortened id. The header groups Identity, Board name (own) or
+    Viewing (remote), Parent, Contacts, and a collapsed Details section with
+    the Contract id; separators mark the groups.
 
 ### Identity backup and restore (user-facing)
 
@@ -535,6 +550,12 @@ Contract and delegate are excluded from any workspace (see build-system →
   read-only, navigate breadcrumbs/home, see pending/not-created states, reject
   duplicate children, axe, clean console, blank `0.00`, >2 decimals rejected,
   and the full i64-cents range.
+- Board names/header: a missing self-entry opens a non-dismissible name dialog;
+  saving writes the self-entry; the Board name row renames it; a name equal to a
+  contact is rejected; the address book reserves the board name and shows 63
+  other contacts; removing a contact falls back to the remote board's own name
+  in the slot/parent/Viewing/path labels; the Contract id is only in a closed
+  Details section; separators and axe pass.
 - Real node: add a contact, save a two-decimal value, reload, and confirm the
   contact label and exact hundredths survive; set a parent/child link and
   confirm the mutual check on two identities (or the offline fixture); clear a
