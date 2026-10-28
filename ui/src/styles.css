@@ -3795,3 +3795,8 @@ body:has(#payment-dialog[open]) {
     transition-duration: 0.01ms !important;
   }
 }
+
+.payment-withdraw {
+  margin-top: 0.45rem;
+  color: var(--text);
+}

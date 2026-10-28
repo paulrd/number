@@ -157,6 +157,7 @@ const paymentStatusBadge = byId<HTMLElement>("payment-status-badge");
 const paymentStatusTitle = byId<HTMLElement>("payment-status-title");
 const paymentStatusDetail = byId<HTMLElement>("payment-status-detail");
 const paymentStatusRoute = byId<HTMLElement>("payment-status-route");
+const paymentWithdraw = byId<HTMLButtonElement>("payment-withdraw");
 const paymentInbox = byId<HTMLElement>("payment-inbox");
 const paymentInboxList = byId<HTMLUListElement>("payment-inbox-list");
 const paymentEmpty = byId<HTMLElement>("payment-empty");
@@ -1259,6 +1260,7 @@ async function renderPayments(): Promise<void> {
     paymentStatus.hidden = true;
     paymentInbox.hidden = true;
     paymentEmpty.hidden = true;
+    paymentWithdraw.hidden = true;
     paymentInboxList.replaceChildren();
     return;
   }
@@ -1283,6 +1285,14 @@ async function renderPayments(): Promise<void> {
   // A settled payment (complete/reversed/blocked/superseded) no longer blocks a
   // new one, even though the source's own copy may still be the offered record.
   const active = display !== null && display.phase !== "terminal";
+  const canWithdraw =
+    entry !== null &&
+    entry.src === own.ownerId &&
+    display !== null &&
+    display.status === "offered" &&
+    display.cursor === 0;
+  paymentWithdraw.hidden = !canWithdraw;
+  paymentWithdraw.disabled = busy || navigating;
   paymentOpen.disabled = busy || navigating || active || isRoot;
   paymentOpen.title = active
     ? "This board already has a payment in progress."
@@ -1359,9 +1369,11 @@ function paymentProblemMessage(failure: PaymentFailure): string {
     case "no-destination":
       return "There is no board at that address.";
     case "pending":
+      return `A board on the path has not confirmed its parent yet. ${failure.detail}`;
     case "not-created":
+      return `A board on the path has not been created yet. ${failure.detail}`;
     case "legacy":
-      return "The route is not a mutual, current-version path yet.";
+      return `A board on the path is still on the previous version; its owner must open the new app once. ${failure.detail}`;
     case "invalid-address":
       return "Use only digits 0–7 for the octal address.";
     case "overflow":
@@ -2376,6 +2388,23 @@ paymentCheck.addEventListener("click", () => {
   // Force the status/inbox read to look past the session cache.
   boardCache.clear();
   void renderPayments();
+});
+paymentWithdraw.addEventListener("click", () => {
+  void (async () => {
+    const own = ownSnapshot();
+    if (own === null || own.state.payments.entry === null) return;
+    paymentWithdraw.disabled = true;
+    try {
+      await backend.savePayment(null, []);
+      boardCache.clear();
+      showNotice("info", "Offer withdrawn", "The source record was cleared before any leg was signed.");
+      announce("Payment offer withdrawn.");
+      renderAll();
+    } catch (error) {
+      showNotice("error", "Could not withdraw the offer", errorMessage(error));
+      paymentWithdraw.disabled = false;
+    }
+  })();
 });
 paymentClose.addEventListener("click", closePaymentDialog);
 paymentCancel.addEventListener("click", closePaymentDialog);
