@@ -25,10 +25,11 @@ peer; the live test identity opens the v3 contract as a root board.
 | Current contract code hash | `C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT` (v4) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
-| Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity; root; slot 6 “Tim” = `44.40`) |
+| Live v4 test board | `EFegBMVna68Rn7VhXxYeRavJBCXLWJqqsXpKeA5Q7wKo` (live test identity `3f84…`; root “Dad”; slot 1 “Alice” = `12.00`) |
+| Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v3 + board-name/header + parent-value/octal-address UI deployed (2026-10-28); v4 payments is built/recorded but **not deployed** |
+| Live site | v4 cooperative payments deployed (2026-10-28); gateway smoke passed on `:7512` and `:7509` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | v3 delegate + website and the UI-only board-name update published through the `:7509` SSH forward |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -456,9 +457,16 @@ frame.
   Ed25519; discovery is manual; unequal-depth routes change the touched sum by
   design. A multi-device same-seed payment race is pre-existing and can lose the
   record merge while slot writes win.
-- Not deployed yet: a v4 deploy re-keys the contract and delegate. The live v3
-  site is unchanged; publishing requires the v4 delegate install, board
-  re-PUT/migration, and gateway smoke.
+- Deployed: published delegate `6FN3…` and the v4 site to the stage `:7512`
+  peer, then the live `:7509` peer. The stage board (`FkZL…`, “Alice” under
+  “Dad”) and the live test board (`EFeg…`, root “Dad”, slot 1 “Alice” 12.00)
+  migrated from the registered v3 predecessor. First load took ~30 s on the
+  live peer (delegate predecessor probes + legacy board GET); a warm load smoke
+  passed on both (`:7512` 13.5 s, `:7509` 14.1 s).
+- The first load exposed a UI transition bug: the payments panel stayed hidden
+  when `ready` arrived after the state render. Fixed by repainting payments from
+  `paintStatus`; UI-only redeployed. Live DOM check confirmed the panel visible
+  and the root board disables “Make a payment…” as intended.
 
 
 ## Remaining
