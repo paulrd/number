@@ -57,6 +57,8 @@ const statusDetail = byId<HTMLParagraphElement>("status-detail");
 const identityShort = byId<HTMLElement>("identity-short");
 const identityCopy = byId<HTMLButtonElement>("identity-copy");
 const identityBackup = byId<HTMLButtonElement>("identity-backup");
+const boardMeta = byId<HTMLElement>("board-meta");
+const boardMetaLabel = byId<HTMLElement>("board-meta-label");
 const boardOwner = byId<HTMLElement>("board-owner");
 const boardCopy = byId<HTMLButtonElement>("board-copy");
 const boardHome = byId<HTMLButtonElement>("board-home");
@@ -482,6 +484,8 @@ function renderBoardHeader(): void {
   const current = view;
 
   if (!current) {
+    boardMeta.hidden = true;
+    boardMetaLabel.textContent = "Board";
     boardOwner.textContent = "Loading…";
     boardOwner.removeAttribute("title");
     boardCopy.disabled = true;
@@ -493,6 +497,12 @@ function renderBoardHeader(): void {
     boardHint.textContent = OWN_BOARD_HINT;
     return;
   }
+
+  const remote = !current.isOwn;
+  // On the own board the Identity row already names the board and its owner,
+  // so the Board row only appears when a different owner is being viewed.
+  boardMeta.hidden = !remote;
+  boardMetaLabel.textContent = remote ? "Viewing" : "Board";
 
   const label = current.isOwn
     ? "Your board"

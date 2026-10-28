@@ -53,6 +53,8 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
 
   await expect(page.getByRole("heading", { level: 1, name: "number" })).toBeVisible();
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#identity-short")).not.toHaveText("Not available");
   await expect(page.locator("#contract-short")).not.toHaveText("Not derived");
   await expect(page.locator(".slot")).toHaveCount(8);
@@ -221,6 +223,8 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
 
   await page.goto("/");
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#read-only-badge")).toBeHidden();
   await expect(page.locator("#parent-name")).toHaveText("Root");
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
@@ -248,6 +252,9 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await page.locator(".slot").first().click();
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await page.locator("#child-open").click();
+  await expect(page.locator("#board-meta")).toBeVisible();
+  await expect(page.locator("#board-meta-label")).toHaveText("Viewing");
+  await expect(page.locator("#board-owner")).toContainText("Child");
   await expect(page.locator("#read-only-badge")).toBeVisible();
   await expect(page.locator("#board-home")).toBeVisible();
   await expect(page.locator("#contacts-open")).toBeDisabled();
@@ -263,6 +270,8 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
 
   await page.locator("#board-home").click();
   await expect(page.locator("#read-only-badge")).toBeHidden();
+  await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "Your board",
   );
@@ -292,11 +301,16 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await page.locator("#parent-save").click();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
   await page.locator("#parent-open").click();
+  await expect(page.locator("#board-meta")).toBeVisible();
+  await expect(page.locator("#board-meta-label")).toHaveText("Viewing");
+  await expect(page.locator("#board-owner")).toContainText("Parent");
   await expect(page.locator("#read-only-badge")).toBeVisible();
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "Parent",
   );
   await page.locator("#board-home").click();
+  await expect(page.locator("#board-meta")).toBeHidden();
+  await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
 
   // Duplicate child ids are rejected before saving.
