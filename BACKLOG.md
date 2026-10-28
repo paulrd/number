@@ -467,6 +467,14 @@ frame.
   when `ready` arrived after the state render. Fixed by repainting payments from
   `paintStatus`; UI-only redeployed. Live DOM check confirmed the panel visible
   and the root board disables “Make a payment…” as intended.
+- Post-deploy diagnosis: a payment from address `03` to `5` initially returned
+  the old generic route error because at least one board on the path had not yet
+  been opened in v4 (the error did not name which). After opening Bob `03`,
+  Alice `0`, Dad (root), and Tim `5`, every edge was Linked/current and the route
+  planned (`03 → root → 5`, 3 hops). UI-only update `767ac65` now names the
+  specific `pending`/`not-created`/`legacy` board and detail, and adds
+  **Withdraw offer** for a source offer with no signed leg. Redeployed to all
+  four nodes (`7509`, `7511`, `7512`, `7513`); gateway smoke passed.
 
 
 ## Remaining
