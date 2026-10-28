@@ -38,6 +38,11 @@ export interface IdentityBackup {
    * backups written before the tree existed still decode; missing means 1.
    */
   parentNextSeq?: number;
+  /**
+   * Next sequence value for the signed payments record, >= 1. Optional so
+   * backups written before cooperative payments still decode; missing means 1.
+   */
+  paymentsNextSeq?: number;
   /** Owner public key for human comparison; not verified at decode time. */
   pubkey?: string;
   /** ISO timestamp, informational. */
@@ -51,6 +56,8 @@ export interface DecodedIdentityBackup {
   contactsNextSeq: number;
   /** Defaults to 1 for a backup written before the parent link existed. */
   parentNextSeq: number;
+  /** Defaults to 1 for a backup written before payments existed. */
+  paymentsNextSeq: number;
   pubkey?: string;
 }
 
@@ -73,6 +80,7 @@ export function encodeIdentityBackup(
     nextSeq: [...secrets.nextSeq],
     contactsNextSeq: secrets.contactsNextSeq,
     parentNextSeq: secrets.parentNextSeq,
+    paymentsNextSeq: secrets.paymentsNextSeq ?? 1,
     ...(pubkey ? { pubkey: pubkey.toLowerCase() } : {}),
     createdAt: now.toISOString(),
   };
@@ -158,6 +166,20 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     parentNextSeq = record.parentNextSeq;
   }
 
+  let paymentsNextSeq = 1;
+  if (record.paymentsNextSeq !== undefined) {
+    if (
+      typeof record.paymentsNextSeq !== "number" ||
+      !Number.isSafeInteger(record.paymentsNextSeq) ||
+      record.paymentsNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup payments sequence must be a positive integer.",
+      );
+    }
+    paymentsNextSeq = record.paymentsNextSeq;
+  }
+
   let pubkey: string | undefined;
   if (record.pubkey !== undefined) {
     if (
@@ -176,6 +198,7 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     nextSeq: nextSeq as number[],
     contactsNextSeq,
     parentNextSeq,
+    paymentsNextSeq,
     ...(pubkey ? { pubkey } : {}),
   };
 }

@@ -2,9 +2,9 @@
 //! signing for the number app.
 //!
 //! The delegate owns a single Ed25519 key pair. The 32-byte seed, a per-slot
-//! monotonic sequence counter, a contacts sequence counter and a parent
-//! sequence counter live in the delegate's secret store; the matching public
-//! key is the owner key the
+//! monotonic sequence counter, a contacts sequence counter, a parent sequence
+//! counter and a payments sequence counter live in the delegate's secret
+//! store; the matching public key is the owner key the
 //! `number-contract` instance is parameterised by. The delegate itself is
 //! parameterised by the web container contract id it serves, and refuses every
 //! other caller.
@@ -38,7 +38,7 @@ pub const USER_ID_HEX_LEN: usize = 64;
 pub const WEBAPP_ID_LEN: usize = 32;
 
 /// Bumped when the delegate protocol changes; reported by `status`/`export`.
-pub const DELEGATE_VERSION: u32 = 5;
+pub const DELEGATE_VERSION: u32 = 7;
 
 /// Secret-store key holding the raw 32-byte Ed25519 seed.
 pub const SECRET_SEED: &[u8] = b"number.v1.seed";
@@ -52,6 +52,9 @@ pub const CONTACTS_NEXTSEQ_KEY: &[u8] = b"number.v2.nextseq.contacts";
 /// Secret-store key holding the parent `u64` little-endian next-sequence.
 pub const PARENT_NEXTSEQ_KEY: &[u8] = b"number.v3.nextseq.parent";
 
+/// Secret-store key holding the payments `u64` little-endian next-sequence.
+pub const PAYMENTS_NEXTSEQ_KEY: &[u8] = b"number.v4.nextseq.payments";
+
 /// Domain separator for the canonical slot signing bytes (`DESIGN.md` §2).
 /// Unchanged from v2 so v2 signatures keep validating.
 const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
@@ -62,6 +65,10 @@ const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
 
 /// Domain separator for the canonical parent signing bytes (`DESIGN.md` §2).
 const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
+
+/// Domain separator for the canonical payments signing bytes
+/// (`DESIGN-payments.md`).
+const SIGNING_DOMAIN_PAYMENTS: &[u8] = b"number:v4:payments";
 
 /// Persistent secret storage, abstracted from the host.
 ///
@@ -85,7 +92,12 @@ impl SecretStore for DelegateCtx {
 
 /// Whether `value` is exactly 64 lowercase hexadecimal characters (32 bytes).
 fn is_user_id(value: &str) -> bool {
-    value.len() == USER_ID_HEX_LEN
+    is_lower_hex(value, USER_ID_HEX_LEN)
+}
+
+/// Whether `value` is exactly `len` lowercase hexadecimal characters.
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -169,6 +181,235 @@ fn contacts_error(entries: &[Contact]) -> Option<String> {
     None
 }
 
+/// Maximum digits in a payment address (`DESIGN-payments.md`).
+pub const MAX_ADDRESS_DIGITS: usize = 32;
+/// Maximum legs in a payment (the LCA has two).
+pub const MAX_PAYMENT_LEGS: usize = 2;
+/// Maximum settled payment ids retained in a `payments` record.
+pub const MAX_SETTLED_PAYMENTS: usize = 8;
+/// Maximum route cursor; `N = dS + dD` is bounded by the address depth.
+pub const MAX_PAYMENT_CURSOR: u8 = 64;
+
+/// One applied payment leg: the slot write an actor signed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentLeg {
+    pub slot: u8,
+    pub seq: u64,
+    #[serde(rename = "postValue")]
+    pub post_value: i64,
+    /// The slot signature (128 lowercase hex characters).
+    pub sig: String,
+}
+
+/// The single active payment carried in a board's `payments` record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payment {
+    /// `blake3(src || srcSeq || dst || amount)[0..16]` hex.
+    pub id: String,
+    pub src: String,
+    pub dst: String,
+    pub amount: i64,
+    #[serde(rename = "srcAddr")]
+    pub src_addr: String,
+    #[serde(rename = "dstAddr")]
+    pub dst_addr: String,
+    pub cursor: u8,
+    pub phase: String,
+    pub status: String,
+    pub next: String,
+    #[serde(default)]
+    pub fail: Option<String>,
+    pub legs: Vec<PaymentLeg>,
+}
+
+/// The `payments` record: a sequence, its settled ids, an optional entry and
+/// its signature.
+///
+/// `seq == 0` is the empty record; `seq > 0` with no entry is a legal
+/// tombstone. Tombstones may still carry settled ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payments {
+    pub seq: u64,
+    /// Recently settled payment ids, oldest first (at most
+    /// [`MAX_SETTLED_PAYMENTS`]).
+    #[serde(default)]
+    pub settled: Vec<String>,
+    pub entry: Option<Payment>,
+    pub sig: Option<String>,
+}
+
+fn is_address(value: &str) -> bool {
+    value.len() <= MAX_ADDRESS_DIGITS && value.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
+}
+
+fn is_all_zero_user_id(value: &str) -> bool {
+    value.len() == USER_ID_HEX_LEN && value.bytes().all(|byte| byte == b'0')
+}
+
+fn phase_tag(value: &str) -> Option<u8> {
+    match value {
+        "forward" => Some(0),
+        "reverse" => Some(1),
+        "terminal" => Some(2),
+        _ => None,
+    }
+}
+
+fn status_tag(value: &str) -> Option<u8> {
+    match value {
+        "offered" => Some(0),
+        "acted" => Some(1),
+        "complete" => Some(2),
+        "reversing" => Some(3),
+        "reversed" => Some(4),
+        "aborted" => Some(5),
+        "blocked" => Some(6),
+        "superseded" => Some(7),
+        _ => None,
+    }
+}
+
+fn fail_tag(value: &str) -> Option<u8> {
+    match value {
+        "negative" => Some(1),
+        "no-destination" => Some(2),
+        "busy" => Some(3),
+        "refused" => Some(4),
+        "address-mismatch" => Some(5),
+        "blocked" => Some(6),
+        "superseded" => Some(7),
+        _ => None,
+    }
+}
+
+/// Validate the bounded settled-id list exactly as the v4 contract does.
+fn settled_error(settled: &[String]) -> Option<String> {
+    if settled.len() > MAX_SETTLED_PAYMENTS {
+        return Some(format!(
+            "payments settled has {} ids; maximum is {MAX_SETTLED_PAYMENTS}",
+            settled.len()
+        ));
+    }
+    for (index, id) in settled.iter().enumerate() {
+        if !is_lower_hex(id, 32) {
+            return Some(format!(
+                "payments settled id {index} must be exactly 32 lowercase hex characters"
+            ));
+        }
+        if settled[..index].iter().any(|other| other == id) {
+            return Some(format!(
+                "payments settled id {index} duplicates an earlier id"
+            ));
+        }
+    }
+    None
+}
+
+/// Validate a payment entry exactly as the v4 contract does.
+///
+/// The contract deliberately does not check tree topology, the LCA or the
+/// amount arithmetic; those are UI protocol rules.
+fn payment_error(payment: &Payment) -> Option<String> {
+    if !is_lower_hex(&payment.id, 32) {
+        return Some("payment id must be exactly 32 lowercase hex characters".into());
+    }
+    for (field, value) in [("src", &payment.src), ("dst", &payment.dst)] {
+        if !is_user_id(value) {
+            return Some(format!(
+                "payment {field} must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+            ));
+        }
+    }
+    if payment.amount <= 0 {
+        return Some("payment amount must be greater than 0".into());
+    }
+    for (field, value) in [
+        ("srcAddr", &payment.src_addr),
+        ("dstAddr", &payment.dst_addr),
+    ] {
+        if !is_address(value) {
+            return Some(format!(
+                "payment {field} must be at most {MAX_ADDRESS_DIGITS} octal digits 0..7"
+            ));
+        }
+    }
+    if payment.cursor > MAX_PAYMENT_CURSOR {
+        return Some(format!(
+            "payment cursor must be at most {MAX_PAYMENT_CURSOR}"
+        ));
+    }
+    if phase_tag(&payment.phase).is_none() {
+        return Some("payment phase must be forward, reverse or terminal".into());
+    }
+    if status_tag(&payment.status).is_none() {
+        return Some(format!(
+            "payment status {:?} is not recognised",
+            payment.status
+        ));
+    }
+    if payment
+        .fail
+        .as_deref()
+        .is_some_and(|fail| fail_tag(fail).is_none())
+    {
+        return Some(format!(
+            "payment fail {:?} is not recognised",
+            payment.fail.as_deref().unwrap_or_default()
+        ));
+    }
+    if !is_user_id(&payment.next) {
+        return Some(format!(
+            "payment next must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+        ));
+    }
+    if payment.phase == "terminal" && !is_all_zero_user_id(&payment.next) {
+        return Some("payment next must be all zero when phase is terminal".into());
+    }
+    // Mirror the contract's conservative phase/status coherence.
+    match payment.status.as_str() {
+        "offered" if payment.cursor != 0 || !payment.legs.is_empty() => {
+            return Some("payment status offered requires cursor 0 and no legs".into());
+        }
+        "complete" | "reversed" | "blocked" if payment.phase != "terminal" => {
+            return Some(format!(
+                "payment status {} requires terminal phase",
+                payment.status
+            ));
+        }
+        _ => {}
+    }
+    if payment.legs.len() > MAX_PAYMENT_LEGS {
+        return Some(format!(
+            "payment has {} legs; maximum is {MAX_PAYMENT_LEGS}",
+            payment.legs.len()
+        ));
+    }
+    for (index, leg) in payment.legs.iter().enumerate() {
+        if usize::from(leg.slot) >= SLOT_COUNT {
+            return Some(format!(
+                "payment leg {index} slot {} is out of range; must be 0..{}",
+                leg.slot,
+                SLOT_COUNT - 1
+            ));
+        }
+        if payment.legs[..index]
+            .iter()
+            .any(|other| other.slot == leg.slot)
+        {
+            return Some(format!("payment leg {index} duplicates slot {}", leg.slot));
+        }
+        if leg.seq == 0 {
+            return Some(format!("payment leg {index} seq must be greater than 0"));
+        }
+        if !is_lower_hex(&leg.sig, 128) {
+            return Some(format!(
+                "payment leg {index} sig must be exactly 128 lowercase hex characters"
+            ));
+        }
+    }
+    None
+}
+
 /// A request from the web UI, tagged by `cmd`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
@@ -193,6 +434,15 @@ enum Request {
         #[serde(rename = "userId")]
         user_id: Option<String>,
     },
+    /// Sign the payments record at `seq`; a null entry is a legal tombstone.
+    #[serde(rename = "signPayments")]
+    SignPayments {
+        seq: u64,
+        #[serde(default)]
+        settled: Vec<String>,
+        #[serde(default)]
+        entry: Option<Payment>,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
@@ -209,6 +459,8 @@ enum Request {
         contacts_next_seq: u64,
         #[serde(rename = "parentNextSeq", default = "default_parent_next_seq")]
         parent_next_seq: u64,
+        #[serde(rename = "paymentsNextSeq", default = "default_payments_next_seq")]
+        payments_next_seq: u64,
     },
 }
 
@@ -220,7 +472,11 @@ fn default_parent_next_seq() -> u64 {
     1
 }
 
-/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
+fn default_payments_next_seq() -> u64 {
+    1
+}
+
+/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityResponse {
     pub ok: bool,
@@ -231,6 +487,8 @@ pub struct IdentityResponse {
     pub contacts_next_seq: u64,
     #[serde(rename = "parentNextSeq")]
     pub parent_next_seq: u64,
+    #[serde(rename = "paymentsNextSeq")]
+    pub payments_next_seq: u64,
 }
 
 /// `{"ok":true,"sig":"<128 hex>"}`.
@@ -241,7 +499,7 @@ pub struct SignResponse {
 }
 
 /// `{"ok":true,"hasSeed":false}` before first use, or
-/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
+/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub ok: bool,
@@ -256,9 +514,11 @@ pub struct StatusResponse {
     pub contacts_next_seq: Option<u64>,
     #[serde(rename = "parentNextSeq", skip_serializing_if = "Option::is_none")]
     pub parent_next_seq: Option<u64>,
+    #[serde(rename = "paymentsNextSeq", skip_serializing_if = "Option::is_none")]
+    pub payments_next_seq: Option<u64>,
 }
 
-/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
+/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportResponse {
     pub ok: bool,
@@ -270,6 +530,8 @@ pub struct ExportResponse {
     pub contacts_next_seq: u64,
     #[serde(rename = "parentNextSeq")]
     pub parent_next_seq: u64,
+    #[serde(rename = "paymentsNextSeq")]
+    pub payments_next_seq: u64,
 }
 
 /// `{"ok":true}`.
@@ -413,13 +675,14 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
 
     match request {
         Request::Identity => match identity_with(store) {
-            Ok((pubkey, next_seq, contacts_next_seq, parent_next_seq)) => {
+            Ok((pubkey, next_seq, contacts_next_seq, parent_next_seq, payments_next_seq)) => {
                 Response::Identity(IdentityResponse {
                     ok: true,
                     pubkey,
                     next_seq,
                     contacts_next_seq,
                     parent_next_seq,
+                    payments_next_seq,
                 })
             }
             Err(error) => Response::error(error),
@@ -438,12 +701,20 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 Err(error) => Response::error(error),
             }
         }
+        Request::SignPayments {
+            seq,
+            settled,
+            entry,
+        } => match sign_payments_with(store, seq, &settled, entry.as_ref()) {
+            Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+            Err(error) => Response::error(error),
+        },
         Request::Status => match status_with(store) {
             Ok(response) => Response::Status(response),
             Err(error) => Response::error(error),
         },
         Request::Export => match export_with(store) {
-            Ok((seed, next_seq, contacts_next_seq, parent_next_seq)) => {
+            Ok((seed, next_seq, contacts_next_seq, parent_next_seq, payments_next_seq)) => {
                 Response::Export(ExportResponse {
                     ok: true,
                     version: DELEGATE_VERSION,
@@ -451,6 +722,7 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                     next_seq,
                     contacts_next_seq,
                     parent_next_seq,
+                    payments_next_seq,
                 })
             }
             Err(error) => Response::error(error),
@@ -460,18 +732,26 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
             next_seq,
             contacts_next_seq,
             parent_next_seq,
-        } => match import_with(store, &seed, &next_seq, contacts_next_seq, parent_next_seq) {
+            payments_next_seq,
+        } => match import_with(
+            store,
+            &seed,
+            &next_seq,
+            contacts_next_seq,
+            parent_next_seq,
+            payments_next_seq,
+        ) {
             Ok(()) => Response::Import(ImportResponse { ok: true }),
             Err(error) => Response::error(error),
         },
     }
 }
 
-/// Return `(hex public key, nextSeq[0..8], contactsNextSeq, parentNextSeq)`,
-/// creating the seed on first use.
+/// Return `(hex public key, nextSeq[0..8], contactsNextSeq, parentNextSeq,
+/// paymentsNextSeq)`, creating the seed on first use.
 pub fn identity_with(
     store: &mut impl SecretStore,
-) -> Result<(String, [u64; SLOT_COUNT], u64, u64), String> {
+) -> Result<(String, [u64; SLOT_COUNT], u64, u64, u64), String> {
     let seed = load_or_create_seed(store)?;
     let signing_key = SigningKey::from_bytes(&seed);
     let pubkey = hex::encode(signing_key.verifying_key().to_bytes());
@@ -482,8 +762,15 @@ pub fn identity_with(
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
     let parent_next_seq = read_parent_next_seq(store)?;
+    let payments_next_seq = read_payments_next_seq(store)?;
 
-    Ok((pubkey, next_seq, contacts_next_seq, parent_next_seq))
+    Ok((
+        pubkey,
+        next_seq,
+        contacts_next_seq,
+        parent_next_seq,
+        payments_next_seq,
+    ))
 }
 
 /// Report whether a seed exists, without creating one.
@@ -501,6 +788,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
             next_seq: None,
             contacts_next_seq: None,
             parent_next_seq: None,
+            payments_next_seq: None,
         });
     };
     let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
@@ -518,6 +806,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
     let parent_next_seq = read_parent_next_seq(store)?;
+    let payments_next_seq = read_payments_next_seq(store)?;
 
     Ok(StatusResponse {
         ok: true,
@@ -527,6 +816,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
         next_seq: Some(next_seq),
         contacts_next_seq: Some(contacts_next_seq),
         parent_next_seq: Some(parent_next_seq),
+        payments_next_seq: Some(payments_next_seq),
     })
 }
 
@@ -537,7 +827,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
 /// predecessor whose already-published WASM answers this command.
 pub fn export_with(
     store: &impl SecretStore,
-) -> Result<(String, [u64; SLOT_COUNT], u64, u64), String> {
+) -> Result<(String, [u64; SLOT_COUNT], u64, u64, u64), String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Err("refused export: this delegate has no seed yet".into());
     };
@@ -554,12 +844,14 @@ pub fn export_with(
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
     let parent_next_seq = read_parent_next_seq(store)?;
+    let payments_next_seq = read_payments_next_seq(store)?;
 
     Ok((
         hex::encode(seed),
         next_seq,
         contacts_next_seq,
         parent_next_seq,
+        payments_next_seq,
     ))
 }
 
@@ -574,6 +866,7 @@ pub fn import_with(
     next_seq: &[u64],
     contacts_next_seq: u64,
     parent_next_seq: u64,
+    payments_next_seq: u64,
 ) -> Result<(), String> {
     if store.get_secret(SECRET_SEED).is_some() {
         return Err("refused import: this delegate already has a seed".into());
@@ -593,6 +886,9 @@ pub fn import_with(
     if parent_next_seq == 0 {
         return Err("parentNextSeq must be greater than 0".into());
     }
+    if payments_next_seq == 0 {
+        return Err("paymentsNextSeq must be greater than 0".into());
+    }
 
     let seed_bytes =
         hex::decode(seed_hex).map_err(|error| format!("seed is not valid hex: {error}"))?;
@@ -611,6 +907,9 @@ pub fn import_with(
     }
     if !store.set_secret(PARENT_NEXTSEQ_KEY, &parent_next_seq.to_le_bytes()) {
         return Err("failed to persist parentNextSeq".into());
+    }
+    if !store.set_secret(PAYMENTS_NEXTSEQ_KEY, &payments_next_seq.to_le_bytes()) {
+        return Err("failed to persist paymentsNextSeq".into());
     }
     if !store.set_secret(SECRET_SEED, &seed) {
         return Err("failed to persist imported seed".into());
@@ -738,7 +1037,47 @@ pub fn sign_parent_with(
     Ok(hex::encode(signature.to_bytes()))
 }
 
-/// Build the canonical slot signing bytes from `DESIGN.md` §2.
+/// Validate, sign, then advance the payments sequence counter.
+///
+/// A `None` entry at `seq > 0` signs the tombstone (tag `0`); tombstones may
+/// still carry settled ids. The counter is written only after a successful
+/// signature, exactly like the other records.
+pub fn sign_payments_with(
+    store: &mut impl SecretStore,
+    seq: u64,
+    settled: &[String],
+    entry: Option<&Payment>,
+) -> Result<String, String> {
+    if seq == 0 {
+        return Err("seq must be greater than 0".into());
+    }
+    let next_seq = read_payments_next_seq(store)?;
+    if seq < next_seq {
+        return Err(format!(
+            "stale seq {seq} for payments; need at least {next_seq}"
+        ));
+    }
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
+    if let Some(error) = settled_error(settled) {
+        return Err(error);
+    }
+    if let Some(error) = entry.and_then(payment_error) {
+        return Err(error);
+    }
+    let bytes = payments_signing_bytes(seq, settled, entry)?;
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let signature = signing_key.sign(&bytes);
+
+    if !store.set_secret(PAYMENTS_NEXTSEQ_KEY, &following.to_le_bytes()) {
+        return Err("failed to persist paymentsNextSeq".into());
+    }
+
+    Ok(hex::encode(signature.to_bytes()))
+}
 ///
 /// This is the single implementation of the format inside this crate; the
 /// contract crate must build byte-identical input. Null and absent optional
@@ -800,6 +1139,92 @@ pub fn parent_signing_bytes(seq: u64, user_id: Option<&str>) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// Build the canonical payments signing bytes from `DESIGN-payments.md`.
+///
+/// ```text
+/// b"number:v4:payments" || seq u64 LE || settled_count u8
+/// || { settled id 16 raw }
+/// || tag u8
+/// // only when tag == 1:
+/// || id 16 raw || src 32 raw || dst 32 raw || amount i64 LE
+/// || srcAddr len u32 LE || srcAddr ASCII
+/// || dstAddr len u32 LE || dstAddr ASCII
+/// || cursor u8 || phase u8 || status u8 || fail u8 || next 32 raw
+/// || legs count u8 || { slot u8 || seq u64 LE || postValue i64 LE || sig 64 raw }
+/// ```
+///
+/// Unlike the optional-string helpers above, malformed hex is an error rather
+/// than silently encoded as zeroes: this record is evidence, not a default.
+pub fn payments_signing_bytes(
+    seq: u64,
+    settled: &[String],
+    entry: Option<&Payment>,
+) -> Result<Vec<u8>, String> {
+    if let Some(error) = settled_error(settled) {
+        return Err(error);
+    }
+
+    let mut bytes = Vec::with_capacity(384);
+    bytes.extend_from_slice(SIGNING_DOMAIN_PAYMENTS);
+    bytes.extend_from_slice(&seq.to_le_bytes());
+    // Validation bounds the count at `MAX_SETTLED_PAYMENTS`, so the cast is
+    // lossless.
+    bytes.push(settled.len() as u8);
+    for id in settled {
+        bytes.extend_from_slice(&hex_bytes::<16>("payments settled id", id)?);
+    }
+
+    let Some(payment) = entry else {
+        bytes.push(0);
+        return Ok(bytes);
+    };
+    if let Some(error) = payment_error(payment) {
+        return Err(error);
+    }
+
+    bytes.push(1);
+    bytes.extend_from_slice(&hex_bytes::<16>("payment id", &payment.id)?);
+    bytes.extend_from_slice(&hex_bytes::<32>("payment src", &payment.src)?);
+    bytes.extend_from_slice(&hex_bytes::<32>("payment dst", &payment.dst)?);
+    bytes.extend_from_slice(&payment.amount.to_le_bytes());
+
+    for value in [&payment.src_addr, &payment.dst_addr] {
+        // Validation bounds the address at 32 bytes, so the cast is lossless.
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    bytes.push(payment.cursor);
+    bytes.push(phase_tag(&payment.phase).ok_or("payment phase is not recognised")?);
+    bytes.push(status_tag(&payment.status).ok_or("payment status is not recognised")?);
+    bytes.push(match payment.fail.as_deref() {
+        None => 0,
+        Some(fail) => fail_tag(fail).ok_or("payment fail is not recognised")?,
+    });
+    bytes.extend_from_slice(&hex_bytes::<32>("payment next", &payment.next)?);
+
+    // Validation bounds the leg count at two.
+    bytes.push(payment.legs.len() as u8);
+    for leg in &payment.legs {
+        bytes.push(leg.slot);
+        bytes.extend_from_slice(&leg.seq.to_le_bytes());
+        bytes.extend_from_slice(&leg.post_value.to_le_bytes());
+        bytes.extend_from_slice(&hex_bytes::<64>("payment leg sig", &leg.sig)?);
+    }
+
+    Ok(bytes)
+}
+
+/// Decode exactly `N` bytes of lowercase hex. Callers validate the shape first.
+fn hex_bytes<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
+    let decoded =
+        hex::decode(value).map_err(|error| format!("{field} is not valid hex: {error}"))?;
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{field} must be {N} bytes, got {}", decoded.len()))
 }
 
 /// Decode a 64-hex-character user id into its raw 32 bytes. Invalid input maps
@@ -868,6 +1293,21 @@ fn read_parent_next_seq(store: &impl SecretStore) -> Result<u64, String> {
     }
 }
 
+fn read_payments_next_seq(store: &impl SecretStore) -> Result<u64, String> {
+    match store.get_secret(PAYMENTS_NEXTSEQ_KEY) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored paymentsNextSeq has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
+}
+
 fn load_or_create_seed(store: &mut impl SecretStore) -> Result<[u8; 32], String> {
     if let Some(bytes) = store.get_secret(SECRET_SEED) {
         return bytes.as_slice().try_into().map_err(|_| {
@@ -909,6 +1349,14 @@ mod tests {
     const GOLDEN_CONTACTS_SIGNATURE: &str = "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906";
     /// Golden parent vector: seq 1, `userId: 0x11 × 32`.
     const GOLDEN_PARENT_SIGNATURE: &str = "83620d873b5179b726f2aab882083d4d74fa6eee90726ada5b44b74d1d3f48e2e6b31dac5b31142febeb1d6505e426d659c0907adf3110cdddb3984b0bc80400";
+    /// Golden payments vector: seed `[7u8; 32]`, seq 1, empty settled list,
+    /// `payment_sample()`.
+    ///
+    /// The bytes are assembled directly from `DESIGN-payments.md`, including
+    /// the `settled_count` byte. Do not change this literal without changing
+    /// the spec.
+    const GOLDEN_PAYMENTS_BYTES: &str = "6e756d6265723a76343a7061796d656e7473010000000000000000011111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333e20400000000000002000000353202000000333102000100444444444444444444444444444444444444444444444444444444444444444401010400000000000000a60e00000000000055555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555";
+    const GOLDEN_PAYMENTS_SIGNATURE: &str = "748f0c2f40fd5d5db43da9116cf8afd62186dafe1264b579d667cb7e5988266fba1f1bf5e7b196b47b2b8248f252cc9e32914b167916a60f00b56d5beaf57704";
 
     const CONTACT_11: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CONTACT_22: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -968,6 +1416,42 @@ mod tests {
         }
     }
 
+    const PAYMENT_ID: &str = "11111111111111111111111111111111";
+    const PAYMENT_NEXT: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+    const LEG_SIG: &str = "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555";
+
+    fn payment_leg(slot: u8, seq: u64, post_value: i64) -> PaymentLeg {
+        PaymentLeg {
+            slot,
+            seq,
+            post_value,
+            sig: LEG_SIG.into(),
+        }
+    }
+
+    /// The pinned golden vector for the payments encoding.
+    fn payment_sample() -> Payment {
+        Payment {
+            id: PAYMENT_ID.into(),
+            src: CONTACT_22.into(),
+            dst: "33".repeat(32),
+            amount: 1250,
+            src_addr: "52".into(),
+            dst_addr: "31".into(),
+            cursor: 2,
+            phase: "forward".into(),
+            status: "acted".into(),
+            next: PAYMENT_NEXT.into(),
+            fail: None,
+            legs: vec![payment_leg(1, 4, 3750)],
+        }
+    }
+
+    /// `count` distinct settled payment ids (32 lowercase hex chars each).
+    fn settled_ids(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("{index:032x}")).collect()
+    }
+
     #[test]
     fn identity_is_stable_and_defaults_counters_to_one() {
         let mut store = MemoryStore::default();
@@ -981,6 +1465,7 @@ mod tests {
         assert_eq!(first["nextSeq"], json!([1, 1, 1, 1, 1, 1, 1, 1]));
         assert_eq!(first["contactsNextSeq"], 1);
         assert_eq!(first["parentNextSeq"], 1);
+        assert_eq!(first["paymentsNextSeq"], 1);
         assert_eq!(
             store.secrets.get(SECRET_SEED).map(Vec::len),
             Some(32),
@@ -1017,6 +1502,7 @@ mod tests {
         assert!(old.set_secret(&next_seq_key(3), &9u64.to_le_bytes()));
         assert!(old.set_secret(CONTACTS_NEXTSEQ_KEY, &7u64.to_le_bytes()));
         assert!(old.set_secret(PARENT_NEXTSEQ_KEY, &5u64.to_le_bytes()));
+        assert!(old.set_secret(PAYMENTS_NEXTSEQ_KEY, &3u64.to_le_bytes()));
 
         let exported = call(&mut old, br#"{"cmd":"export"}"#);
         assert!(is_ok(&exported), "unexpected export: {exported}");
@@ -1025,14 +1511,16 @@ mod tests {
         assert_eq!(exported["nextSeq"][3], 9);
         assert_eq!(exported["contactsNextSeq"], 7);
         assert_eq!(exported["parentNextSeq"], 5);
+        assert_eq!(exported["paymentsNextSeq"], 3);
 
         let mut new = MemoryStore::default();
         let payload = format!(
-            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{},"parentNextSeq":{}}}"#,
+            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{},"parentNextSeq":{},"paymentsNextSeq":{}}}"#,
             exported["seed"].as_str().unwrap(),
             exported["nextSeq"],
             exported["contactsNextSeq"],
-            exported["parentNextSeq"]
+            exported["parentNextSeq"],
+            exported["paymentsNextSeq"]
         );
         let imported = call(&mut new, payload.as_bytes());
         assert!(is_ok(&imported), "unexpected import: {imported}");
@@ -1042,6 +1530,7 @@ mod tests {
         assert_eq!(identity["nextSeq"][3], 9);
         assert_eq!(identity["contactsNextSeq"], 7);
         assert_eq!(identity["parentNextSeq"], 5);
+        assert_eq!(identity["paymentsNextSeq"], 3);
     }
 
     #[test]
@@ -1057,6 +1546,7 @@ mod tests {
         let identity = call(&mut new, br#"{"cmd":"identity"}"#);
         assert_eq!(identity["contactsNextSeq"], 1);
         assert_eq!(identity["parentNextSeq"], 1);
+        assert_eq!(identity["paymentsNextSeq"], 1);
 
         // A v4-style export has contactsNextSeq but no parentNextSeq.
         let mut v4 = MemoryStore::default();
@@ -1069,6 +1559,7 @@ mod tests {
         let identity = call(&mut v4, br#"{"cmd":"identity"}"#);
         assert_eq!(identity["contactsNextSeq"], 4);
         assert_eq!(identity["parentNextSeq"], 1);
+        assert_eq!(identity["paymentsNextSeq"], 1);
     }
 
     #[test]
@@ -1113,6 +1604,10 @@ mod tests {
             (
                 r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"parentNextSeq":0}"#,
                 "greater than 0",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"paymentsNextSeq":0}"#,
+                "paymentsNextSeq",
             ),
         ];
 
@@ -1230,6 +1725,486 @@ mod tests {
         verifying_key
             .verify_strict(&parent_signing_bytes(1, Some(CONTACT_11)), &signature)
             .expect("golden parent signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn payments_counters_default_to_one_in_identity_status_and_export() {
+        let mut store = MemoryStore::default();
+
+        // Before a seed exists, status must not invent a payments counter.
+        let status = call(&mut store, br#"{"cmd":"status"}"#);
+        assert!(is_ok(&status));
+        assert!(status.get("paymentsNextSeq").is_none());
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert!(is_ok(&identity));
+        assert_eq!(identity["paymentsNextSeq"], 1);
+
+        let status = call(&mut store, br#"{"cmd":"status"}"#);
+        assert_eq!(status["paymentsNextSeq"], 1);
+
+        let export = call(&mut store, br#"{"cmd":"export"}"#);
+        assert!(is_ok(&export));
+        assert_eq!(export["paymentsNextSeq"], 1);
+    }
+
+    #[test]
+    fn golden_payments_signing_vector() {
+        let entry = payment_sample();
+
+        assert_eq!(
+            hex::encode(payments_signing_bytes(1, &[], Some(&entry)).expect("entry is valid")),
+            GOLDEN_PAYMENTS_BYTES
+        );
+        // Cross-pin to `contract/payments_golden_vector.txt` is pending; the
+        // literal above is assembled directly from the design spec.
+        assert_eq!(
+            hex::encode(payments_signing_bytes(1, &[], None).expect("tombstone is valid")),
+            "6e756d6265723a76343a7061796d656e747301000000000000000000"
+        );
+
+        let mut store = store_with_seed([7u8; 32]);
+        let payload = serde_json::to_vec(&json!({"cmd": "signPayments", "seq": 1, "entry": entry}))
+            .expect("request serializes");
+        let response = call(&mut store, &payload);
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"], GOLDEN_PAYMENTS_SIGNATURE);
+
+        let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let signature: [u8; 64] = hex::decode(GOLDEN_PAYMENTS_SIGNATURE)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        let bytes =
+            payments_signing_bytes(1, &[], Some(&payment_sample())).expect("entry is valid");
+        assert_eq!(hex::encode(&bytes), GOLDEN_PAYMENTS_BYTES);
+        verifying_key
+            .verify_strict(&bytes, &signature)
+            .expect("golden payments signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn payments_signing_bytes_match_the_contract_pinned_vectors() {
+        // These two literals are the vectors pinned by tests in
+        // `contract/src/lib.rs` (seq 6 forward, seq 7 terminal with two legs)
+        // with an empty settled list. They pin the shared encoding across the
+        // two crates.
+        let forward = Payment {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            src: CONTACT_11.into(),
+            dst: CONTACT_22.into(),
+            amount: 1250,
+            src_addr: "52".into(),
+            dst_addr: "31".into(),
+            cursor: 2,
+            phase: "forward".into(),
+            status: "acted".into(),
+            next: "33".repeat(32),
+            fail: None,
+            legs: vec![PaymentLeg {
+                slot: 1,
+                seq: 4,
+                post_value: 3750,
+                sig: "5a".repeat(64),
+            }],
+        };
+        assert_eq!(
+            hex::encode(payments_signing_bytes(6, &[], Some(&forward)).expect("entry is valid")),
+            "6e756d6265723a76343a7061796d656e7473060000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+
+        let terminal = Payment {
+            cursor: 5,
+            phase: "terminal".into(),
+            status: "complete".into(),
+            next: "00".repeat(32),
+            legs: vec![
+                PaymentLeg {
+                    slot: 1,
+                    seq: 4,
+                    post_value: 3750,
+                    sig: "5a".repeat(64),
+                },
+                PaymentLeg {
+                    slot: 3,
+                    seq: 5,
+                    post_value: -1250,
+                    sig: "5a".repeat(64),
+                },
+            ],
+            ..forward.clone()
+        };
+        assert_eq!(
+            hex::encode(payments_signing_bytes(7, &[], Some(&terminal)).expect("entry is valid")),
+            "6e756d6265723a76343a7061796d656e7473070000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+
+        // Real cross-pin: when the shared artifact exists, read the hex from it
+        // rather than trusting the literals above.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../contract/payments_golden_vector.txt");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // The shared vector is produced by the contract slice; absent means
+            // the cross-pin is pending.
+            return;
+        };
+        let pinned: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.len() > 64
+                    && line
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b' ')
+            })
+            .collect();
+        assert_eq!(pinned.len(), 3, "unexpected format in {}", path.display());
+
+        let forward_bytes = payments_signing_bytes(6, &[], Some(&forward)).expect("entry is valid");
+        let terminal_bytes =
+            payments_signing_bytes(7, &[], Some(&terminal)).expect("entry is valid");
+        let settled = vec!["aa".repeat(16), "bb".repeat(16)];
+        let settled_bytes =
+            payments_signing_bytes(9, &settled, Some(&forward)).expect("entry is valid");
+
+        assert_eq!(pinned[0], hex::encode(forward_bytes));
+        assert_eq!(pinned[1], hex::encode(terminal_bytes));
+        assert_eq!(pinned[2], hex::encode(settled_bytes));
+    }
+
+    #[test]
+    fn sign_payments_advances_the_counter_and_rejects_invalid_entries() {
+        let mut store = store_with_seed([7u8; 32]);
+        let payload = serde_json::to_vec(
+            &json!({"cmd": "signPayments", "seq": 1, "entry": payment_sample()}),
+        )
+        .expect("request serializes");
+
+        let accepted = call(&mut store, &payload);
+        assert!(is_ok(&accepted), "unexpected response: {accepted}");
+        assert_eq!(accepted["sig"], GOLDEN_PAYMENTS_SIGNATURE);
+        assert_eq!(
+            store.secrets.get(PAYMENTS_NEXTSEQ_KEY).cloned(),
+            Some(2u64.to_le_bytes().to_vec())
+        );
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["paymentsNextSeq"], 2);
+
+        let replay = call(&mut store, &payload);
+        assert!(!is_ok(&replay));
+        assert!(error_text(&replay).contains("stale"));
+
+        let zero = call(
+            &mut store,
+            br#"{"cmd":"signPayments","seq":0,"entry":null}"#,
+        );
+        assert!(!is_ok(&zero));
+        assert!(error_text(&zero).contains("greater than 0"));
+
+        let cases: Vec<(Payment, &str)> = vec![
+            (
+                Payment {
+                    id: "11".repeat(15),
+                    ..payment_sample()
+                },
+                "id",
+            ),
+            (
+                Payment {
+                    src: "22".repeat(31),
+                    ..payment_sample()
+                },
+                "src",
+            ),
+            (
+                Payment {
+                    dst: "AA".repeat(32),
+                    ..payment_sample()
+                },
+                "dst",
+            ),
+            (
+                Payment {
+                    amount: 0,
+                    ..payment_sample()
+                },
+                "amount",
+            ),
+            (
+                Payment {
+                    amount: -1,
+                    ..payment_sample()
+                },
+                "amount",
+            ),
+            (
+                Payment {
+                    src_addr: "8".into(),
+                    ..payment_sample()
+                },
+                "srcAddr",
+            ),
+            (
+                Payment {
+                    src_addr: "0".repeat(MAX_ADDRESS_DIGITS + 1),
+                    ..payment_sample()
+                },
+                "srcAddr",
+            ),
+            (
+                Payment {
+                    cursor: MAX_PAYMENT_CURSOR + 1,
+                    ..payment_sample()
+                },
+                "cursor",
+            ),
+            (
+                Payment {
+                    phase: "sideways".into(),
+                    ..payment_sample()
+                },
+                "phase",
+            ),
+            (
+                Payment {
+                    status: "pending".into(),
+                    ..payment_sample()
+                },
+                "status",
+            ),
+            (
+                Payment {
+                    fail: Some("oops".into()),
+                    ..payment_sample()
+                },
+                "fail",
+            ),
+            (
+                Payment {
+                    next: "44".repeat(31),
+                    ..payment_sample()
+                },
+                "next",
+            ),
+            (
+                Payment {
+                    phase: "terminal".into(),
+                    ..payment_sample()
+                },
+                "all zero",
+            ),
+            (
+                Payment {
+                    status: "offered".into(),
+                    ..payment_sample()
+                },
+                "offered",
+            ),
+            (
+                Payment {
+                    status: "complete".into(),
+                    ..payment_sample()
+                },
+                "terminal",
+            ),
+            (
+                Payment {
+                    legs: vec![
+                        payment_leg(1, 4, 3750),
+                        payment_leg(2, 5, 4000),
+                        payment_leg(3, 6, 4250),
+                    ],
+                    ..payment_sample()
+                },
+                "maximum",
+            ),
+            (
+                Payment {
+                    legs: vec![payment_leg(1, 4, 3750), payment_leg(1, 5, 4000)],
+                    ..payment_sample()
+                },
+                "duplicates slot",
+            ),
+            (
+                Payment {
+                    legs: vec![payment_leg(8, 4, 3750)],
+                    ..payment_sample()
+                },
+                "out of range",
+            ),
+            (
+                Payment {
+                    legs: vec![payment_leg(1, 0, 3750)],
+                    ..payment_sample()
+                },
+                "leg 0 seq",
+            ),
+            (
+                Payment {
+                    legs: vec![PaymentLeg {
+                        sig: "55".into(),
+                        ..payment_leg(1, 4, 3750)
+                    }],
+                    ..payment_sample()
+                },
+                "sig",
+            ),
+        ];
+
+        for (entry, expected) in cases {
+            let mut fresh = store_with_seed([7u8; 32]);
+            let error = sign_payments_with(&mut fresh, 1, &[], Some(&entry))
+                .expect_err("invalid payment must be rejected");
+            assert!(
+                error.contains(expected),
+                "error {error:?} did not contain {expected:?}"
+            );
+            assert_eq!(
+                fresh.secrets.get(PAYMENTS_NEXTSEQ_KEY),
+                None,
+                "a rejected payment must not advance the counter"
+            );
+        }
+    }
+
+    #[test]
+    fn payments_tombstone_signs_at_a_positive_seq() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let tombstone = call(
+            &mut store,
+            br#"{"cmd":"signPayments","seq":3,"entry":null}"#,
+        );
+        assert!(is_ok(&tombstone), "unexpected response: {tombstone}");
+        assert_eq!(
+            store.secrets.get(PAYMENTS_NEXTSEQ_KEY).cloned(),
+            Some(4u64.to_le_bytes().to_vec())
+        );
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["paymentsNextSeq"], 4);
+
+        let zero = call(
+            &mut store,
+            br#"{"cmd":"signPayments","seq":0,"entry":null}"#,
+        );
+        assert!(!is_ok(&zero));
+        assert!(error_text(&zero).contains("greater than 0"));
+
+        // A tombstone may carry settled ids: clearing the active entry does
+        // not erase the replay guard.
+        let settled = vec!["cd".repeat(16)];
+        let payload = serde_json::to_vec(&json!({
+            "cmd": "signPayments",
+            "seq": 4,
+            "settled": settled,
+            "entry": null,
+        }))
+        .expect("request serializes");
+        let accepted = call(&mut store, &payload);
+        assert!(is_ok(&accepted), "unexpected response: {accepted}");
+        assert_eq!(
+            store.secrets.get(PAYMENTS_NEXTSEQ_KEY).cloned(),
+            Some(5u64.to_le_bytes().to_vec())
+        );
+
+        let bytes = payments_signing_bytes(4, &settled, None).expect("tombstone is valid");
+        let signature: [u8; 64] = hex::decode(accepted["sig"].as_str().unwrap())
+            .expect("signature is hex")
+            .try_into()
+            .expect("signature is 64 bytes");
+        SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("tombstone signature covers the settled ids");
+    }
+
+    #[test]
+    fn payments_settled_participates_in_the_signature() {
+        let settled = settled_ids(2);
+        let mut store = store_with_seed([7u8; 32]);
+        let payload = serde_json::to_vec(&json!({
+            "cmd": "signPayments",
+            "seq": 1,
+            "settled": settled,
+            "entry": payment_sample(),
+        }))
+        .expect("request serializes");
+        let response = call(&mut store, &payload);
+        assert!(is_ok(&response), "unexpected response: {response}");
+
+        let signature: [u8; 64] = hex::decode(response["sig"].as_str().unwrap())
+            .expect("signature is hex")
+            .try_into()
+            .expect("signature is 64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let bytes =
+            payments_signing_bytes(1, &settled, Some(&payment_sample())).expect("entry is valid");
+        verifying_key
+            .verify_strict(&bytes, &signature)
+            .expect("signature covers the settled ids");
+
+        // Tampering with one settled id changes the signed bytes and the
+        // signature no longer verifies.
+        let mut tampered = settled.clone();
+        tampered[0] = "ff".repeat(16);
+        let tampered_bytes =
+            payments_signing_bytes(1, &tampered, Some(&payment_sample())).expect("entry is valid");
+        assert_ne!(tampered_bytes, bytes);
+        assert!(
+            verifying_key
+                .verify_strict(&tampered_bytes, &signature)
+                .is_err(),
+            "a tampered settled id must not verify"
+        );
+
+        // The same entry with no settled ids is a different signed record.
+        let without =
+            payments_signing_bytes(1, &[], Some(&payment_sample())).expect("entry is valid");
+        assert_ne!(without, bytes);
+        assert!(verifying_key.verify_strict(&without, &signature).is_err());
+    }
+
+    #[test]
+    fn sign_payments_rejects_malformed_settled_lists() {
+        let good = "ab".repeat(16);
+        let cases: Vec<(Vec<String>, &str)> = vec![
+            (vec!["ab".repeat(15)], "settled id 0"),
+            (vec![good.to_uppercase()], "settled id 0"),
+            (vec!["zz".repeat(16)], "settled id 0"),
+            (vec![good.clone(), good.clone()], "duplicates"),
+            (settled_ids(MAX_SETTLED_PAYMENTS + 1), "maximum"),
+        ];
+
+        for (settled, expected) in cases {
+            let mut store = store_with_seed([7u8; 32]);
+            let error = sign_payments_with(&mut store, 1, &settled, Some(&payment_sample()))
+                .expect_err("invalid settled list must be rejected");
+            assert!(
+                error.contains(expected),
+                "error {error:?} did not contain {expected:?}"
+            );
+            assert_eq!(
+                store.secrets.get(PAYMENTS_NEXTSEQ_KEY),
+                None,
+                "a rejected settled list must not advance the counter"
+            );
+        }
+
+        // Exactly the cap is accepted.
+        let settled = settled_ids(MAX_SETTLED_PAYMENTS);
+        let mut store = store_with_seed([7u8; 32]);
+        assert!(
+            sign_payments_with(&mut store, 1, &settled, Some(&payment_sample())).is_ok(),
+            "the settled cap itself must be accepted"
+        );
+        assert_eq!(
+            store.secrets.get(PAYMENTS_NEXTSEQ_KEY).cloned(),
+            Some(2u64.to_le_bytes().to_vec())
+        );
     }
 
     #[test]
@@ -1612,6 +2587,12 @@ mod tests {
         let mut parent_store = store_with_seed([7u8; 32]);
         assert!(parent_store.set_secret(PARENT_NEXTSEQ_KEY, &[1, 2, 3]));
         let identity = call(&mut parent_store, br#"{"cmd":"identity"}"#);
+        assert!(!is_ok(&identity));
+        assert!(error_text(&identity).contains("invalid length"));
+
+        let mut payments_store = store_with_seed([7u8; 32]);
+        assert!(payments_store.set_secret(PAYMENTS_NEXTSEQ_KEY, &[1, 2, 3]));
+        let identity = call(&mut payments_store, br#"{"cmd":"identity"}"#);
         assert!(!is_ok(&identity));
         assert!(error_text(&identity).contains("invalid length"));
     }

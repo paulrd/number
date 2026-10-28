@@ -33,3 +33,5 @@ test-results
 # Editors / OS
 .idea
 .DS_Store
+
+.slim/deepwork/

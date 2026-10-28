@@ -16,6 +16,20 @@ import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
 import {
+  advancePayment,
+  createPaymentIntent,
+  describeRoute,
+  findIncoming,
+  isOctalAddress,
+  paymentProgress,
+  planPayment,
+  planRoute,
+  type IncomingPayment,
+  type PaymentDeps,
+  type PaymentEntry,
+  type PaymentFailure,
+} from "./payments";
+import {
   formatCents,
   MAX_CONTACTS,
   parseCents,
@@ -135,6 +149,30 @@ const cancelButton = byId<HTMLButtonElement>("cancel-button");
 const saveButton = byId<HTMLButtonElement>("save-button");
 const srStatus = byId<HTMLParagraphElement>("sr-status");
 
+const paymentsSection = byId<HTMLElement>("payments");
+const paymentCheck = byId<HTMLButtonElement>("payment-check");
+const paymentOpen = byId<HTMLButtonElement>("payment-open");
+const paymentStatus = byId<HTMLElement>("payment-status");
+const paymentStatusBadge = byId<HTMLElement>("payment-status-badge");
+const paymentStatusTitle = byId<HTMLElement>("payment-status-title");
+const paymentStatusDetail = byId<HTMLElement>("payment-status-detail");
+const paymentStatusRoute = byId<HTMLElement>("payment-status-route");
+const paymentInbox = byId<HTMLElement>("payment-inbox");
+const paymentInboxList = byId<HTMLUListElement>("payment-inbox-list");
+const paymentEmpty = byId<HTMLElement>("payment-empty");
+
+const paymentDialog = byId<HTMLDialogElement>("payment-dialog");
+const paymentForm = byId<HTMLFormElement>("payment-form");
+const paymentClose = byId<HTMLButtonElement>("payment-close");
+const paymentAddress = byId<HTMLInputElement>("payment-address");
+const paymentUser = byId<HTMLInputElement>("payment-user");
+const paymentAmount = byId<HTMLInputElement>("payment-amount");
+const paymentWarning = byId<HTMLElement>("payment-warning");
+const paymentError = byId<HTMLElement>("payment-error");
+const paymentCancel = byId<HTMLButtonElement>("payment-cancel");
+const paymentSubmit = byId<HTMLButtonElement>("payment-submit");
+const PAYMENT_SUBMIT_LABEL = paymentSubmit.textContent || "Send payment";
+
 interface SlotView {
   button: HTMLButtonElement;
   value: HTMLSpanElement;
@@ -173,6 +211,7 @@ let parentStatusRequest = 0;
 let trailRequest = 0;
 let addressRequest = 0;
 let parentValueRequest = 0;
+let paymentsRequest = 0;
 let noticeRetry: (() => void | Promise<void>) | null = null;
 /** True while the address book was opened from the parent dialog. */
 let addingForParent = false;
@@ -1032,6 +1071,401 @@ function renderAll(): void {
   renderControls();
   renderParentRow();
   void renderTrail();
+  // Async and request-guarded: a stale read never paints over a newer board.
+  void renderPayments();
+}
+
+const PAYMENT_BADGES: Record<
+  PaymentEntry["status"],
+  { label: string; state: string }
+> = {
+  offered: { label: "Offered", state: "offered" },
+  acted: { label: "In progress", state: "in-progress" },
+  complete: { label: "Complete", state: "complete" },
+  reversing: { label: "Reversing", state: "reversing" },
+  reversed: { label: "Reversed", state: "reversed" },
+  aborted: { label: "Stopped", state: "aborted" },
+  blocked: { label: "Reversal blocked", state: "blocked" },
+  superseded: { label: "Superseded", state: "superseded" },
+};
+
+/** How a signed payment failure reads in a sentence. */
+const PAYMENT_FAIL_REASONS: Record<
+  NonNullable<PaymentEntry["fail"]>,
+  string
+> = {
+  negative: "a slot would go below zero",
+  "no-destination": "the destination board is missing",
+  busy: "another payment was already in progress",
+  refused: "a board refused the payment",
+  "address-mismatch": "a board did not match the route",
+  blocked: "a leg could not be reversed",
+  superseded: "a later signed change replaced a leg",
+};
+
+const ZERO_PAYMENT_OWNER = "0".repeat(64);
+
+/** The status area's label source: the own address book only. */
+function paymentOwnerLabel(ownerId: string): string {
+  return labelForOwner(ownerId, [ownContactsWithoutSelf()]);
+}
+
+function paymentAddresses(entry: PaymentEntry): string {
+  return `${entry.srcAddr || "root"} → ${entry.dstAddr || "root"}`;
+}
+
+function paintPaymentStatus(display: PaymentEntry): void {
+  const badge = PAYMENT_BADGES[display.status];
+  paymentStatusBadge.textContent = badge.label;
+  paymentStatusBadge.dataset.state = badge.state;
+  // The card and the badge both key their colour off the status.
+  paymentStatus.dataset.state = badge.state;
+
+  paymentStatusTitle.textContent =
+    `${formatCents(display.amount)} along ${paymentAddresses(display)}`;
+
+  const route = planRoute(display.srcAddr, display.dstAddr);
+  const routeText =
+    "error" in route ? paymentAddresses(display) : describeRoute(route);
+  paymentStatusRoute.textContent = routeText;
+  paymentStatusRoute.title = routeText;
+
+  const fail =
+    display.fail === null ? "" : PAYMENT_FAIL_REASONS[display.fail];
+  let detail: string;
+  if (display.status === "complete") {
+    detail = "Delivered";
+  } else if (display.status === "reversed") {
+    detail = "The payment was undone.";
+  } else if (display.status === "superseded") {
+    detail = "A later signed change replaced the payment.";
+  } else if (display.status === "aborted") {
+    detail = fail === "" ? "The payment stopped." : `The payment stopped: ${fail}.`;
+  } else if (display.status === "blocked") {
+    detail =
+      fail === ""
+        ? "The reversal is blocked."
+        : `The reversal is blocked: ${fail}.`;
+  } else if (display.status === "reversing") {
+    detail =
+      fail === ""
+        ? "The payment is being reversed."
+        : `The payment is being reversed: ${fail}.`;
+  } else if ("error" in route) {
+    detail = `Hop ${display.cursor}`;
+  } else {
+    detail = `Hop ${display.cursor} of ${route.hops}`;
+  }
+  if (display.next !== ZERO_PAYMENT_OWNER) {
+    detail += ` Waiting for ${paymentOwnerLabel(display.next)}.`;
+  }
+  paymentStatusDetail.textContent = detail;
+  paymentStatus.hidden = false;
+}
+
+function paymentInboxStatus(entry: PaymentEntry): string {
+  const leg = entry.phase === "reverse" ? "Reverse leg" : "Forward leg";
+  return entry.fail === null
+    ? leg
+    : `${leg} · ${PAYMENT_FAIL_REASONS[entry.fail]}`;
+}
+
+function renderPaymentInboxItem(item: IncomingPayment): HTMLLIElement {
+  const li = createElement("li", "payment-inbox-item");
+  const head = createElement("div", "payment-inbox-head");
+  const amount = createElement(
+    "span",
+    "payment-inbox-amount",
+    formatCents(item.entry.amount),
+  );
+  const status = createElement(
+    "span",
+    "payment-inbox-status",
+    paymentInboxStatus(item.entry),
+  );
+  head.append(amount, status);
+
+  const sources = [ownState?.contacts.entries ?? [], ownContactsWithoutSelf()];
+  const srcLabel = labelForOwner(item.entry.src, sources);
+  const dstLabel = labelForOwner(item.entry.dst, sources);
+  const meta = createElement(
+    "p",
+    "payment-inbox-meta",
+    `${srcLabel} → ${dstLabel}`,
+  );
+
+  const route = planRoute(item.entry.srcAddr, item.entry.dstAddr);
+  const routeText =
+    "error" in route ? paymentAddresses(item.entry) : describeRoute(route);
+  const routeLine = createElement("p", "payment-inbox-route", routeText);
+  routeLine.title = routeText;
+
+  const actions = createElement("div", "payment-inbox-actions");
+  const advance = createElement(
+    "button",
+    "payment-advance",
+    item.entry.phase === "reverse" ? "Undo my leg" : "Sign my leg",
+  );
+  advance.type = "button";
+  advance.addEventListener("click", () => {
+    void advanceIncomingPayment(advance, item);
+  });
+  actions.append(advance);
+
+  li.append(head, meta, routeLine, actions);
+  return li;
+}
+
+async function advanceIncomingPayment(
+  button: HTMLButtonElement,
+  item: IncomingPayment,
+): Promise<void> {
+  const own = ownSnapshot();
+  if (own === null) {
+    showNotice("error", "Could not advance payment", "Your board is not loaded yet.");
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await advancePayment(own, item.from, item.entry, paymentDeps);
+    // The next inbox/status read must see the other boards' fresh records.
+    boardCache.clear();
+    showNotice(
+      "info",
+      "Payment advanced",
+      item.entry.phase === "reverse"
+        ? "Your leg was undone. The previous board is asked to undo theirs."
+        : "Your leg was signed. The next board is asked to sign theirs.",
+    );
+    renderAll();
+  } catch (error) {
+    button.disabled = false;
+    showNotice("error", "Could not advance payment", errorMessage(error));
+  }
+}
+
+/**
+ * Paint the own board's payment status and inbox. Reads are asynchronous, so a
+ * late result is dropped unless it still belongs to the current request/board.
+ */
+async function renderPayments(): Promise<void> {
+  const request = ++paymentsRequest;
+  const current = view;
+  const ready = boardStatus === "ready" || boardStatus === "offline";
+
+  if (!current || !current.isOwn || !ready) {
+    paymentsSection.hidden = true;
+    paymentStatus.hidden = true;
+    paymentInbox.hidden = true;
+    paymentEmpty.hidden = true;
+    paymentInboxList.replaceChildren();
+    return;
+  }
+
+  paymentsSection.hidden = false;
+  const own = ownSnapshot() ?? current;
+  const entry = own.state.payments.entry;
+  const isRoot = own.state.parent.userId === null;
+
+  let display = entry;
+  if (entry !== null) {
+    try {
+      display = await paymentProgress(own, entry, paymentDeps);
+    } catch (error) {
+      if (request !== paymentsRequest || view !== current) return;
+      console.warn(`Could not read payment progress: ${errorMessage(error)}`);
+      display = entry;
+    }
+    if (request !== paymentsRequest || view !== current) return;
+  }
+
+  // A settled payment (complete/reversed/blocked/superseded) no longer blocks a
+  // new one, even though the source's own copy may still be the offered record.
+  const active = display !== null && display.phase !== "terminal";
+  paymentOpen.disabled = busy || navigating || active || isRoot;
+  paymentOpen.title = active
+    ? "This board already has a payment in progress."
+    : isRoot
+      ? "A root has no parent edge to debit, so it cannot send a payment."
+      : "Send a payment along the board tree.";
+  paymentCheck.disabled = busy || navigating;
+
+  if (display === null) paymentStatus.hidden = true;
+  else paintPaymentStatus(display);
+
+  let incoming: IncomingPayment[];
+  try {
+    incoming = await findIncoming(own, paymentDeps);
+  } catch (error) {
+    if (request !== paymentsRequest || view !== current) return;
+    console.warn(`Could not read incoming payments: ${errorMessage(error)}`);
+    paymentInbox.hidden = true;
+    paymentInboxList.replaceChildren();
+    paymentEmpty.hidden = display !== null;
+    return;
+  }
+  if (request !== paymentsRequest || view !== current) return;
+
+  paymentInboxList.replaceChildren(
+    ...incoming.map((item) => renderPaymentInboxItem(item)),
+  );
+  paymentInbox.hidden = incoming.length === 0;
+  paymentEmpty.hidden = display !== null || incoming.length > 0;
+}
+
+function clearPaymentMessages(): void {
+  paymentWarning.hidden = true;
+  paymentWarning.textContent = "";
+  paymentError.hidden = true;
+  paymentError.textContent = "";
+  paymentAddress.removeAttribute("aria-invalid");
+  paymentUser.removeAttribute("aria-invalid");
+  paymentAmount.removeAttribute("aria-invalid");
+}
+
+function showPaymentWarning(
+  message: string,
+  focus: HTMLInputElement | null = null,
+): void {
+  paymentWarning.textContent = message;
+  paymentWarning.hidden = false;
+  paymentError.hidden = true;
+  paymentError.textContent = "";
+  if (focus !== null) {
+    focus.setAttribute("aria-invalid", "true");
+    focus.focus();
+  }
+}
+
+function showPaymentError(message: string): void {
+  paymentError.textContent = message;
+  paymentError.hidden = false;
+  paymentWarning.hidden = true;
+  paymentWarning.textContent = "";
+}
+
+function paymentProblemMessage(failure: PaymentFailure): string {
+  switch (failure.problem) {
+    case "negative":
+      return "A slot on the route would go below 0.00. Nothing was signed.";
+    case "address-mismatch":
+      return "The user id does not own the board at that address.";
+    case "busy":
+      return "This board already has a payment in progress.";
+    case "source-at-lca":
+    case "destination-at-lca":
+      return "A payment needs at least one debit and one credit; neither endpoint can be the LCA or root.";
+    case "no-destination":
+      return "There is no board at that address.";
+    case "pending":
+    case "not-created":
+    case "legacy":
+      return "The route is not a mutual, current-version path yet.";
+    case "invalid-address":
+      return "Use only digits 0–7 for the octal address.";
+    case "overflow":
+      return "The destination slot cannot hold that amount.";
+    default:
+      return failure.detail;
+  }
+}
+
+function openPaymentDialog(): void {
+  if (paymentOpen.disabled) return;
+  paymentForm.reset();
+  clearPaymentMessages();
+  paymentSubmit.disabled = false;
+  paymentSubmit.textContent = PAYMENT_SUBMIT_LABEL;
+  paymentDialog.showModal();
+  paymentAddress.focus();
+}
+
+function closePaymentDialog(): void {
+  if (paymentDialog.open) paymentDialog.close();
+}
+
+async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  clearPaymentMessages();
+
+  const address = paymentAddress.value.trim();
+  if (!isOctalAddress(address)) {
+    showPaymentWarning(
+      "Use only digits 0–7 for the octal address.",
+      paymentAddress,
+    );
+    return;
+  }
+
+  const user = paymentUser.value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(user)) {
+    showPaymentWarning(
+      "The user id must be 64 hexadecimal characters.",
+      paymentUser,
+    );
+    return;
+  }
+
+  let amount: bigint;
+  try {
+    amount = parseCents(paymentAmount.value);
+  } catch (error) {
+    showPaymentWarning(errorMessage(error), paymentAmount);
+    return;
+  }
+  if (amount <= 0n) {
+    showPaymentWarning("Enter an amount greater than zero.", paymentAmount);
+    return;
+  }
+
+  const own = ownSnapshot();
+  if (own === null) {
+    showPaymentError("Your board is not loaded yet.");
+    return;
+  }
+
+  paymentSubmit.disabled = true;
+  paymentSubmit.textContent = "Checking…";
+  paymentForm.setAttribute("aria-busy", "true");
+  paymentWarning.textContent = "Checking the route…";
+  paymentWarning.hidden = false;
+  paymentError.hidden = true;
+  paymentError.textContent = "";
+
+  try {
+    const plan = await planPayment(own, address, user, amount, paymentDeps);
+    if ("ok" in plan) {
+      showPaymentError(paymentProblemMessage(plan));
+      return;
+    }
+
+    const sourceSeq = Math.max(
+      own.state.payments.seq + 1,
+      ownIdentity?.paymentsNextSeq ?? 1,
+    );
+    const intent = createPaymentIntent(plan, sourceSeq);
+    await backend.savePayment(intent, []);
+
+    // The just-signed intent lives on this board; drop remote reads so the
+    // next status/inbox pass sees the new record.
+    boardCache.clear();
+    closePaymentDialog();
+    hideErrorNotice();
+    showNotice(
+      "info",
+      "Payment offered",
+      "Each owner on the path must open their board to sign their leg.",
+    );
+    announce("Payment offered.");
+    renderAll();
+  } catch (error) {
+    showPaymentError(errorMessage(error));
+  } finally {
+    paymentSubmit.disabled = false;
+    paymentSubmit.textContent = PAYMENT_SUBMIT_LABEL;
+    paymentForm.removeAttribute("aria-busy");
+  }
 }
 
 const STATUS_LABELS: Record<BoardStatus, string> = {
@@ -1765,6 +2199,11 @@ const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
 
+const paymentDeps: PaymentDeps = {
+  readBoard: (id) => readBoardForView(id),
+  savePayment: (entry, slots) => backend.savePayment(entry, slots),
+};
+
 const boardNameDialog = createBoardNameDialog({
   getContacts: ownContactsWithoutSelf,
   getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
@@ -1872,8 +2311,14 @@ const identityDialogs = createIdentityDialogs({
   offline: isOffline,
   getIdentity: () => ownIdentity,
   exportIdentity: () => backend.exportIdentity(),
-  importIdentity: (seed, nextSeq, contactsNextSeq, parentNextSeq) =>
-    backend.importIdentity(seed, nextSeq, contactsNextSeq, parentNextSeq),
+  importIdentity: (seed, nextSeq, contactsNextSeq, parentNextSeq, paymentsNextSeq) =>
+    backend.importIdentity(
+      seed,
+      nextSeq,
+      contactsNextSeq,
+      parentNextSeq,
+      paymentsNextSeq,
+    ),
   announce,
   copy: copyToClipboard,
   onRestored: () => {
@@ -1922,6 +2367,25 @@ contactAdd.addEventListener("click", () => {
 contactsOpen.addEventListener("click", () => {
   addingForParent = false;
   contactsDialog.open();
+});
+paymentOpen.addEventListener("click", openPaymentDialog);
+paymentCheck.addEventListener("click", () => {
+  // Force the status/inbox read to look past the session cache.
+  boardCache.clear();
+  void renderPayments();
+});
+paymentClose.addEventListener("click", closePaymentDialog);
+paymentCancel.addEventListener("click", closePaymentDialog);
+paymentForm.addEventListener("submit", (event) => {
+  void handlePaymentSubmit(event);
+});
+paymentDialog.addEventListener("cancel", (event) => {
+  if (paymentSubmit.disabled) event.preventDefault();
+});
+paymentDialog.addEventListener("click", (event) => {
+  if (event.target === paymentDialog && !paymentSubmit.disabled) {
+    closePaymentDialog();
+  }
 });
 
 editor.addEventListener("cancel", (event) => {

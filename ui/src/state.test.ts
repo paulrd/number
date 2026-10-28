@@ -16,6 +16,7 @@ import {
   decodeSummary,
   emptyContacts,
   emptyParent,
+  emptyPayments,
   emptyState,
   encodeDelta,
   encodeState,
@@ -26,11 +27,14 @@ import {
   mergeContacts,
   mergeDelta,
   mergeParent,
+  mergePayments,
   mergeStates,
   optionalText,
   parentDigest16,
   parentSigningBytes,
   parseCents,
+  paymentsDigest16,
+  paymentsSigningBytes,
   signingBytes,
   slotDigest16,
   stateWarnings,
@@ -39,6 +43,8 @@ import {
   validateDelta,
   validateEntry,
   validateParent,
+  validatePaymentEntry,
+  validatePayments,
   validateState,
   validateSummary,
   type Contact,
@@ -48,6 +54,7 @@ import {
   type Slot,
   type StateV3,
 } from "./state";
+import type { PaymentEntry, PaymentsRecord } from "./payments";
 import { bytesToHex } from "./util";
 
 const SIG_A = "a".repeat(128);
@@ -86,6 +93,51 @@ const GOLDEN_PARENT_DIGEST16 = "a3b70e503d1951bb363f6fbf310d4782";
 const GOLDEN_PARENT_CLEARED_BYTES =
   "6e756d6265723a76333a706172656e74" + "0100000000000000" + "00"; // tag: cleared
 const GOLDEN_PARENT_CLEARED_DIGEST16 = "3b38efbfcc7bd18dce1d5e265151e9f0";
+
+// contract/payments_golden_vector.txt (cross-pin: the contract file still
+// documents the pre-`settled` encoding; these vectors follow the updated
+// DESIGN-payments.md order, which inserts settled_count:u8 after seq).
+const PAY_USER_SRC = "11".repeat(32);
+const PAY_USER_DST = "22".repeat(32);
+const PAY_USER_NEXT = "33".repeat(32);
+const PAYMENT_ID = "0123456789abcdef0123456789abcdef";
+const PAY_LEG_SIG = "5a".repeat(64);
+const SETTLED_A = "aa".repeat(16);
+const SETTLED_B = "bb".repeat(16);
+const GOLDEN_PAYMENTS_BYTES_1 =
+  "6e756d6265723a76343a7061796d656e747306000000000000000001" +
+  "0123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+const GOLDEN_PAYMENTS_DIGEST_1 = "325c8d0a9c2b51ce5f2069e724b39ad3";
+const GOLDEN_PAYMENTS_BYTES_2 =
+  "6e756d6265723a76343a7061796d656e747307000000000000000001" +
+  "0123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+const GOLDEN_PAYMENTS_DIGEST_2 = "9b1419ef01132905668a238ad95e3456";
+
+function payment(
+  overrides: Partial<PaymentEntry> = {},
+): PaymentEntry {
+  return {
+    id: PAYMENT_ID,
+    src: PAY_USER_SRC,
+    dst: PAY_USER_DST,
+    amount: 1250n,
+    srcAddr: "52",
+    dstAddr: "31",
+    cursor: 2,
+    phase: "forward",
+    status: "acted",
+    next: PAY_USER_NEXT,
+    fail: null,
+    legs: [{ slot: 1, seq: 4, postValue: 3750n, sig: PAY_LEG_SIG }],
+    ...overrides,
+  };
+}
+
+function payments(
+  overrides: Partial<PaymentsRecord> = {},
+): PaymentsRecord {
+  return { seq: 0, settled: [], entry: null, sig: null, ...overrides };
+}
 
 function entry(value: number | bigint, overrides: Partial<Entry> = {}): Entry {
   return {
@@ -174,10 +226,61 @@ describe("golden vectors (spec §2.5)", () => {
     );
     expect(parentDigest16(emptyParent())).toBe("0".repeat(32));
   });
+
+  it("builds the exact payments signing bytes and digest16 (golden vector 1)", () => {
+    const entry = payment();
+    expect(bytesToHex(paymentsSigningBytes(6, [], entry))).toBe(
+      GOLDEN_PAYMENTS_BYTES_1,
+    );
+    expect(paymentsDigest16({ seq: 6, settled: [], entry, sig: SIG_A })).toBe(
+      GOLDEN_PAYMENTS_DIGEST_1,
+    );
+  });
+
+  it("builds the exact terminal payments signing bytes (golden vector 2)", () => {
+    const entry = payment({
+      cursor: 5,
+      phase: "terminal",
+      status: "complete",
+      next: "0".repeat(64),
+      legs: [
+        { slot: 1, seq: 4, postValue: 3750n, sig: PAY_LEG_SIG },
+        { slot: 3, seq: 5, postValue: -1250n, sig: PAY_LEG_SIG },
+      ],
+    });
+    expect(bytesToHex(paymentsSigningBytes(7, [], entry))).toBe(
+      GOLDEN_PAYMENTS_BYTES_2,
+    );
+    expect(paymentsDigest16({ seq: 7, settled: [], entry, sig: SIG_A })).toBe(
+      GOLDEN_PAYMENTS_DIGEST_2,
+    );
+    expect(paymentsDigest16(emptyPayments())).toBe("0".repeat(32));
+  });
+
+  it("signs a payments tombstone at seq > 0 with tag 0", () => {
+    expect(bytesToHex(paymentsSigningBytes(3, [], null))).toBe(
+      "6e756d6265723a76343a7061796d656e7473" +
+        "0300000000000000" +
+        "00" + // settled_count
+        "00", // entry tag
+    );
+  });
+
+  it("writes settled_count followed by each 16-byte id in order", () => {
+    const bytes = bytesToHex(paymentsSigningBytes(8, [SETTLED_A, SETTLED_B], null));
+    expect(bytes).toBe(
+      "6e756d6265723a76343a7061796d656e7473" +
+        "0800000000000000" +
+        "02" +
+        SETTLED_A +
+        SETTLED_B +
+        "00",
+    );
+  });
 });
 
 describe("state encode/decode", () => {
-  it("round-trips the exact v3 state shape, including tombstones", () => {
+  it("round-trips the exact v4 state shape, including tombstones", () => {
     const state = stateWith(
       {
         0: { seq: 0, entry: null, sig: null },
@@ -195,8 +298,9 @@ describe("state encode/decode", () => {
     expect(decodeState(encoded)).toEqual(state);
 
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(3);
+    expect(json.v).toBe(4);
     expect(json.parent).toEqual(emptyParent());
+    expect(json.payments).toEqual(emptyPayments());
     expect(json.contacts).toEqual({
       seq: 2,
       entries: [{ label: "Alice", userId: CONTACT_A }],
@@ -213,9 +317,10 @@ describe("state encode/decode", () => {
 
   it("normalises absent value and empty optional strings", () => {
     const state = validateState({
-      v: 3,
+      v: 4,
       parent: emptyParent(),
       contacts: { seq: 0, entries: [], sig: null },
+      payments: emptyPayments(),
       slots: emptyState().slots.map((slot, index) => {
         if (index === 2) {
           return { seq: 1, entry: { contact: CONTACT_A }, sig: SIG_A };
@@ -249,9 +354,10 @@ describe("state encode/decode", () => {
 
   it("round-trips delta and summary encodings with contacts", () => {
     const delta = {
-      v: 3 as const,
+      v: 4 as const,
       parent: null,
       contacts: contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
+      payments: null,
       slots: [
         { i: 2, seq: 4, entry: entry(8, { unit: "kg" }), sig: SIG_C },
         { i: 5, seq: 9, entry: null, sig: SIG_A },
@@ -266,9 +372,10 @@ describe("state encode/decode", () => {
       ),
     );
     expect(decodeSummary(encodeSummary(summary))).toEqual(summary);
-    expect(summary.v).toBe(3);
+    expect(summary.v).toBe(4);
     expect(summary.parent).toEqual([0, "0".repeat(32)]);
     expect(summary.contacts).toEqual([1, GOLDEN_CONTACTS_DIGEST16]);
+    expect(summary.payments).toEqual([0, "0".repeat(32)]);
     expect(summary.slots).toHaveLength(8);
     expect(summary.slots[0]).toEqual([0, "0".repeat(32)]);
     expect(summary.slots[3][1]).toBe(GOLDEN_SLOT_DIGEST16);
@@ -276,10 +383,11 @@ describe("state encode/decode", () => {
 
   it("accepts an absent or null delta contacts record", () => {
     for (const raw of [
-      { v: 3, slots: [] },
-      { v: 3, parent: null, contacts: null, slots: [] },
+      { v: 4, slots: [] },
+      { v: 4, parent: null, contacts: null, slots: [] },
     ]) {
       expect(validateDelta(raw).contacts).toBeNull();
+      expect(validateDelta(raw).payments).toBeNull();
     }
   });
 
@@ -289,21 +397,28 @@ describe("state encode/decode", () => {
       validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
     ).toThrow(/state\.v/);
     expect(() =>
-      validateState({ v: 3, parent: emptyParent(), slots: emptyState().slots }),
+      validateState({
+        v: 4,
+        parent: emptyParent(),
+        payments: emptyPayments(),
+        slots: emptyState().slots,
+      }),
     ).toThrow(/state\.contacts/);
     expect(() =>
       validateState({
-        v: 3,
+        v: 4,
         parent: emptyParent(),
         contacts: emptyContacts(),
+        payments: emptyPayments(),
         slots: emptyState().slots.slice(0, 7),
       }),
     ).toThrow(/exactly 8/);
     expect(() =>
       validateDelta({
-        v: 3,
+        v: 4,
         parent: null,
         contacts: null,
+        payments: null,
         slots: [
           { i: 1, seq: 1, entry: entry(1), sig: SIG_A },
           { i: 1, seq: 2, entry: entry(2), sig: SIG_B },
@@ -311,32 +426,68 @@ describe("state encode/decode", () => {
       }),
     ).toThrow(/duplicate/);
     expect(() =>
-      validateSummary({ v: 3, parent: [0, "0".repeat(32)], contacts: [0, "0".repeat(32)], slots: [] }),
+      validateSummary({
+        v: 4,
+        parent: [0, "0".repeat(32)],
+        contacts: [0, "0".repeat(32)],
+        payments: [0, "0".repeat(32)],
+        slots: [],
+      }),
     ).toThrow(/exactly 8/);
     expect(() =>
-      validateSummary({ v: 3, slots: [] }),
+      validateSummary({ v: 4, slots: [] }),
     ).toThrow(/summary\.parent/);
   });
 });
 
-describe("v2 → v3 upgrade", () => {
-  it("normalises a v2 state to v3 with an empty parent", () => {
+describe("v2/v3 → v4 upgrade", () => {
+  it("normalises a v2 state to v4 with empty parent and payments", () => {
     const v2 = {
       v: LEGACY_STATE_VERSION,
       contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
       slots: emptyState().slots,
     };
     const upgraded = validateState(v2);
-    expect(upgraded.v).toBe(3);
+    expect(upgraded.v).toBe(4);
     expect(upgraded.parent).toEqual(emptyParent());
+    expect(upgraded.payments).toEqual(emptyPayments());
     expect(upgraded.contacts).toEqual(v2.contacts);
 
     // A v2 state's slot/contacts signatures are unchanged, so encoding writes
-    // the same records under v3.
+    // the same records under v4.
     const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(3);
+    expect(json.v).toBe(4);
     expect(json.parent).toEqual({ seq: 0, userId: null, sig: null });
+    expect(json.payments).toEqual({
+      seq: 0,
+      settled: [],
+      entry: null,
+      sig: null,
+    });
     expect(json.contacts).toEqual(v2.contacts);
+  });
+
+  it("normalises a v3 state to v4 with an empty payments record", () => {
+    const v3 = {
+      v: 3,
+      parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
+      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+      slots: emptyState().slots,
+    };
+    const upgraded = validateState(v3);
+    expect(upgraded.v).toBe(4);
+    expect(upgraded.parent).toEqual(v3.parent);
+    expect(upgraded.payments).toEqual(emptyPayments());
+    expect(upgraded.contacts).toEqual(v3.contacts);
+
+    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
+    expect(json.v).toBe(4);
+    expect(json.payments).toEqual({
+      seq: 0,
+      settled: [],
+      entry: null,
+      sig: null,
+    });
   });
 
   it("rejects a v2 state that carries a parent", () => {
@@ -352,12 +503,40 @@ describe("v2 → v3 upgrade", () => {
     }
   });
 
+  it("rejects v2/v3 states that carry a payments record", () => {
+    expect(() =>
+      validateState({
+        v: LEGACY_STATE_VERSION,
+        payments: emptyPayments(),
+        contacts: emptyContacts(),
+        slots: emptyState().slots,
+      }),
+    ).toThrow(/v2 state must not carry a payments record/);
+    expect(() =>
+      validateState({
+        v: 3,
+        parent: emptyParent(),
+        payments: emptyPayments(),
+        contacts: emptyContacts(),
+        slots: emptyState().slots,
+      }),
+    ).toThrow(/v3 state must not carry a payments record/);
+  });
+
   it("rejects an unknown state version and a v3 state without a parent", () => {
     expect(() =>
       validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
     ).toThrow(/state\.v/);
     expect(() =>
       validateState({ v: 3, contacts: emptyContacts(), slots: emptyState().slots }),
+    ).toThrow(/state\.parent/);
+    expect(() =>
+      validateState({
+        v: 4,
+        contacts: emptyContacts(),
+        payments: emptyPayments(),
+        slots: emptyState().slots,
+      }),
     ).toThrow(/state\.parent/);
   });
 });
@@ -407,7 +586,7 @@ describe("parent codec", () => {
 });
 
 describe("parent in state, delta, summary, merge", () => {
-  it("round-trips a v3 state with a parent", () => {
+  it("round-trips a v4 state with a parent", () => {
     const state = stateWith(
       { 0: { seq: 1, entry: entry(5), sig: SIG_A } },
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
@@ -415,7 +594,7 @@ describe("parent in state, delta, summary, merge", () => {
     );
     const encoded = encodeState(state);
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(3);
+    expect(json.v).toBe(4);
     expect(json.parent).toEqual({
       seq: 4,
       userId: CONTACT_B,
@@ -455,9 +634,10 @@ describe("parent in state, delta, summary, merge", () => {
     expect(computeDelta(theirs, ours).parent).toBeNull();
     expect(computeDelta(ours, ours).parent).toBeNull();
     expect(computeDelta(emptyState(), emptyState())).toEqual({
-      v: 3,
+      v: 4,
       parent: null,
       contacts: null,
+      payments: null,
       slots: [],
     });
   });
@@ -483,9 +663,10 @@ describe("parent in state, delta, summary, merge", () => {
       sig: SIG_A,
     });
     const delta = {
-      v: 3 as const,
+      v: 4 as const,
       parent: { seq: 3, userId: CONTACT_B, sig: SIG_B },
       contacts: null,
+      payments: null,
       slots: [],
     };
     expect(decodeDelta(encodeDelta(delta))).toEqual(delta);
@@ -494,9 +675,10 @@ describe("parent in state, delta, summary, merge", () => {
     expect(next.parent).toEqual(delta.parent);
 
     const stale = {
-      v: 3 as const,
+      v: 4 as const,
       parent: { seq: 1, userId: null, sig: SIG_C },
       contacts: null,
+      payments: null,
       slots: [],
     };
     expect(mergeDelta(next, stale).parent).toEqual(delta.parent);
@@ -806,9 +988,10 @@ describe("merge determinism", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
     );
     const delta = {
-      v: 3 as const,
+      v: 4 as const,
       parent: null,
       contacts: contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_C }),
+      payments: null,
       slots: [],
     };
     const next = mergeDelta(base, delta);
@@ -816,9 +999,10 @@ describe("merge determinism", () => {
     expect(next.slots).toEqual(base.slots);
 
     const stale = {
-      v: 3 as const,
+      v: 4 as const,
       parent: null,
       contacts: contacts({ seq: 1, entries: [contact("Old", CONTACT_A)], sig: SIG_A }),
+      payments: null,
       slots: [],
     };
     expect(mergeDelta(next, stale).contacts).toEqual(delta.contacts);
@@ -827,17 +1011,19 @@ describe("merge determinism", () => {
   it("treats a repeated delta as a no-op and lets stale slots lose", () => {
     const base = stateWith({ 0: { seq: 2, entry: entry(2), sig: SIG_B } });
     const stale = {
-      v: 3 as const,
+      v: 4 as const,
       parent: null,
       contacts: null,
+      payments: null,
       slots: [{ i: 0, seq: 1, entry: entry(1), sig: SIG_A }],
     };
     expect(mergeDelta(base, stale)).toEqual(base);
 
     const fresh = {
-      v: 3 as const,
+      v: 4 as const,
       parent: null,
       contacts: null,
+      payments: null,
       slots: [{ i: 0, seq: 3, entry: entry(3), sig: SIG_C }],
     };
     const once = mergeDelta(base, fresh);
@@ -855,14 +1041,15 @@ describe("delta filtering", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
     );
     expect(computeDelta(state, state)).toEqual({
-      v: 3,
+      v: 4,
       parent: null,
       contacts: null,
+      payments: null,
       slots: [],
     });
     expect(
       JSON.parse(new TextDecoder().decode(encodeDelta(computeDelta(state, state)))),
-    ).toEqual({ v: 3, parent: null, contacts: null, slots: [] });
+    ).toEqual({ v: 4, parent: null, contacts: null, payments: null, slots: [] });
   });
 
   it("includes contacts when ours is newer, otherwise leaves them null", () => {
@@ -941,6 +1128,385 @@ describe("delta filtering", () => {
   });
 });
 
+describe("payments record", () => {
+  it("accepts the empty record, a tombstone and a signed entry", () => {
+    expect(validatePayments(emptyPayments())).toEqual(emptyPayments());
+    expect(
+      validatePayments({ seq: 3, settled: [], entry: null, sig: SIG_A }),
+    ).toEqual({ seq: 3, settled: [], entry: null, sig: SIG_A });
+    expect(
+      validatePayments({ seq: 6, settled: [], entry: payment(), sig: SIG_A }),
+    ).toEqual({ seq: 6, settled: [], entry: payment(), sig: SIG_A });
+    // A tombstone at seq > 0 may keep settled ids.
+    expect(
+      validatePayments({
+        seq: 7,
+        settled: [SETTLED_A],
+        entry: null,
+        sig: SIG_A,
+      }),
+    ).toEqual({ seq: 7, settled: [SETTLED_A], entry: null, sig: SIG_A });
+  });
+
+  it("validates the bounded, unique settled id list", () => {
+    const record = (settled: unknown) =>
+      validatePayments({ seq: 3, settled, entry: null, sig: SIG_A });
+    expect(record([SETTLED_A, SETTLED_B]).settled).toEqual([
+      SETTLED_A,
+      SETTLED_B,
+    ]);
+
+    expect(() => record("nope")).toThrow(/expected an array/);
+    expect(() => record([SETTLED_A.toUpperCase()])).toThrow(/lowercase hex/);
+    expect(() => record([SETTLED_A.slice(0, 30)])).toThrow(/lowercase hex/);
+    expect(() => record([`${SETTLED_A}00`])).toThrow(/lowercase hex/);
+    expect(() => record([SETTLED_A, SETTLED_A])).toThrow(/duplicate settled id/);
+    expect(() =>
+      record(Array.from({ length: 9 }, (_, index) => index.toString(16).padStart(32, "0"))),
+    ).toThrow(/at most 8 settled ids/);
+    // Exactly 8 is allowed.
+    expect(
+      record(Array.from({ length: 8 }, (_, index) => index.toString(16).padStart(32, "0")))
+        .settled,
+    ).toHaveLength(8);
+  });
+
+  it("requires seq 0 to have an empty settled list", () => {
+    expect(() =>
+      validatePayments({
+        seq: 0,
+        settled: [SETTLED_A],
+        entry: null,
+        sig: null,
+      }),
+    ).toThrow(/seq 0 must have no settled ids/);
+    expect(() => paymentsSigningBytes(0, [SETTLED_A], null)).toThrow(
+      /seq 0 must have no settled ids/,
+    );
+  });
+
+  it("covers settled in the digest and rejects oversized signing input", () => {
+    const entry = payment();
+    expect(paymentsDigest16({ seq: 6, settled: [], entry, sig: SIG_A })).toBe(
+      GOLDEN_PAYMENTS_DIGEST_1,
+    );
+    const tampered = paymentsDigest16({
+      seq: 6,
+      settled: [SETTLED_A],
+      entry,
+      sig: SIG_A,
+    });
+    expect(tampered).not.toBe(GOLDEN_PAYMENTS_DIGEST_1);
+    expect(() =>
+      paymentsSigningBytes(
+        6,
+        Array.from({ length: 9 }, (_, index) =>
+          index.toString(16).padStart(32, "0"),
+        ),
+        entry,
+      ),
+    ).toThrow(/at most 8 settled ids/);
+  });
+
+  it("rejects impossible seq/entry/sig combinations", () => {
+    expect(() =>
+      validatePayments({ seq: 0, settled: [], entry: payment(), sig: null }),
+    ).toThrow(/seq 0 must have a null entry/);
+    expect(() =>
+      validatePayments({ seq: 0, settled: [], entry: null, sig: SIG_A }),
+    ).toThrow(/seq 0 must have a null signature/);
+    expect(() =>
+      validatePayments({ seq: 1, settled: [], entry: null, sig: null }),
+    ).toThrow(/requires a signature/);
+    expect(() =>
+      validatePayments({ seq: 1, settled: [], entry: payment(), sig: null }),
+    ).toThrow(/requires a signature/);
+    expect(() => validatePayments(null)).toThrow(/expected an object/);
+  });
+
+  it("validates entry fields and leg bounds", () => {
+    expect(() =>
+      validatePaymentEntry(payment({ id: "AB".repeat(16) })),
+    ).toThrow(/id/);
+    expect(() =>
+      validatePaymentEntry(payment({ id: "ab".repeat(15) })),
+    ).toThrow(/id/);
+    expect(() =>
+      validatePaymentEntry(payment({ src: CONTACT_HEX.toUpperCase() })),
+    ).toThrow(/src/);
+    expect(() =>
+      validatePaymentEntry(payment({ amount: 0n })),
+    ).toThrow(/greater than 0/);
+    expect(() =>
+      validatePaymentEntry(payment({ amount: I64_MAX + 1n })),
+    ).toThrow(/signed 64-bit/);
+    expect(() =>
+      validatePaymentEntry(payment({ srcAddr: "58" })),
+    ).toThrow(/octal address/);
+    expect(() =>
+      validatePaymentEntry(payment({ srcAddr: "0".repeat(33) })),
+    ).toThrow(/octal address/);
+    expect(() =>
+      validatePaymentEntry(payment({ cursor: 65 })),
+    ).toThrow(/cursor/);
+    expect(() =>
+      validatePaymentEntry(payment({ phase: "sideways" as never })),
+    ).toThrow(/phase/);
+    expect(() =>
+      validatePaymentEntry(payment({ status: "unknown" as never })),
+    ).toThrow(/status/);
+    expect(() =>
+      validatePaymentEntry(payment({ fail: "oops" as never })),
+    ).toThrow(/fail/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          legs: [
+            { slot: 1, seq: 4, postValue: 1n, sig: PAY_LEG_SIG },
+            { slot: 1, seq: 5, postValue: 2n, sig: PAY_LEG_SIG },
+          ],
+        }),
+      ),
+    ).toThrow(/duplicate slot/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          legs: [
+            { slot: 1, seq: 4, postValue: 1n, sig: PAY_LEG_SIG },
+            { slot: 2, seq: 5, postValue: 2n, sig: PAY_LEG_SIG },
+            { slot: 3, seq: 6, postValue: 3n, sig: PAY_LEG_SIG },
+          ],
+        }),
+      ),
+    ).toThrow(/at most 2 legs/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({ legs: [{ slot: 1, seq: 0, postValue: 1n, sig: PAY_LEG_SIG }] }),
+      ),
+    ).toThrow(/greater than 0/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          legs: [{ slot: 8, seq: 1, postValue: 1n, sig: PAY_LEG_SIG }],
+        }),
+      ),
+    ).toThrow(/slot/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          legs: [{ slot: 1, seq: 1, postValue: 1n, sig: "A".repeat(128) }],
+        }),
+      ),
+    ).toThrow(/lowercase hex/);
+  });
+
+  it("enforces phase/status coherence", () => {
+    expect(() =>
+      validatePaymentEntry(payment({ status: "offered", cursor: 1 })),
+    ).toThrow(/offered/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({ status: "offered", cursor: 0, legs: [] }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          status: "offered",
+          cursor: 0,
+          legs: [{ slot: 1, seq: 1, postValue: 1n, sig: PAY_LEG_SIG }],
+        }),
+      ),
+    ).toThrow(/offered/);
+    expect(() =>
+      validatePaymentEntry(payment({ status: "complete" })),
+    ).toThrow(/must be terminal/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({ phase: "terminal", status: "acted", next: PAY_USER_NEXT }),
+      ),
+    ).toThrow(/all-zero next/);
+    expect(() =>
+      validatePaymentEntry(
+        payment({
+          phase: "terminal",
+          status: "complete",
+          cursor: 5,
+          next: "0".repeat(64),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("round-trips payments in a state, delta and summary", () => {
+    const record = payments({ seq: 6, entry: payment(), sig: SIG_A });
+    const state = stateWith({});
+    state.payments = record;
+
+    const encoded = encodeState(state);
+    expect(decodeState(encoded).payments).toEqual(record);
+
+    const delta = {
+      v: 4 as const,
+      parent: null,
+      contacts: null,
+      payments: record,
+      slots: [],
+    };
+    expect(decodeDelta(encodeDelta(delta)).payments).toEqual(record);
+    expect(mergeDelta(emptyState(), delta).payments).toEqual(record);
+
+    const summary = summaryFromState(state);
+    expect(summary.payments).toEqual([6, GOLDEN_PAYMENTS_DIGEST_1]);
+    expect(decodeSummary(encodeSummary(summary)).payments).toEqual(
+      summary.payments,
+    );
+  });
+
+  it("carries settled through state, delta and summary", () => {
+    const record = payments({
+      seq: 6,
+      settled: [SETTLED_A, SETTLED_B],
+      entry: payment(),
+      sig: SIG_A,
+    });
+    const state = stateWith({});
+    state.payments = record;
+
+    expect(decodeState(encodeState(state)).payments).toEqual(record);
+
+    const delta = {
+      v: 4 as const,
+      parent: null,
+      contacts: null,
+      payments: record,
+      slots: [],
+    };
+    const decoded = decodeDelta(encodeDelta(delta));
+    expect(decoded.payments).toEqual(record);
+    expect(mergeDelta(emptyState(), delta).payments).toEqual(record);
+
+    const summary = summaryFromState(state);
+    expect(summary.payments).toEqual([6, paymentsDigest16(record)]);
+    expect(summary.payments[1]).not.toBe(GOLDEN_PAYMENTS_DIGEST_1);
+  });
+
+  it("merges payments by seq then signature bytes, including tombstones", () => {
+    const low = payments({ seq: 1, entry: payment(), sig: SIG_A });
+    const high = payments({ seq: 2, entry: payment(), sig: SIG_A });
+    expect(mergePayments(low, high)).toEqual(high);
+    expect(mergePayments(high, low)).toEqual(high);
+
+    const tieLow = payments({ seq: 2, entry: payment(), sig: SIG_A });
+    const tieHigh = payments({ seq: 2, entry: payment(), sig: SIG_B });
+    expect(mergePayments(tieLow, tieHigh)).toEqual(tieHigh);
+    expect(mergePayments(tieHigh, tieLow)).toEqual(tieHigh);
+
+    const tombstone = payments({ seq: 3, entry: null, sig: SIG_C });
+    expect(mergePayments(tieHigh, tombstone)).toEqual(tombstone);
+    expect(mergePayments(tombstone, tieHigh)).toEqual(tombstone);
+
+    expect(
+      mergeStates(
+        (() => {
+          const a = stateWith({});
+          a.payments = low;
+          return a;
+        })(),
+        (() => {
+          const b = stateWith({});
+          b.payments = high;
+          return b;
+        })(),
+      ).payments,
+    ).toEqual(high);
+  });
+
+  it("moves settled with the record and keeps it across a tombstone", () => {
+    const low = payments({
+      seq: 1,
+      settled: [SETTLED_A],
+      entry: payment(),
+      sig: SIG_A,
+    });
+    const high = payments({
+      seq: 2,
+      settled: [SETTLED_A, SETTLED_B],
+      entry: payment(),
+      sig: SIG_A,
+    });
+    expect(mergePayments(low, high)).toEqual(high);
+
+    const tombstone = payments({
+      seq: 3,
+      settled: [SETTLED_A, SETTLED_B],
+      entry: null,
+      sig: SIG_C,
+    });
+    expect(mergePayments(high, tombstone)).toEqual(tombstone);
+    expect(mergePayments(tombstone, high)).toEqual(tombstone);
+    expect(mergePayments(tombstone, high).entry).toBeNull();
+    expect(mergePayments(tombstone, high).settled).toEqual([
+      SETTLED_A,
+      SETTLED_B,
+    ]);
+  });
+
+  it("breaks equal-seq/sig ties deterministically using settled", () => {
+    const a = payments({ seq: 2, settled: [SETTLED_A], sig: SIG_A });
+    const b = payments({ seq: 2, settled: [SETTLED_B], sig: SIG_A });
+    expect(mergePayments(a, b)).toEqual(mergePayments(b, a));
+    expect(mergePayments(a, b).settled).toEqual(
+      mergePayments(b, a).settled,
+    );
+    expect(mergeStates(
+      (() => {
+        const state = stateWith({});
+        state.payments = a;
+        return state;
+      })(),
+      (() => {
+        const state = stateWith({});
+        state.payments = b;
+        return state;
+      })(),
+    ).payments.seq).toBe(2);
+  });
+
+  it("returns independent settled arrays from clone/merge", () => {
+    const record = payments({
+      seq: 4,
+      settled: [SETTLED_A],
+      entry: payment(),
+      sig: SIG_A,
+    });
+    const merged = mergePayments(record, payments());
+    expect(merged.settled).toEqual([SETTLED_A]);
+    merged.settled.push(SETTLED_B);
+    expect(record.settled).toEqual([SETTLED_A]);
+  });
+
+
+  it("filters payments in computeDelta and lets stale deltas lose", () => {
+    const ours = stateWith({});
+    ours.payments = payments({ seq: 4, entry: payment(), sig: SIG_A });
+    const theirs = stateWith({});
+
+    expect(computeDelta(ours, theirs).payments).toEqual(ours.payments);
+    expect(computeDelta(theirs, ours).payments).toBeNull();
+    expect(computeDelta(ours, ours).payments).toBeNull();
+
+    const stale = {
+      v: 4 as const,
+      parent: null,
+      contacts: null,
+      payments: payments({ seq: 3, entry: null, sig: SIG_B }),
+      slots: [],
+    };
+    expect(mergeDelta(ours, stale).payments).toEqual(ours.payments);
+  });
+});
+
 describe("bounds and invariants", () => {
   it("enforces unit and note UTF-8 byte limits", () => {
     expect(() => validateEntry(entry(1, { unit: "u".repeat(16) }))).not.toThrow();
@@ -968,9 +1534,10 @@ describe("bounds and invariants", () => {
   it("enforces slot seq-0 and signature invariants atomically", () => {
     expect(() =>
       validateState({
-        v: 3,
+        v: 4,
         parent: emptyParent(),
         contacts: emptyContacts(),
+        payments: emptyPayments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: entry(1), sig: null } : slot,
         ),
@@ -979,9 +1546,10 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 3,
+        v: 4,
         parent: emptyParent(),
         contacts: emptyContacts(),
+        payments: emptyPayments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: null, sig: SIG_A } : slot,
         ),
@@ -990,9 +1558,10 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 3,
+        v: 4,
         parent: emptyParent(),
         contacts: emptyContacts(),
+        payments: emptyPayments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: null } : slot,
         ),
@@ -1001,9 +1570,10 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 3,
+        v: 4,
         parent: emptyParent(),
         contacts: emptyContacts(),
+        payments: emptyPayments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: "A".repeat(128) } : slot,
         ),
@@ -1012,9 +1582,10 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateDelta({
-        v: 3,
+        v: 4,
         parent: null,
         contacts: null,
+        payments: null,
         slots: [{ i: 8, seq: 1, entry: entry(1), sig: SIG_A }],
       }),
     ).toThrow(/0\.\.7/);

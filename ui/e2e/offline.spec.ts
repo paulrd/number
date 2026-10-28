@@ -1,6 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import { MOCK_CHILD_ID, MOCK_PARENT_ID } from "../src/mock";
+import {
+  MOCK_CHILD_ID,
+  MOCK_PARENT_ID,
+  MOCK_PAYER_ID,
+  MOCK_SIBLING_ID,
+} from "../src/mock";
 
 /**
  * Offline tier: the real built UI, the real state codec/merge code, and the
@@ -575,6 +580,74 @@ test("falls back to fixture board names when contacts are removed", async ({
   );
   await expect(page.locator(".slot .slot-label").first()).toHaveText("My board");
   await page.locator("#board-home").click();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("advances a cooperative payment and offers a source payment", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await addContact(page, "Payer", MOCK_PAYER_ID);
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+  await addContact(page, "Sibling", MOCK_SIBLING_ID);
+
+  // Own board root is the LCA: slot 0 is the payer, slot 1 the destination.
+  await page.locator(".slot").first().click();
+  await page.locator("#contact-select").selectOption(MOCK_PAYER_ID);
+  await page.locator("#value-input").fill("10.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("10.00");
+
+  await page.locator(".slot").nth(1).click();
+  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
+  await page.locator("#value-input").fill("0.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("0.00");
+
+  // The payer fixture has already offered 2.50 through this LCA.
+  await expect(page.locator("#payments")).toBeVisible();
+  await expect(page.locator("#payment-inbox")).toBeVisible();
+  await expect(page.locator("#payment-inbox")).toContainText("2.50");
+  await expect(page.locator("#payment-inbox")).toContainText("Payer");
+  await page.locator(".payment-advance").first().click();
+
+  await expect(page.locator("#payment-status")).toContainText("Complete");
+  await expect(page.locator("#payment-inbox")).toBeHidden();
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("7.50");
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("2.50");
+
+  // Become a source: set the parent and pay the sibling through it.
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await expect(page.locator("#payment-open")).toBeEnabled();
+
+  await page.locator("#payment-open").click();
+  await expect(page.locator("#payment-dialog")).toBeVisible();
+  await page.locator("#payment-address").fill("1");
+  await page.locator("#payment-user").fill("0".repeat(64));
+  await page.locator("#payment-amount").fill("1.00");
+  await page.locator("#payment-submit").click();
+  await expect(page.locator("#payment-error")).toContainText("does not own");
+
+  await page.locator("#payment-user").fill(MOCK_SIBLING_ID);
+  await page.locator("#payment-submit").click();
+  await expect(page.locator("#payment-dialog")).toBeHidden();
+  await expect(page.locator("#payment-status")).toContainText("Offered");
+  await expect(page.locator("#payment-status")).toContainText("Parent");
+  await expect(page.locator("#payment-open")).toBeDisabled();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(

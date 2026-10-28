@@ -40,12 +40,29 @@ describe("identity backup codec", () => {
       nextSeq: NEXT_SEQ,
       contactsNextSeq: 3,
       parentNextSeq: 4,
+      paymentsNextSeq: 1,
       pubkey: PUBKEY,
     });
     const parsed = JSON.parse(text);
     expect(parsed.contactsNextSeq).toBe(3);
     expect(parsed.parentNextSeq).toBe(4);
+    expect(parsed.paymentsNextSeq).toBe(1);
     expect(parsed.createdAt).toBe("2026-10-27T12:00:00.000Z");
+  });
+
+  it("round-trips an explicit payments counter", () => {
+    const text = encodeIdentityBackup(
+      {
+        seed: SEED,
+        nextSeq: NEXT_SEQ,
+        contactsNextSeq: 3,
+        parentNextSeq: 4,
+        paymentsNextSeq: 12,
+      },
+      PUBKEY,
+      new Date("2026-10-27T12:00:00.000Z"),
+    );
+    expect(decodeIdentityBackup(text).paymentsNextSeq).toBe(12);
   });
 
   it("accepts a code without the informational fields", () => {
@@ -56,6 +73,7 @@ describe("identity backup codec", () => {
       nextSeq: NEXT_SEQ,
       contactsNextSeq: 2,
       parentNextSeq: 1,
+      paymentsNextSeq: 1,
     });
   });
 
@@ -67,6 +85,7 @@ describe("identity backup codec", () => {
       nextSeq: NEXT_SEQ,
       contactsNextSeq: 1,
       parentNextSeq: 1,
+      paymentsNextSeq: 1,
       pubkey: PUBKEY,
     });
   });
@@ -133,6 +152,26 @@ describe("identity backup codec", () => {
     for (const parentNextSeq of [0, -1, 1.5, "2", true, null]) {
       expect(() => decodeIdentityBackup(backup({ parentNextSeq }))).toThrow(
         /parent sequence must be a positive integer/,
+      );
+    }
+  });
+
+  it("defaults a missing payments counter to 1 (pre-payments backup)", () => {
+    const legacy = backup({ paymentsNextSeq: undefined });
+    expect(legacy).not.toContain("paymentsNextSeq");
+    expect(decodeIdentityBackup(legacy).paymentsNextSeq).toBe(1);
+  });
+
+  it("decodes an explicit payments counter", () => {
+    expect(decodeIdentityBackup(backup({ paymentsNextSeq: 11 })).paymentsNextSeq).toBe(
+      11,
+    );
+  });
+
+  it("rejects a malformed payments counter", () => {
+    for (const paymentsNextSeq of [0, -1, 1.5, "2", true, null]) {
+      expect(() => decodeIdentityBackup(backup({ paymentsNextSeq }))).toThrow(
+        /payments sequence must be a positive integer/,
       );
     }
   });

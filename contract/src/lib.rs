@@ -1,12 +1,18 @@
 //! `number-contract` — one board per owner, with eight number slots, a signed
-//! address book and at most one signed parent.
+//! address book, at most one signed parent and at most one signed cooperative
+//! payment.
 //!
 //! The contract is parameterised by the owner's raw 32-byte Ed25519 verifying
-//! key. Every non-empty (`seq > 0`) slot, contacts record and parent record
-//! carries an Ed25519 signature over the canonical bytes defined in
-//! `DESIGN.md` §2. State is a fixed-size array of eight slots plus one contacts
-//! record and one parent record, so encoding is deterministic and the merge is
-//! a component-wise maximum; there are no maps, caps or removals in state.
+//! key. Every non-empty (`seq > 0`) slot, contacts record, parent record and
+//! payments record carries an Ed25519 signature over the canonical bytes
+//! defined in `DESIGN.md` §2 and `DESIGN-payments.md`. State is a fixed-size
+//! array of eight slots plus one contacts record, one parent record and one
+//! payments record, so encoding is deterministic and the merge is a
+//! component-wise maximum; there are no maps, caps or removals in state.
+//!
+//! The payments record is evidence, not proof: the contract checks its shape
+//! and signature but deliberately does not check tree topology, the LCA or the
+//! slot arithmetic. Those are UI protocol rules.
 //!
 //! The contract never reads the host clock and never uses randomness.
 
@@ -29,11 +35,26 @@ pub const MAX_NOTE_BYTES: usize = 512;
 /// Length of a `userId`/`contact` hex string (32 raw bytes).
 pub const USER_ID_HEX_LEN: usize = 64;
 
+/// Length of a payment id hex string (16 raw bytes).
+pub const PAYMENT_ID_HEX_LEN: usize = 32;
+
+/// Maximum number of legs on one payment. Only the LCA has two.
+pub const MAX_PAYMENT_LEGS: usize = 2;
+
+/// Maximum number of recently settled payment ids kept in one record.
+pub const MAX_SETTLED_PAYMENTS: usize = 8;
+
+/// Maximum number of digits in an octal address.
+pub const MAX_ADDRESS_DIGITS: usize = 32;
+
+/// Maximum route cursor value. A route has at most two 32-digit addresses.
+pub const MAX_PAYMENT_CURSOR: u8 = 64;
+
 /// State schema version written to (and required in) every wire object.
-pub const STATE_VERSION: u8 = 3;
+pub const STATE_VERSION: u8 = 4;
 
 /// Domain prefix of the canonical slot signing bytes. Unchanged from v2 so a v2
-/// state's signatures keep validating after the client upgrades it to v3;
+/// state's signatures keep validating after the client upgrades it to v4;
 /// changing this is a breaking state change; see `DESIGN.md` §2.
 pub const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
 
@@ -43,12 +64,304 @@ pub const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
 /// Domain prefix of the canonical parent signing bytes.
 pub const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
 
+/// Domain prefix of the canonical payments signing bytes.
+pub const SIGNING_DOMAIN_PAYMENTS: &[u8] = b"number:v4:payments";
+
 /// Whether `value` is exactly 64 lowercase hexadecimal characters (32 bytes).
 pub fn validate_contact(value: &str) -> bool {
     value.len() == USER_ID_HEX_LEN
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One applied leg of a cooperative payment. Every field is covered by the
+/// payments signature.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PaymentLeg {
+    /// Slot index on the acting board, `0..=7`.
+    pub slot: u8,
+    /// Sequence of the slot write this leg performed.
+    pub seq: u64,
+    /// The signed post-leg slot value.
+    #[serde(rename = "postValue")]
+    pub post_value: i64,
+    /// The slot signature written by that leg (128 lowercase hex chars).
+    pub sig: String,
+}
+
+impl PaymentLeg {
+    /// Whether the slot index, sequence and signature are within bounds.
+    pub fn is_valid(&self) -> bool {
+        usize::from(self.slot) < SLOT_COUNT && self.seq > 0 && is_lower_hex(&self.sig, 128)
+    }
+}
+
+/// The active cooperative payment carried by one board. The contract checks
+/// only shape and signature; route and arithmetic rules live in the UI.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Payment {
+    /// `blake3(src || srcSeq || dst || amount)[0..16]`, 32 lowercase hex chars.
+    pub id: String,
+    /// Source owner id (64 lowercase hex chars).
+    pub src: String,
+    /// Destination owner id (64 lowercase hex chars).
+    pub dst: String,
+    /// Positive amount in hundredths.
+    pub amount: i64,
+    /// Zero-based octal route address of the source; root is `""`.
+    #[serde(rename = "srcAddr")]
+    pub src_addr: String,
+    /// Zero-based octal route address of the destination; root is `""`.
+    #[serde(rename = "dstAddr")]
+    pub dst_addr: String,
+    /// Number of route hops already applied.
+    pub cursor: u8,
+    /// `forward` | `reverse` | `terminal`.
+    pub phase: String,
+    /// One of the eight statuses listed in `DESIGN-payments.md`.
+    pub status: String,
+    /// Owner expected to act next; all-zero when terminal.
+    pub next: String,
+    /// Optional failure reason.
+    #[serde(default)]
+    pub fail: Option<String>,
+    /// Applied legs, at most [`MAX_PAYMENT_LEGS`].
+    pub legs: Vec<PaymentLeg>,
+}
+
+impl Payment {
+    /// Whether every field is within the schema bounds and the phase/status
+    /// combination is coherent.
+    ///
+    /// This is deliberately structural. It does not check tree topology, the
+    /// LCA, address route lengths or the slot arithmetic.
+    pub fn is_valid(&self) -> bool {
+        if !is_lower_hex(&self.id, PAYMENT_ID_HEX_LEN)
+            || !validate_contact(&self.src)
+            || !validate_contact(&self.dst)
+            || !validate_contact(&self.next)
+            || self.amount <= 0
+            || !validate_address(&self.src_addr)
+            || !validate_address(&self.dst_addr)
+            || self.cursor > MAX_PAYMENT_CURSOR
+            || phase_tag(&self.phase).is_none()
+            || status_tag(&self.status).is_none()
+            || fail_tag(self.fail.as_deref()).is_none()
+            || self.legs.len() > MAX_PAYMENT_LEGS
+            || self.legs.iter().enumerate().any(|(index, leg)| {
+                !leg.is_valid()
+                    || self.legs[..index]
+                        .iter()
+                        .any(|other| other.slot == leg.slot)
+            })
+        {
+            return false;
+        }
+
+        // A terminal payment must not point at another actor.
+        if self.phase == "terminal" && !self.next.bytes().all(|byte| byte == b'0') {
+            return false;
+        }
+
+        // Conservative phase/status coherence. Transitional combinations the
+        // protocol needs (`acted` while forward or reverse, `aborted` during a
+        // reverse walk, `superseded` anywhere) are allowed.
+        match self.status.as_str() {
+            "offered" => self.cursor == 0 && self.legs.is_empty(),
+            "complete" | "reversed" | "blocked" => self.phase == "terminal",
+            _ => true,
+        }
+    }
+}
+
+/// The signed payments record. `seq == 0` is the empty record (no settled ids,
+/// no entry, no signature); `seq > 0` with `entry == None` is a legal tombstone.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Payments {
+    pub seq: u64,
+    /// Recently settled payment ids, oldest first. Bounded by
+    /// [`MAX_SETTLED_PAYMENTS`]; each id is 32 lowercase hex characters.
+    #[serde(default)]
+    pub settled: Vec<String>,
+    pub entry: Option<Payment>,
+    pub sig: Option<String>,
+}
+
+impl Payments {
+    /// The initial, empty payments record.
+    pub fn empty() -> Self {
+        Self {
+            seq: 0,
+            settled: Vec::new(),
+            entry: None,
+            sig: None,
+        }
+    }
+
+    /// Whether this record is valid under the owner `key`.
+    ///
+    /// Covers the seq-0 invariant, the settled-id bounds and uniqueness, the
+    /// payment field bounds, the tombstone shape and the Ed25519 signature over
+    /// the canonical bytes.
+    pub fn is_valid(&self, key: &VerifyingKey) -> bool {
+        if self.seq == 0 {
+            return self.settled.is_empty() && self.entry.is_none() && self.sig.is_none();
+        }
+        if self.settled.len() > MAX_SETTLED_PAYMENTS {
+            return false;
+        }
+        for (index, id) in self.settled.iter().enumerate() {
+            if !is_lower_hex(id, PAYMENT_ID_HEX_LEN)
+                || self.settled[..index].iter().any(|other| other == id)
+            {
+                return false;
+            }
+        }
+        if self.entry.as_ref().is_some_and(|entry| !entry.is_valid()) {
+            return false;
+        }
+        let Some(signature) = self.sig.as_deref().and_then(parse_signature) else {
+            return false;
+        };
+        let bytes = payments_signing_bytes(self.seq, &self.settled, self.entry.as_ref());
+        key.verify_strict(&bytes, &signature).is_ok()
+    }
+}
+
+/// Whether `value` is an octal address: at most [`MAX_ADDRESS_DIGITS`] digits,
+/// each `0..=7`. The root address is the empty string.
+pub fn validate_address(value: &str) -> bool {
+    value.len() <= MAX_ADDRESS_DIGITS && value.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn phase_tag(value: &str) -> Option<u8> {
+    match value {
+        "forward" => Some(0),
+        "reverse" => Some(1),
+        "terminal" => Some(2),
+        _ => None,
+    }
+}
+
+fn status_tag(value: &str) -> Option<u8> {
+    match value {
+        "offered" => Some(0),
+        "acted" => Some(1),
+        "complete" => Some(2),
+        "reversing" => Some(3),
+        "reversed" => Some(4),
+        "aborted" => Some(5),
+        "blocked" => Some(6),
+        "superseded" => Some(7),
+        _ => None,
+    }
+}
+
+fn fail_tag(value: Option<&str>) -> Option<u8> {
+    match value {
+        None => Some(0),
+        Some("negative") => Some(1),
+        Some("no-destination") => Some(2),
+        Some("busy") => Some(3),
+        Some("refused") => Some(4),
+        Some("address-mismatch") => Some(5),
+        Some("blocked") => Some(6),
+        Some("superseded") => Some(7),
+        Some(_) => None,
+    }
+}
+
+/// Decode a payment id (32 hex chars) into its raw 16 bytes. Invalid input maps
+/// to all-zero bytes; callers validate before signing or verifying.
+fn payment_id_raw(value: &str) -> [u8; 16] {
+    hex::decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0u8; 16])
+}
+
+/// Decode a 128-hex-character signature into raw bytes. Invalid input maps to
+/// all-zero bytes; callers validate before signing or verifying.
+fn signature_raw(value: &str) -> [u8; 64] {
+    hex::decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0u8; 64])
+}
+
+/// Canonical payments signing bytes, hand-built exactly as specified in
+/// `DESIGN-payments.md`.
+///
+/// ```text
+/// b"number:v4:payments"
+/// || seq: u64 little-endian
+/// || settled_count: u8
+/// || for each settled id: 16 raw bytes
+/// || tag: u8                       // 0 = no entry, 1 = entry
+/// // only when tag == 1:
+/// || id: 16 raw bytes
+/// || src: 32 raw bytes
+/// || dst: 32 raw bytes
+/// || amount: i64 little-endian
+/// || srcAddr_len: u32 LE || srcAddr ASCII bytes
+/// || dstAddr_len: u32 LE || dstAddr ASCII bytes
+/// || cursor: u8
+/// || phase_tag: u8
+/// || status_tag: u8
+/// || fail_tag: u8
+/// || next: 32 raw bytes
+/// || legs_count: u8
+/// || for each leg:
+///      slot: u8 || seq: u64 LE || postValue: i64 LE || sig: 64 raw bytes
+/// ```
+///
+/// A tombstone at `seq > 0` signs `tag = 0`; `seq == 0` is never signed.
+/// Unknown enum strings encode as tag 0; callers validate first.
+pub fn payments_signing_bytes(seq: u64, settled: &[String], entry: Option<&Payment>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256 + settled.len() * 16);
+    out.extend_from_slice(SIGNING_DOMAIN_PAYMENTS);
+    out.extend_from_slice(&seq.to_le_bytes());
+    let settled_count =
+        u8::try_from(settled.len()).expect("settled count is bounded by MAX_SETTLED_PAYMENTS");
+    out.push(settled_count);
+    for id in settled {
+        out.extend_from_slice(&payment_id_raw(id));
+    }
+    match entry {
+        None => out.push(0),
+        Some(payment) => {
+            out.push(1);
+            out.extend_from_slice(&payment_id_raw(&payment.id));
+            out.extend_from_slice(&contact_raw(&payment.src));
+            out.extend_from_slice(&contact_raw(&payment.dst));
+            out.extend_from_slice(&payment.amount.to_le_bytes());
+            push_optional_string(&mut out, Some(&payment.src_addr));
+            push_optional_string(&mut out, Some(&payment.dst_addr));
+            out.push(payment.cursor);
+            out.push(phase_tag(&payment.phase).unwrap_or(0));
+            out.push(status_tag(&payment.status).unwrap_or(0));
+            out.push(fail_tag(payment.fail.as_deref()).unwrap_or(0));
+            out.extend_from_slice(&contact_raw(&payment.next));
+            let leg_count =
+                u8::try_from(payment.legs.len()).expect("leg count is bounded by MAX_PAYMENT_LEGS");
+            out.push(leg_count);
+            for leg in &payment.legs {
+                out.push(leg.slot);
+                out.extend_from_slice(&leg.seq.to_le_bytes());
+                out.extend_from_slice(&leg.post_value.to_le_bytes());
+                out.extend_from_slice(&signature_raw(&leg.sig));
+            }
+        }
+    }
+    out
 }
 
 /// One address-book entry. Both fields are covered by the contacts signature.
@@ -249,22 +562,24 @@ impl Slot {
     }
 }
 
-/// Full contract state (§2).
+/// Full contract state v4 (§2 plus `DESIGN-payments.md`).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateV3 {
+pub struct StateV4 {
     pub v: u8,
     pub parent: Parent,
     pub contacts: Contacts,
+    pub payments: Payments,
     pub slots: [Slot; SLOT_COUNT],
 }
 
-impl StateV3 {
+impl StateV4 {
     /// An all-empty board.
     pub fn empty() -> Self {
         Self {
             v: STATE_VERSION,
             parent: Parent::empty(),
             contacts: Contacts::empty(),
+            payments: Payments::empty(),
             slots: std::array::from_fn(|_| Slot::empty()),
         }
     }
@@ -276,12 +591,12 @@ impl StateV3 {
 
     /// Encode state deterministically as JSON.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StateV3 serialization cannot fail")
+        serde_json::to_vec(self).expect("StateV4 serialization cannot fail")
     }
 
-    /// Validate version, parent, contacts, slot count (enforced by the array
-    /// type), the seq-0 invariants, field bounds and every signature under
-    /// `key`.
+    /// Validate version, parent, contacts, payments, slot count (enforced by
+    /// the array type), the seq-0 invariants, field bounds and every signature
+    /// under `key`.
     pub fn validate(&self, key: &VerifyingKey) -> Result<(), ContractError> {
         if self.v != STATE_VERSION {
             return Err(ContractError::InvalidState);
@@ -290,6 +605,9 @@ impl StateV3 {
             return Err(ContractError::InvalidState);
         }
         if !self.contacts.is_valid(key) {
+            return Err(ContractError::InvalidState);
+        }
+        if !self.payments.is_valid(key) {
             return Err(ContractError::InvalidState);
         }
         for (index, slot) in self.slots.iter().enumerate() {
@@ -305,6 +623,7 @@ impl StateV3 {
     pub fn merge(&mut self, other: &Self) {
         self.parent = merge_parent(&self.parent, &other.parent);
         self.contacts = merge_contacts(&self.contacts, &other.contacts);
+        self.payments = merge_payments(&self.payments, &other.payments);
         for (index, other_slot) in other.slots.iter().enumerate() {
             self.slots[index] = merge_slot(&self.slots[index], other_slot);
         }
@@ -337,6 +656,22 @@ fn merge_contacts(a: &Contacts, b: &Contacts) -> Contacts {
         return b.clone();
     }
     if contacts_signature_bytes(a) >= contacts_signature_bytes(b) {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// Payments merge: higher `seq` wins; on equal `seq` the lexicographically
+/// greater signature bytes win. A higher-seq tombstone clears the payment.
+fn merge_payments(a: &Payments, b: &Payments) -> Payments {
+    if a.seq > b.seq {
+        return a.clone();
+    }
+    if b.seq > a.seq {
+        return b.clone();
+    }
+    if payments_signature_bytes(a) >= payments_signature_bytes(b) {
         a.clone()
     } else {
         b.clone()
@@ -388,6 +723,19 @@ fn contacts_signature_bytes(contacts: &Contacts) -> [u8; 64] {
 /// which the validators reject before merging) compares as all-zero bytes.
 fn parent_signature_bytes(parent: &Parent) -> [u8; 64] {
     parent
+        .sig
+        .as_deref()
+        .and_then(|sig| {
+            let bytes = hex::decode(sig).ok()?;
+            bytes.try_into().ok()
+        })
+        .unwrap_or([0; 64])
+}
+
+/// The payments signature field as bytes. An empty record (and any malformed
+/// sig, which the validators reject before merging) compares as all-zero bytes.
+fn payments_signature_bytes(payments: &Payments) -> [u8; 64] {
+    payments
         .sig
         .as_deref()
         .and_then(|sig| {
@@ -520,19 +868,20 @@ fn parse_signature(sig: &str) -> Option<Signature> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SlotSummary(pub u64, pub String);
 
-/// State summary (§2.6). One parent pair, one contacts pair plus exactly eight
-/// slot pairs; the digest is all-zero for an empty record.
+/// State summary (§2.6). One parent pair, one contacts pair, one payments pair
+/// plus exactly eight slot pairs; the digest is all-zero for an empty record.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub v: u8,
     pub parent: SlotSummary,
     pub contacts: SlotSummary,
+    pub payments: SlotSummary,
     pub slots: [SlotSummary; SLOT_COUNT],
 }
 
 impl Summary {
     /// Build the summary for `state`.
-    pub fn of(state: &StateV3) -> Self {
+    pub fn of(state: &StateV4) -> Self {
         let parent = if state.parent.seq == 0 {
             SlotSummary(0, hex::encode([0u8; 16]))
         } else {
@@ -551,6 +900,16 @@ impl Summary {
             ));
             SlotSummary(state.contacts.seq, hex::encode(digest))
         };
+        let payments = if state.payments.seq == 0 {
+            SlotSummary(0, hex::encode([0u8; 16]))
+        } else {
+            let digest = digest16(&payments_signing_bytes(
+                state.payments.seq,
+                &state.payments.settled,
+                state.payments.entry.as_ref(),
+            ));
+            SlotSummary(state.payments.seq, hex::encode(digest))
+        };
         let slots = std::array::from_fn(|index| {
             let slot = &state.slots[index];
             if slot.seq == 0 {
@@ -564,6 +923,7 @@ impl Summary {
             v: STATE_VERSION,
             parent,
             contacts,
+            payments,
             slots,
         }
     }
@@ -586,6 +946,10 @@ impl Summary {
         }
         let contacts_digest = summary_digest(&summary.contacts.1)?;
         if summary.contacts.0 == 0 && contacts_digest != [0u8; 16] {
+            return Err(ContractError::InvalidDelta);
+        }
+        let payments_digest = summary_digest(&summary.payments.1)?;
+        if summary.payments.0 == 0 && payments_digest != [0u8; 16] {
             return Err(ContractError::InvalidDelta);
         }
         for slot in &summary.slots {
@@ -641,11 +1005,16 @@ impl DeltaSlot {
     }
 }
 
-/// Validated delta payload: the optional parent and contacts records plus
-/// changed slots.
-type ValidatedDelta = (Option<Parent>, Option<Contacts>, Vec<(u8, Slot)>);
+/// Validated delta payload: the optional parent, contacts and payments records
+/// plus changed slots.
+type ValidatedDelta = (
+    Option<Parent>,
+    Option<Contacts>,
+    Option<Payments>,
+    Vec<(u8, Slot)>,
+);
 
-/// State delta (§2.7).
+/// State delta (§2.7, v4).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Delta {
     pub v: u8,
@@ -655,6 +1024,9 @@ pub struct Delta {
     /// `null`/absent when the contacts record is unchanged.
     #[serde(default)]
     pub contacts: Option<Contacts>,
+    /// `null`/absent when the payments record is unchanged.
+    #[serde(default)]
+    pub payments: Option<Payments>,
     pub slots: Vec<DeltaSlot>,
 }
 
@@ -669,8 +1041,9 @@ impl Delta {
         serde_json::from_slice(bytes).map_err(|_| ContractError::InvalidDelta)
     }
 
-    /// Validate the contacts record and every slot under `key`, returning them
-    /// for merging. Validation is all-or-nothing before anything is applied.
+    /// Validate the contacts and payments records and every slot under `key`,
+    /// returning them for merging. Validation is all-or-nothing before anything
+    /// is applied.
     fn validated(&self, key: &VerifyingKey) -> Result<ValidatedDelta, ContractError> {
         if self.v != STATE_VERSION {
             return Err(ContractError::InvalidDelta);
@@ -693,6 +1066,15 @@ impl Delta {
                 Some(contacts.clone())
             }
         };
+        let payments = match &self.payments {
+            None => None,
+            Some(payments) => {
+                if !payments.is_valid(key) {
+                    return Err(ContractError::InvalidDelta);
+                }
+                Some(payments.clone())
+            }
+        };
         let mut slots = Vec::with_capacity(self.slots.len());
         for delta_slot in &self.slots {
             if usize::from(delta_slot.i) >= SLOT_COUNT {
@@ -704,7 +1086,7 @@ impl Delta {
             }
             slots.push((delta_slot.i, slot));
         }
-        Ok((parent, contacts, slots))
+        Ok((parent, contacts, payments, slots))
     }
 }
 
@@ -719,10 +1101,11 @@ fn owner_key(parameters: &Parameters<'_>) -> Result<VerifyingKey, ContractError>
 
 /// Staged, already-validated incoming update.
 enum Incoming {
-    Full(Box<StateV3>),
+    Full(Box<StateV4>),
     Delta {
         parent: Option<Parent>,
         contacts: Option<Contacts>,
+        payments: Option<Box<Payments>>,
         slots: Vec<(u8, Slot)>,
     },
 }
@@ -740,7 +1123,7 @@ impl ContractInterface for NumberContract {
         let Ok(key) = owner_key(&parameters) else {
             return Ok(ValidateResult::Invalid);
         };
-        let Ok(state) = StateV3::decode(state.as_ref()) else {
+        let Ok(state) = StateV4::decode(state.as_ref()) else {
             return Ok(ValidateResult::Invalid);
         };
         match state.validate(&key) {
@@ -758,7 +1141,7 @@ impl ContractInterface for NumberContract {
             return Ok(UpdateModification::valid(state));
         }
         let key = owner_key(&parameters)?;
-        let mut current = StateV3::decode(state.as_ref())?;
+        let mut current = StateV4::decode(state.as_ref())?;
         current.validate(&key)?;
 
         // Stage and validate everything before mutating. A single invalid
@@ -768,16 +1151,17 @@ impl ContractInterface for NumberContract {
         for item in &data {
             match item {
                 UpdateData::State(incoming) => {
-                    let incoming = StateV3::decode(incoming.as_ref())?;
+                    let incoming = StateV4::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                 }
                 UpdateData::Delta(delta) => {
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, slots) = delta.validated(&key)?;
+                    let (parent, contacts, payments, slots) = delta.validated(&key)?;
                     staged.push(Incoming::Delta {
                         parent,
                         contacts,
+                        payments: payments.map(Box::new),
                         slots,
                     });
                 }
@@ -785,14 +1169,15 @@ impl ContractInterface for NumberContract {
                     state: incoming,
                     delta,
                 } => {
-                    let incoming = StateV3::decode(incoming.as_ref())?;
+                    let incoming = StateV4::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, slots) = delta.validated(&key)?;
+                    let (parent, contacts, payments, slots) = delta.validated(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                     staged.push(Incoming::Delta {
                         parent,
                         contacts,
+                        payments: payments.map(Box::new),
                         slots,
                     });
                 }
@@ -807,6 +1192,7 @@ impl ContractInterface for NumberContract {
                 Incoming::Delta {
                     parent,
                     contacts,
+                    payments,
                     slots,
                 } => {
                     if let Some(parent) = parent {
@@ -814,6 +1200,9 @@ impl ContractInterface for NumberContract {
                     }
                     if let Some(contacts) = contacts {
                         current.contacts = merge_contacts(&current.contacts, &contacts);
+                    }
+                    if let Some(payments) = payments {
+                        current.payments = merge_payments(&current.payments, &payments);
                     }
                     for (index, slot) in slots {
                         let merged = merge_slot(&current.slots[usize::from(index)], &slot);
@@ -830,7 +1219,7 @@ impl ContractInterface for NumberContract {
         _parameters: Parameters<'static>,
         state: State<'static>,
     ) -> Result<StateSummary<'static>, ContractError> {
-        let state = StateV3::decode(state.as_ref())?;
+        let state = StateV4::decode(state.as_ref())?;
         Ok(StateSummary::from(Summary::of(&state).to_bytes()))
     }
 
@@ -839,7 +1228,7 @@ impl ContractInterface for NumberContract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        let state = StateV3::decode(state.as_ref())?;
+        let state = StateV4::decode(state.as_ref())?;
         // An empty summary is what a brand-new subscriber presents: it holds
         // nothing, so the full board is the delta. Treat an undecodable summary
         // the same way (send everything) rather than failing — a failed delta
@@ -887,6 +1276,25 @@ impl ContractInterface for NumberContract {
             }
         };
 
+        let local_payments_digest = if state.payments.seq == 0 {
+            [0u8; 16]
+        } else {
+            digest16(&payments_signing_bytes(
+                state.payments.seq,
+                &state.payments.settled,
+                state.payments.entry.as_ref(),
+            ))
+        };
+        let include_payments = match &summary {
+            None => state.payments.seq > 0,
+            Some(summary) => {
+                let remote_digest = summary_digest(&summary.payments.1)?;
+                state.payments.seq > summary.payments.0
+                    || (state.payments.seq == summary.payments.0
+                        && local_payments_digest != remote_digest)
+            }
+        };
+
         let mut slots = Vec::new();
         for (index, slot) in state.slots.iter().enumerate() {
             let include = match &summary {
@@ -907,7 +1315,7 @@ impl ContractInterface for NumberContract {
             }
         }
 
-        if !include_parent && !include_contacts && slots.is_empty() {
+        if !include_parent && !include_contacts && !include_payments && slots.is_empty() {
             // The unambiguous "converged" answer (§2.7).
             return Ok(StateDelta::from(vec![]));
         }
@@ -920,6 +1328,11 @@ impl ContractInterface for NumberContract {
             },
             contacts: if include_contacts {
                 Some(state.contacts.clone())
+            } else {
+                None
+            },
+            payments: if include_payments {
+                Some(state.payments.clone())
             } else {
                 None
             },
@@ -938,6 +1351,9 @@ mod tests {
     const TEST_SEED: [u8; 32] = [7u8; 32];
     const CONTACT_11: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CONTACT_22: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const CONTACT_33: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const ZERO_USER_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const PAYMENT_ID: &str = "0123456789abcdef0123456789abcdef";
 
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&TEST_SEED)
@@ -977,27 +1393,98 @@ mod tests {
         }
     }
 
+    fn signed_payments(key: &SigningKey, seq: u64, entry: Option<Payment>) -> Payments {
+        signed_payments_with_settled(key, seq, Vec::new(), entry)
+    }
+
+    fn signed_payments_with_settled(
+        key: &SigningKey,
+        seq: u64,
+        settled: Vec<String>,
+        entry: Option<Payment>,
+    ) -> Payments {
+        let signature = key.sign(&payments_signing_bytes(seq, &settled, entry.as_ref()));
+        Payments {
+            seq,
+            settled,
+            entry,
+            sig: Some(hex::encode(signature.to_bytes())),
+        }
+    }
+
+    fn payment_id(tag: u8) -> String {
+        hex::encode([tag; 16])
+    }
+
+    fn sample_leg(slot: u8, seq: u64, post_value: i64) -> PaymentLeg {
+        PaymentLeg {
+            slot,
+            seq,
+            post_value,
+            sig: "5a".repeat(64),
+        }
+    }
+
+    fn sample_payment() -> Payment {
+        Payment {
+            id: PAYMENT_ID.into(),
+            src: CONTACT_11.into(),
+            dst: CONTACT_22.into(),
+            amount: 1250,
+            src_addr: "52".into(),
+            dst_addr: "31".into(),
+            cursor: 2,
+            phase: "forward".into(),
+            status: "acted".into(),
+            next: CONTACT_33.into(),
+            fail: None,
+            legs: vec![sample_leg(1, 4, 3750)],
+        }
+    }
+
+    fn terminal_payment() -> Payment {
+        Payment {
+            id: PAYMENT_ID.into(),
+            src: CONTACT_11.into(),
+            dst: CONTACT_22.into(),
+            amount: 1250,
+            src_addr: "52".into(),
+            dst_addr: "31".into(),
+            cursor: 5,
+            phase: "terminal".into(),
+            status: "complete".into(),
+            next: ZERO_USER_ID.into(),
+            fail: None,
+            legs: vec![sample_leg(1, 4, 3750), sample_leg(3, 5, -1250)],
+        }
+    }
+
+    fn signed_tombstone(key: &SigningKey, seq: u64) -> Payments {
+        signed_payments(key, seq, None)
+    }
+
     fn params(key: &SigningKey) -> Parameters<'static> {
         Parameters::from(key.verifying_key().to_bytes().to_vec())
     }
 
-    fn state_of(slots: Vec<Slot>, contacts: Contacts) -> StateV3 {
+    fn state_of(slots: Vec<Slot>, contacts: Contacts) -> StateV4 {
         let slots: [Slot; SLOT_COUNT] = slots
             .try_into()
             .expect("test helper always supplies eight slots");
-        StateV3 {
+        StateV4 {
             v: STATE_VERSION,
             parent: Parent::empty(),
             contacts,
+            payments: Payments::empty(),
             slots,
         }
     }
 
-    fn state_with_slots(slots: Vec<Slot>) -> StateV3 {
+    fn state_with_slots(slots: Vec<Slot>) -> StateV4 {
         state_of(slots, Contacts::empty())
     }
 
-    fn merged(a: &StateV3, b: &StateV3) -> StateV3 {
+    fn merged(a: &StateV4, b: &StateV4) -> StateV4 {
         let mut result = a.clone();
         result.merge(b);
         result
@@ -1012,8 +1499,8 @@ mod tests {
         }
     }
 
-    fn populated_state(key: &SigningKey) -> StateV3 {
-        let mut state = StateV3::empty();
+    fn populated_state(key: &SigningKey) -> StateV4 {
+        let mut state = StateV4::empty();
         state.parent = signed_parent(key, 2, Some(CONTACT_22));
         state.contacts = signed_contacts(key, 1, vec![contact("Alice", CONTACT_11)]);
         state.slots[2] = signed_slot(key, 2, 4, Some(sample_entry()));
@@ -1108,14 +1595,63 @@ mod tests {
         assert_eq!(parent_signing_bytes(0, None), zero);
     }
 
-    /// Migrations safety: the v3 client upgrades a v2 state to v3 by adding an
-    /// empty parent. The v2 slot/contacts signing domains are unchanged, so the
-    /// old signatures must still validate under a v3 contract.
     #[test]
-    fn v2_signed_slots_and_contacts_validate_with_an_empty_v3_parent() {
+    fn golden_payments_signing_bytes_are_pinned() {
+        let payment = sample_payment();
+        let bytes = payments_signing_bytes(6, &[], Some(&payment));
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76343a7061796d656e7473060000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+        assert_eq!(
+            hex::encode(digest16(&bytes)),
+            "325c8d0a9c2b51ce5f2069e724b39ad3"
+        );
+
+        let two_leg = terminal_payment();
+        let bytes = payments_signing_bytes(7, &[], Some(&two_leg));
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76343a7061796d656e7473070000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+        assert_eq!(
+            hex::encode(digest16(&bytes)),
+            "9b1419ef01132905668a238ad95e3456"
+        );
+
+        // A non-empty settled list is covered before the entry tag.
+        let settled = vec![payment_id(0xaa), payment_id(0xbb)];
+        let bytes = payments_signing_bytes(9, &settled, Some(&payment));
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76343a7061796d656e7473090000000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+        assert_eq!(
+            hex::encode(digest16(&bytes)),
+            "9c92f94d2c39c9ad770814d93488de0e"
+        );
+
+        // A tombstone at seq > 0 signs tag 0 (settled count 0).
+        let tombstone = payments_signing_bytes(8, &[], None);
+        assert_eq!(
+            hex::encode(&tombstone),
+            "6e756d6265723a76343a7061796d656e747308000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(digest16(&tombstone)),
+            "841f50504a053591eae8ebe1c51035c1"
+        );
+    }
+
+    /// Migrations safety: the client upgrades a v2 state to v4 by adding an
+    /// empty parent and an empty payments record. The v2 slot/contacts signing
+    /// domains are unchanged, so the old signatures must still validate under a
+    /// v4 contract.
+    #[test]
+    fn v2_signed_slots_and_contacts_validate_with_an_empty_v4_parent() {
         let key = test_key();
         let verifying = key.verifying_key();
-        let mut state = StateV3::empty();
+        let mut state = StateV4::empty();
         // Produced by the v2 delegate for seed [7u8; 32]:
         // contacts seq 1 `Alice`, slot 3 seq 7 value 12.
         state.contacts = Contacts {
@@ -1140,7 +1676,7 @@ mod tests {
             ),
         };
 
-        assert_eq!(state.v, 3);
+        assert_eq!(state.v, 4);
         assert_eq!(state.parent, Parent::empty());
         assert!(state.validate(&verifying).is_ok());
         assert_eq!(
@@ -1694,7 +2230,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV3::decode(updated.as_ref()).unwrap().parent,
+            StateV4::decode(updated.as_ref()).unwrap().parent,
             newer.parent
         );
 
@@ -1704,6 +2240,7 @@ mod tests {
             v: STATE_VERSION,
             parent: Some(parent.clone()),
             contacts: None,
+            payments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
@@ -1713,13 +2250,14 @@ mod tests {
         )
         .unwrap()
         .unwrap_valid();
-        assert_eq!(StateV3::decode(updated.as_ref()).unwrap().parent, parent);
+        assert_eq!(StateV4::decode(updated.as_ref()).unwrap().parent, parent);
 
         // Stale parent updates lose the merge without an error.
         let stale = Delta {
             v: STATE_VERSION,
             parent: Some(signed_parent(&key, 2, Some(CONTACT_22))),
             contacts: None,
+            payments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
@@ -1730,7 +2268,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV3::decode(updated.as_ref()).unwrap().parent,
+            StateV4::decode(updated.as_ref()).unwrap().parent,
             base.parent
         );
     }
@@ -1799,7 +2337,7 @@ mod tests {
     #[test]
     fn validate_state_rejects_wrong_slot_count() {
         let key = test_key();
-        let json = r#"{"v":3,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null}]}"#;
+        let json = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"payments":{"seq":0,"entry":null,"sig":null},"slots":[{"seq":0,"entry":null,"sig":null}]}"#;
         assert_eq!(
             NumberContract::validate_state(
                 params(&key),
@@ -1814,7 +2352,7 @@ mod tests {
     #[test]
     fn update_state_merges_full_state_slot_wise() {
         let key = test_key();
-        let empty = StateV3::empty();
+        let empty = StateV4::empty();
         let incoming = populated_state(&key);
         let updated = NumberContract::update_state(
             params(&key),
@@ -1830,7 +2368,7 @@ mod tests {
     fn update_state_rejects_invalid_update_atomically() {
         let key = test_key();
         let valid = populated_state(&key);
-        let mut invalid = StateV3::empty();
+        let mut invalid = StateV4::empty();
         // Slot 0 is valid, slot 1 is tampered; the whole update must fail and
         // must not half-apply slot 0.
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
@@ -1840,7 +2378,7 @@ mod tests {
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -1852,14 +2390,14 @@ mod tests {
     #[test]
     fn update_state_rejects_invalid_contacts_atomically() {
         let key = test_key();
-        let mut invalid = StateV3::empty();
+        let mut invalid = StateV4::empty();
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
         invalid.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
         invalid.contacts.sig = Some(hex::encode([0u8; 64]));
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -1875,6 +2413,7 @@ mod tests {
             v: STATE_VERSION,
             parent: None,
             contacts: None,
+            payments: None,
             slots: vec![
                 DeltaSlot::from_slot(0, &first),
                 DeltaSlot::from_slot(1, &second),
@@ -1882,7 +2421,7 @@ mod tests {
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -1897,11 +2436,12 @@ mod tests {
             v: STATE_VERSION,
             parent: None,
             contacts: Some(contacts),
+            payments: None,
             slots: vec![],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -1959,7 +2499,7 @@ mod tests {
         let key = test_key();
         let mut a = populated_state(&key);
         a.contacts = signed_contacts(&key, 5, vec![contact("Alice", CONTACT_11)]);
-        let mut b = StateV3::empty();
+        let mut b = StateV4::empty();
         b.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
         b.contacts = signed_contacts(&key, 2, vec![contact("Bob", CONTACT_22)]);
 
@@ -1973,7 +2513,7 @@ mod tests {
 
     // ---- summary and delta ------------------------------------------------
 
-    fn summarize(state: &StateV3) -> StateSummary<'static> {
+    fn summarize(state: &StateV4) -> StateSummary<'static> {
         NumberContract::summarize_state(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -1981,7 +2521,7 @@ mod tests {
         .unwrap()
     }
 
-    fn delta_from(state: &StateV3, summary: &StateSummary<'_>) -> StateDelta<'static> {
+    fn delta_from(state: &StateV4, summary: &StateSummary<'_>) -> StateDelta<'static> {
         NumberContract::get_state_delta(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -1992,8 +2532,8 @@ mod tests {
 
     #[test]
     fn initial_state_json_is_the_empty_board() {
-        let initial: StateV3 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
-        assert_eq!(initial, StateV3::empty());
+        let initial: StateV4 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
+        assert_eq!(initial, StateV4::empty());
     }
 
     #[test]
@@ -2008,6 +2548,10 @@ mod tests {
         assert_eq!(summary["parent"][1].as_str().unwrap().len(), 32);
         assert_eq!(summary["contacts"][0], 1);
         assert_eq!(summary["contacts"][1].as_str().unwrap().len(), 32);
+        assert_eq!(
+            summary["payments"],
+            serde_json::json!([0, "00000000000000000000000000000000"])
+        );
         let pairs = summary["slots"].as_array().unwrap();
         assert_eq!(pairs.len(), SLOT_COUNT);
         assert_eq!(
@@ -2019,18 +2563,20 @@ mod tests {
         assert_eq!(digest.len(), 32);
         assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
 
-        let mut delta_state = StateV3::empty();
+        let mut delta_state = StateV4::empty();
         delta_state.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
         delta_state.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
         let delta = Delta {
             v: STATE_VERSION,
             parent: None,
             contacts: Some(delta_state.contacts.clone()),
+            payments: None,
             slots: vec![DeltaSlot::from_slot(2, &delta_state.slots[2])],
         };
         let decoded: serde_json::Value = serde_json::from_slice(&delta.to_bytes()).unwrap();
         assert_eq!(decoded["v"], STATE_VERSION);
         assert!(decoded["parent"].is_null());
+        assert!(decoded["payments"].is_null());
         assert_eq!(decoded["contacts"]["seq"], 3);
         assert_eq!(decoded["contacts"]["entries"][0]["label"], "Alice");
         assert_eq!(decoded["contacts"]["entries"][0]["userId"], CONTACT_11);
@@ -2062,7 +2608,7 @@ mod tests {
     #[test]
     fn delta_summary_round_trip() {
         let key = test_key();
-        let from = StateV3::empty();
+        let from = StateV4::empty();
         let to = populated_state(&key);
 
         let delta = delta_from(&to, &summarize(&from));
@@ -2087,7 +2633,7 @@ mod tests {
     #[test]
     fn contacts_only_delta_round_trips() {
         let key = test_key();
-        let mut before = StateV3::empty();
+        let mut before = StateV4::empty();
         before.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
         let mut after = before.clone();
         after.contacts = signed_contacts(
@@ -2114,7 +2660,7 @@ mod tests {
     #[test]
     fn summary_includes_parent_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV3::empty();
+        let empty = StateV4::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.parent.0, 0);
         assert_eq!(summary.parent.1, "00000000000000000000000000000000");
@@ -2133,7 +2679,7 @@ mod tests {
     #[test]
     fn parent_delta_round_trips_set_and_clear() {
         let key = test_key();
-        let before = StateV3::empty();
+        let before = StateV4::empty();
         let mut after = before.clone();
         after.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
@@ -2184,9 +2730,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_parent_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV3::empty();
+        let mut local = StateV4::empty();
         local.parent = signed_parent(&key, 3, Some(CONTACT_11));
-        let mut remote = StateV3::empty();
+        let mut remote = StateV4::empty();
         remote.parent = signed_parent(&key, 3, Some(CONTACT_22));
 
         let delta = delta_from(&local, &summarize(&remote));
@@ -2197,7 +2743,7 @@ mod tests {
     #[test]
     fn empty_summary_includes_parent() {
         let key = test_key();
-        let mut state = StateV3::empty();
+        let mut state = StateV4::empty();
         state.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
         let delta = delta_from(&state, &StateSummary::from(vec![]));
@@ -2225,9 +2771,9 @@ mod tests {
     #[test]
     fn get_state_delta_equals_seq_with_different_digest_heals() {
         let key = test_key();
-        let mut local = StateV3::empty();
+        let mut local = StateV4::empty();
         local.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
-        let mut remote_summary_state = StateV3::empty();
+        let mut remote_summary_state = StateV4::empty();
         // Same seq, different signed record (owner equivocation).
         remote_summary_state.contacts = signed_contacts(&key, 3, vec![contact("Bob", CONTACT_22)]);
 
@@ -2265,7 +2811,7 @@ mod tests {
 
         let synced = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::Delta(delta)],
         )
         .unwrap()
@@ -2291,7 +2837,7 @@ mod tests {
     #[test]
     fn tombstone_round_trips_through_delta() {
         let key = test_key();
-        let mut before = StateV3::empty();
+        let mut before = StateV4::empty();
         before.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
 
         let mut after = before.clone();
@@ -2384,11 +2930,12 @@ mod tests {
             v: STATE_VERSION,
             parent: None,
             contacts: None,
+            payments: None,
             slots: vec![DeltaSlot::from_slot(8, &slot)],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV3::empty().to_bytes()),
+            State::from(StateV4::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2409,20 +2956,593 @@ mod tests {
 
         for bad in [
             serde_json::json!({
-                "v": 3,
+                "v": 4,
                 "parent": [0, "11111111111111111111111111111111"],
                 "contacts": [0, "00000000000000000000000000000000"],
+                "payments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 3,
+                "v": 4,
                 "parent": [0, "00000000000000000000000000000000"],
                 "contacts": [0, "11111111111111111111111111111111"],
+                "payments": [0, "00000000000000000000000000000000"],
+                "slots": zero_slots.clone(),
+            }),
+            serde_json::json!({
+                "v": 4,
+                "parent": [0, "00000000000000000000000000000000"],
+                "contacts": [0, "00000000000000000000000000000000"],
+                "payments": [0, "11111111111111111111111111111111"],
                 "slots": zero_slots,
             }),
         ] {
             assert!(Summary::decode(bad.to_string().as_bytes()).is_err());
         }
+    }
+
+    // ---- payments ---------------------------------------------------------
+
+    fn assert_payment_rejected(mutate: impl FnOnce(&mut Payment)) {
+        let key = test_key();
+        let mut payment = sample_payment();
+        mutate(&mut payment);
+        assert!(
+            !signed_payments(&key, 1, Some(payment)).is_valid(&key.verifying_key()),
+            "invalid payment must be rejected"
+        );
+    }
+
+    #[test]
+    fn payments_settled_field_is_optional_on_the_wire() {
+        // A v3-upgrade record written before `settled` existed still decodes.
+        let decoded: Payments =
+            serde_json::from_str(r#"{"seq":1,"entry":null,"sig":null}"#).unwrap();
+        assert!(decoded.settled.is_empty());
+
+        // The canonical v4 encoding always writes the list.
+        assert_eq!(
+            serde_json::to_string(&Payments::empty()).unwrap(),
+            r#"{"seq":0,"settled":[],"entry":null,"sig":null}"#
+        );
+    }
+
+    #[test]
+    fn payments_empty_and_tombstone_are_valid() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        assert!(Payments::empty().is_valid(&verifying));
+
+        let tombstone = signed_tombstone(&key, 1);
+        assert!(tombstone.entry.is_none());
+        assert!(tombstone.is_valid(&verifying));
+
+        let active = signed_payments(&key, 1, Some(sample_payment()));
+        assert!(active.is_valid(&verifying));
+
+        // Any field change invalidates the signature.
+        let mut wrong = active.clone();
+        let mut sig = hex::decode(wrong.sig.as_ref().unwrap()).unwrap();
+        sig[0] ^= 1;
+        wrong.sig = Some(hex::encode(sig));
+        assert!(!wrong.is_valid(&verifying));
+    }
+
+    #[test]
+    fn payments_seq_zero_requires_null_entry_and_signature() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        let with_entry = Payments {
+            seq: 0,
+            settled: Vec::new(),
+            entry: Some(sample_payment()),
+            sig: None,
+        };
+        assert!(!with_entry.is_valid(&verifying));
+
+        let stray_signature = Payments {
+            seq: 0,
+            settled: Vec::new(),
+            entry: None,
+            sig: Some(hex::encode([1u8; 64])),
+        };
+        assert!(!stray_signature.is_valid(&verifying));
+    }
+
+    #[test]
+    fn payment_field_bounds_are_enforced() {
+        // Id, owners and next are hex-shaped.
+        assert_payment_rejected(|payment| {
+            payment.id = "0123456789abcdef0123456789abcde".into();
+        });
+        assert_payment_rejected(|payment| {
+            payment.id = "0123456789ABCDEF0123456789abcdef".into();
+        });
+        assert_payment_rejected(|payment| {
+            payment.src = "11".repeat(31);
+        });
+        assert_payment_rejected(|payment| {
+            payment.dst = "22".repeat(31) + "AA";
+        });
+        assert_payment_rejected(|payment| {
+            payment.next = String::new();
+        });
+
+        // Amounts are positive.
+        assert_payment_rejected(|payment| payment.amount = 0);
+        assert_payment_rejected(|payment| payment.amount = -1);
+
+        // Addresses are octal and at most 32 digits.
+        assert_payment_rejected(|payment| payment.src_addr = "8".into());
+        assert_payment_rejected(|payment| payment.src_addr = "0".repeat(MAX_ADDRESS_DIGITS + 1));
+        assert_payment_rejected(|payment| payment.dst_addr = "a".into());
+        assert_payment_rejected(|payment| payment.dst_addr = "7".repeat(MAX_ADDRESS_DIGITS + 1));
+
+        // Cursor and enum strings.
+        assert_payment_rejected(|payment| payment.cursor = MAX_PAYMENT_CURSOR + 1);
+        assert_payment_rejected(|payment| payment.phase = "sideways".into());
+        assert_payment_rejected(|payment| payment.status = "pending".into());
+        assert_payment_rejected(|payment| payment.fail = Some("oops".into()));
+
+        // Legs: at most two, unique slots, positive seq, 128 lowercase hex sig.
+        assert_payment_rejected(|payment| {
+            payment.legs = vec![
+                sample_leg(0, 1, 1),
+                sample_leg(1, 2, 2),
+                sample_leg(2, 3, 3),
+            ];
+        });
+        assert_payment_rejected(|payment| {
+            payment.legs = vec![sample_leg(1, 1, 1), sample_leg(1, 2, 2)];
+        });
+        assert_payment_rejected(|payment| {
+            payment.legs = vec![sample_leg(1, 0, 1)];
+        });
+        assert_payment_rejected(|payment| {
+            payment.legs = vec![PaymentLeg {
+                slot: 1,
+                seq: 1,
+                post_value: 1,
+                sig: "5A".repeat(64),
+            }];
+        });
+        assert_payment_rejected(|payment| {
+            payment.legs = vec![PaymentLeg {
+                slot: 1,
+                seq: 1,
+                post_value: 1,
+                sig: "5a".repeat(63),
+            }];
+        });
+
+        // Terminal payments point at nobody.
+        assert_payment_rejected(|payment| {
+            payment.phase = "terminal".into();
+            payment.status = "complete".into();
+        });
+
+        // Conservative phase/status coherence.
+        assert_payment_rejected(|payment| {
+            payment.status = "offered".into();
+            payment.cursor = 1;
+        });
+        assert_payment_rejected(|payment| {
+            payment.status = "offered".into();
+        });
+        assert_payment_rejected(|payment| {
+            payment.status = "complete".into();
+        });
+        assert_payment_rejected(|payment| {
+            payment.status = "reversed".into();
+        });
+        assert_payment_rejected(|payment| {
+            payment.status = "blocked".into();
+        });
+    }
+
+    #[test]
+    fn payment_protocol_boundaries_are_accepted() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        // Longest address, highest cursor, explicit failure reason.
+        let boundary = Payment {
+            src_addr: "7".repeat(MAX_ADDRESS_DIGITS),
+            dst_addr: "0".repeat(MAX_ADDRESS_DIGITS),
+            cursor: MAX_PAYMENT_CURSOR,
+            status: "reversing".into(),
+            phase: "reverse".into(),
+            fail: Some("address-mismatch".into()),
+            ..sample_payment()
+        };
+        assert!(signed_payments(&key, 1, Some(boundary)).is_valid(&verifying));
+
+        // An aborted intent at cursor 0 may have no legs.
+        let aborted = Payment {
+            cursor: 0,
+            phase: "reverse".into(),
+            status: "aborted".into(),
+            fail: Some("negative".into()),
+            legs: Vec::new(),
+            ..sample_payment()
+        };
+        assert!(signed_payments(&key, 1, Some(aborted)).is_valid(&verifying));
+
+        // The two-leg LCA form is valid.
+        assert!(signed_payments(&key, 1, Some(terminal_payment())).is_valid(&verifying));
+    }
+
+    #[test]
+    fn payments_merge_uses_seq_then_signature_bytes() {
+        let key = test_key();
+        let one_leg = signed_payments(&key, 1, Some(sample_payment()));
+        let two_legs = signed_payments(&key, 1, Some(terminal_payment()));
+        let expected = if payments_signature_bytes(&one_leg) >= payments_signature_bytes(&two_legs)
+        {
+            one_leg.clone()
+        } else {
+            two_legs.clone()
+        };
+        assert_eq!(merge_payments(&one_leg, &two_legs), expected);
+        assert_eq!(merge_payments(&two_legs, &one_leg), expected);
+
+        // Idempotent.
+        assert_eq!(merge_payments(&one_leg, &one_leg), one_leg);
+
+        // Higher seq wins, including a clearing tombstone.
+        let newer = signed_payments(&key, 2, Some(terminal_payment()));
+        assert_eq!(merge_payments(&one_leg, &newer), newer);
+        assert_eq!(merge_payments(&newer, &one_leg), newer);
+
+        let cleared = signed_tombstone(&key, 3);
+        assert_eq!(cleared.entry, None);
+        assert_eq!(merge_payments(&newer, &cleared), cleared);
+        assert_eq!(merge_payments(&cleared, &newer), cleared);
+        assert_eq!(merge_payments(&cleared, &cleared), cleared);
+    }
+
+    #[test]
+    fn payments_settled_bounds_and_uniqueness_are_enforced() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        let at_limit: Vec<String> = (0..MAX_SETTLED_PAYMENTS)
+            .map(|index| payment_id(index as u8))
+            .collect();
+        assert!(
+            signed_payments_with_settled(&key, 1, at_limit.clone(), Some(sample_payment()))
+                .is_valid(&verifying)
+        );
+
+        let mut too_many = at_limit;
+        too_many.push(payment_id(0xfe));
+        assert!(
+            !signed_payments_with_settled(&key, 1, too_many, Some(sample_payment()))
+                .is_valid(&verifying)
+        );
+
+        let duplicate = vec![payment_id(1), payment_id(1)];
+        assert!(
+            !signed_payments_with_settled(&key, 1, duplicate, Some(sample_payment()))
+                .is_valid(&verifying)
+        );
+
+        for bad in [
+            String::new(),
+            "aa".repeat(15),
+            "aa".repeat(17),
+            "AA".repeat(16),
+            "zz".repeat(16),
+        ] {
+            assert!(
+                !signed_payments_with_settled(&key, 1, vec![bad], Some(sample_payment()))
+                    .is_valid(&verifying),
+                "malformed settled id must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn payments_seq_zero_requires_empty_settled() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        let record = Payments {
+            seq: 0,
+            settled: vec![payment_id(1)],
+            entry: None,
+            sig: None,
+        };
+        assert!(!record.is_valid(&verifying));
+    }
+
+    #[test]
+    fn settled_participates_in_the_payments_signature() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        let record =
+            signed_payments_with_settled(&key, 4, vec![payment_id(1)], Some(sample_payment()));
+        assert!(record.is_valid(&verifying));
+
+        let mut replaced = record.clone();
+        replaced.settled = vec![payment_id(2)];
+        assert!(!replaced.is_valid(&verifying));
+
+        let mut cleared = record.clone();
+        cleared.settled.clear();
+        assert!(!cleared.is_valid(&verifying));
+
+        let mut reordered = signed_payments_with_settled(
+            &key,
+            4,
+            vec![payment_id(1), payment_id(2)],
+            Some(sample_payment()),
+        );
+        assert!(reordered.is_valid(&verifying));
+        reordered.settled.swap(0, 1);
+        assert!(!reordered.is_valid(&verifying));
+    }
+
+    #[test]
+    fn payments_merge_moves_settled_with_the_whole_record() {
+        let key = test_key();
+        let older =
+            signed_payments_with_settled(&key, 1, vec![payment_id(1)], Some(sample_payment()));
+        let newer = signed_payments_with_settled(&key, 2, vec![payment_id(1), payment_id(2)], None);
+
+        // A higher-seq tombstone clears the entry but keeps its settled ids.
+        assert_eq!(merge_payments(&older, &newer), newer);
+        assert_eq!(merge_payments(&newer, &older), newer);
+        assert_eq!(newer.entry, None);
+        assert_eq!(newer.settled, vec![payment_id(1), payment_id(2)]);
+
+        // Equal seq resolves by signature bytes, and the winner's settled list
+        // travels with it.
+        let a = signed_payments_with_settled(&key, 3, vec![payment_id(3)], Some(sample_payment()));
+        let b =
+            signed_payments_with_settled(&key, 3, vec![payment_id(4)], Some(terminal_payment()));
+        let expected = if payments_signature_bytes(&a) >= payments_signature_bytes(&b) {
+            a.clone()
+        } else {
+            b.clone()
+        };
+        assert_eq!(merge_payments(&a, &b), expected);
+        assert_eq!(merge_payments(&b, &a), expected);
+        assert_eq!(expected.settled.len(), 1);
+    }
+
+    #[test]
+    fn tombstone_can_retain_settled_ids() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        let settled = vec![payment_id(1), payment_id(2)];
+        let record = signed_payments_with_settled(&key, 5, settled.clone(), None);
+        assert!(record.entry.is_none());
+        assert_eq!(record.settled, settled);
+        assert!(record.is_valid(&verifying));
+    }
+
+    #[test]
+    fn payments_delta_round_trips_settled() {
+        let key = test_key();
+        let before = StateV4::empty();
+        let mut after = before.clone();
+        after.payments = signed_payments_with_settled(
+            &key,
+            1,
+            vec![payment_id(0xaa), payment_id(0xbb)],
+            Some(sample_payment()),
+        );
+
+        let delta = delta_from(&after, &summarize(&before));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&after.payments));
+        assert!(parsed.slots.is_empty());
+
+        let synced = NumberContract::update_state(
+            params(&key),
+            State::from(before.to_bytes()),
+            vec![UpdateData::Delta(delta)],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(synced.as_ref(), after.to_bytes().as_slice());
+        assert_eq!(delta_from(&after, &summarize(&after)).size(), 0);
+
+        // Same seq and entry but different settled ids is a different signed
+        // record, so the summary digest must diverge and heals through a delta.
+        let mut diverged = after.clone();
+        diverged.payments =
+            signed_payments_with_settled(&key, 1, vec![payment_id(0xaa)], Some(sample_payment()));
+        assert_ne!(
+            Summary::of(&after).payments,
+            Summary::of(&diverged).payments
+        );
+        let heal = delta_from(&diverged, &summarize(&after));
+        let parsed = Delta::decode(heal.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&diverged.payments));
+    }
+
+    #[test]
+    fn update_state_merges_payments_from_full_state_and_delta() {
+        let key = test_key();
+        let base = populated_state(&key);
+        let incoming = signed_payments(&key, 4, Some(sample_payment()));
+
+        let mut full = base.clone();
+        full.payments = incoming.clone();
+        let updated = NumberContract::update_state(
+            params(&key),
+            State::from(base.to_bytes()),
+            vec![UpdateData::State(State::from(full.to_bytes()))],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(
+            StateV4::decode(updated.as_ref()).unwrap().payments,
+            incoming
+        );
+
+        let delta_payments = signed_payments(&key, 5, Some(terminal_payment()));
+        let delta = Delta {
+            v: STATE_VERSION,
+            parent: None,
+            contacts: None,
+            payments: Some(delta_payments.clone()),
+            slots: vec![],
+        };
+        let updated = NumberContract::update_state(
+            params(&key),
+            State::from(StateV4::decode(updated.as_ref()).unwrap().to_bytes()),
+            vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(
+            StateV4::decode(updated.as_ref()).unwrap().payments,
+            delta_payments
+        );
+
+        // A stale record loses the merge without an error.
+        let stale = Delta {
+            v: STATE_VERSION,
+            parent: None,
+            contacts: None,
+            payments: Some(signed_payments(&key, 2, Some(sample_payment()))),
+            slots: vec![],
+        };
+        let updated = NumberContract::update_state(
+            params(&key),
+            State::from(StateV4::decode(updated.as_ref()).unwrap().to_bytes()),
+            vec![UpdateData::Delta(StateDelta::from(stale.to_bytes()))],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(
+            StateV4::decode(updated.as_ref()).unwrap().payments,
+            delta_payments
+        );
+    }
+
+    #[test]
+    fn summary_includes_payments_digest_and_zeros_when_empty() {
+        let key = test_key();
+        let empty = StateV4::empty();
+        let summary = Summary::of(&empty);
+        assert_eq!(summary.payments.0, 0);
+        assert_eq!(summary.payments.1, "0".repeat(32));
+
+        let mut state = empty;
+        state.payments = signed_payments(&key, 2, Some(sample_payment()));
+        let summary = Summary::of(&state);
+        assert_eq!(summary.payments.0, 2);
+        assert_eq!(
+            summary.payments.1,
+            hex::encode(digest16(&payments_signing_bytes(
+                2,
+                &state.payments.settled,
+                state.payments.entry.as_ref()
+            )))
+        );
+
+        let decoded = Summary::decode(&summary.to_bytes()).unwrap();
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn payments_delta_round_trips_and_clear() {
+        let key = test_key();
+        let before = StateV4::empty();
+        let mut after = before.clone();
+        after.payments = signed_payments(&key, 1, Some(sample_payment()));
+
+        let delta = delta_from(&after, &summarize(&before));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&after.payments));
+        assert!(parsed.parent.is_none());
+        assert!(parsed.contacts.is_none());
+        assert!(parsed.slots.is_empty());
+
+        let synced = NumberContract::update_state(
+            params(&key),
+            State::from(before.to_bytes()),
+            vec![UpdateData::Delta(delta)],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(synced.as_ref(), after.to_bytes().as_slice());
+
+        // Converged peers get nothing, payments included.
+        assert_eq!(delta_from(&after, &summarize(&after)).size(), 0);
+
+        // A higher-seq tombstone is sent and clears the payment.
+        let mut cleared = after.clone();
+        cleared.payments = signed_tombstone(&key, 2);
+        let delta = delta_from(&cleared, &summarize(&after));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&cleared.payments));
+        let synced = NumberContract::update_state(
+            params(&key),
+            State::from(after.to_bytes()),
+            vec![UpdateData::Delta(delta)],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(synced.as_ref(), cleared.to_bytes().as_slice());
+    }
+
+    #[test]
+    fn get_state_delta_heals_equal_payments_seq_with_different_digest() {
+        let key = test_key();
+        let mut local = StateV4::empty();
+        local.payments = signed_payments(&key, 3, Some(sample_payment()));
+        let mut remote = StateV4::empty();
+        remote.payments = signed_payments(&key, 3, Some(terminal_payment()));
+
+        let delta = delta_from(&local, &summarize(&remote));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&local.payments));
+    }
+
+    #[test]
+    fn empty_summary_includes_payments() {
+        let key = test_key();
+        let mut state = StateV4::empty();
+        state.payments = signed_payments(&key, 1, Some(sample_payment()));
+
+        let delta = delta_from(&state, &StateSummary::from(vec![]));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.payments.as_ref(), Some(&state.payments));
+    }
+
+    #[test]
+    fn v3_state_shape_is_not_accepted() {
+        let key = test_key();
+        let v3 = r#"{"v":3,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
+        assert_eq!(
+            NumberContract::validate_state(
+                params(&key),
+                State::from(v3.as_bytes().to_vec()),
+                RelatedContracts::default(),
+            )
+            .unwrap(),
+            ValidateResult::Invalid
+        );
+
+        // v4 without the payments field also fails to decode.
+        let missing_payments = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
+        assert!(StateV4::decode(missing_payments.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn v4_empty_state_round_trips() {
+        let key = test_key();
+        let empty = StateV4::empty();
+        let decoded = StateV4::decode(&empty.to_bytes()).unwrap();
+        assert_eq!(decoded, empty);
+        assert_eq!(decoded.v, 4);
+        assert_eq!(decoded.payments, Payments::empty());
+        assert!(decoded.validate(&key.verifying_key()).is_ok());
     }
 
     // ---- property tests ---------------------------------------------------
@@ -2495,13 +3615,59 @@ mod tests {
         })
     }
 
-    fn arb_state() -> impl Strategy<Value = StateV3> {
+    fn arb_payment_entry() -> impl Strategy<Value = Payment> {
+        prop_oneof![
+            Just(sample_payment()),
+            Just(terminal_payment()),
+            Just(Payment {
+                cursor: 3,
+                phase: "reverse".into(),
+                status: "reversing".into(),
+                fail: Some("blocked".into()),
+                next: CONTACT_11.into(),
+                legs: vec![sample_leg(0, 2, 100)],
+                ..sample_payment()
+            }),
+        ]
+    }
+
+    fn arb_settled() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec(any::<u8>(), 0..=MAX_SETTLED_PAYMENTS).prop_map(|tags| {
+            tags.into_iter()
+                .enumerate()
+                .map(|(index, tag)| {
+                    // Make ids unique inside the record regardless of the tag.
+                    let mut raw = [tag; 16];
+                    raw[15] = index as u8;
+                    hex::encode(raw)
+                })
+                .collect()
+        })
+    }
+
+    fn arb_payments() -> impl Strategy<Value = Payments> {
+        (
+            0u64..=100,
+            prop::option::of(arb_payment_entry()),
+            arb_settled(),
+        )
+            .prop_map(|(seq, entry, settled)| {
+                if seq == 0 {
+                    Payments::empty()
+                } else {
+                    signed_payments_with_settled(&test_key(), seq, settled, entry)
+                }
+            })
+    }
+
+    fn arb_state() -> impl Strategy<Value = StateV4> {
         (
             arb_parent(),
             arb_contacts(),
+            arb_payments(),
             proptest::collection::vec(arb_slot_spec(), SLOT_COUNT),
         )
-            .prop_map(|(parent, contacts, specs)| {
+            .prop_map(|(parent, contacts, payments, specs)| {
                 let key = test_key();
                 let slots = std::array::from_fn(|index| match &specs[index] {
                     SlotSpec::Empty => Slot::empty(),
@@ -2510,10 +3676,11 @@ mod tests {
                         signed_slot(&key, index as u8, *seq, Some(entry.clone()))
                     }
                 });
-                StateV3 {
+                StateV4 {
                     v: STATE_VERSION,
                     parent,
                     contacts,
+                    payments,
                     slots,
                 }
             })
@@ -2548,7 +3715,7 @@ mod tests {
 
         #[test]
         fn merge_identity(a in arb_state()) {
-            let empty = StateV3::empty();
+            let empty = StateV4::empty();
             prop_assert_eq!(merged(&a, &empty).to_bytes(), a.to_bytes());
             prop_assert_eq!(merged(&empty, &a).to_bytes(), a.to_bytes());
         }
@@ -2596,6 +3763,7 @@ mod tests {
             let result = merged(&a, &b);
             prop_assert_eq!(result.parent, merge_parent(&a.parent, &b.parent));
             prop_assert_eq!(result.contacts, merge_contacts(&a.contacts, &b.contacts));
+            prop_assert_eq!(result.payments, merge_payments(&a.payments, &b.payments));
             for index in 0..SLOT_COUNT {
                 prop_assert_eq!(
                     result.slots[index].to_owned(),

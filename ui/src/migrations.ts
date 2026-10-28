@@ -37,6 +37,21 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // The first v4 build (payments without the settled-id list). It was
+    // recorded locally but never deployed; its board schema is not migratable
+    // to the settled v4. Its seed/counters still carry forward.
+    key: "8ChETsjiDWRDQ9C696EvDM81hUidjPgikpKrcA8LJPwx",
+    codeHash: "7R5J4SQErkVKVzkWaG7cPfQFbRva1GpaVTRTGcKQ4tmc",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
+    // v3 (tree parent link). v4 adds the payments record; the seed and all
+    // counters carry forward, with paymentsNextSeq defaulting to 1.
+    key: "FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb",
+    codeHash: "FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     key: "BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef",
     codeHash: "CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj",
     webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
@@ -74,6 +89,9 @@ export const LEGACY_DELEGATES: LegacyDelegate[] = [
  * slot schema/signing bytes and remain unmigratable.
  */
 export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
+  // v3 (tree parent link). v4 adds an empty payments record; slot/contacts/
+  // parent signatures remain valid.
+  "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",
   // v2 (address book + hundredths). v3 adds an empty parent; slot/contacts
   // signatures remain valid.
   "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
@@ -92,6 +110,9 @@ export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
  * Append newest-first; never remove an entry.
  */
 export const UNMIGRATABLE_CONTRACT_CODE_HASHES: string[] = [
+  // First v4 build (payments without settled). Recorded but never deployed;
+  // the settled v4 schema/signing bytes differ.
+  "6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57",
   // v1 before the address book: v2 state/signing bytes are incompatible.
   "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
   // Last build before the frozen path remap: its bytes embed the build

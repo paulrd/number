@@ -34,9 +34,12 @@ import {
 import {
   validateContactList,
   validateEntry,
+  validatePaymentEntry,
+  validateSettled,
   type Contact,
   type Entry,
 } from "./state";
+import type { PaymentEntry } from "./payments";
 import { delay, errorMessage, isLowerHex } from "./util";
 
 export type DelegateErrorCode =
@@ -74,6 +77,11 @@ export interface DelegateIdentity {
   contactsNextSeq: number;
   /** Next sequence value for the signed parent record, >= 1. */
   parentNextSeq: number;
+  /**
+   * Next sequence value for the signed payments record, >= 1. Optional for
+   * compatibility with delegates built before v4; normalize with `?? 1`.
+   */
+  paymentsNextSeq?: number;
 }
 
 export interface DelegateStatus {
@@ -90,6 +98,11 @@ export interface ExportedSecrets {
   contactsNextSeq: number;
   /** Next sequence value for the signed parent record, >= 1. */
   parentNextSeq: number;
+  /**
+   * Next sequence value for the signed payments record, >= 1. Optional for
+   * compatibility with exports from delegates built before v4; `?? 1`.
+   */
+  paymentsNextSeq?: number;
 }
 
 type ResponseRecord = Record<string, unknown>;
@@ -286,6 +299,7 @@ export class DelegateClient {
     nextSeq: number[],
     contactsNextSeq = 1,
     parentNextSeq = 1,
+    paymentsNextSeq = 1,
     timeoutMs = 5_000,
   ): Promise<void> {
     if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
@@ -297,6 +311,8 @@ export class DelegateClient {
     this.validateNextSeq(nextSeq);
     const validatedContactsNextSeq = this.validateContactsNextSeq(contactsNextSeq);
     const validatedParentNextSeq = this.validateParentNextSeq(parentNextSeq);
+    const validatedPaymentsNextSeq =
+      this.validatePaymentsNextSeq(paymentsNextSeq);
     await this.request(
       "import",
       {
@@ -305,6 +321,7 @@ export class DelegateClient {
         nextSeq,
         contactsNextSeq: validatedContactsNextSeq,
         parentNextSeq: validatedParentNextSeq,
+        paymentsNextSeq: validatedPaymentsNextSeq,
       },
       timeoutMs,
     );
@@ -419,6 +436,57 @@ export class DelegateClient {
         typeof payload.error === "string"
           ? payload.error
           : "signParent was rejected",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed signature (expected 128 lowercase hex characters).",
+      );
+    }
+    return sig;
+  }
+
+  /**
+   * Sign the payments record at `seq`; a null entry is a legal tombstone.
+   * `settled` is the bounded list of recently settled payment ids covered by
+   * the signature. Reuses the `"sign"` pending kind because the delegate
+   * answers `{ok, sig}`.
+   */
+  async signPayments(
+    seq: number,
+    entry: PaymentEntry | null,
+    settled: string[],
+    timeoutMs = 15_000,
+  ): Promise<string> {
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
+    }
+    let validatedEntry: PaymentEntry | null;
+    let validatedSettled: string[];
+    try {
+      validatedEntry = entry === null ? null : validatePaymentEntry(entry);
+      validatedSettled = validateSettled(settled);
+    } catch (error) {
+      throw new DelegateError("Protocol", errorMessage(error));
+    }
+
+    const payload = await this.request(
+      "sign",
+      {
+        cmd: "signPayments",
+        seq,
+        settled: validatedSettled,
+        entry: validatedEntry,
+      },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signPayments was rejected",
       );
     }
     const sig = payload.sig;
@@ -592,6 +660,7 @@ export class DelegateClient {
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
       parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
+      paymentsNextSeq: this.parsePaymentsNextSeq(payload.paymentsNextSeq),
     };
   }
 
@@ -634,6 +703,7 @@ export class DelegateClient {
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
       parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
+      paymentsNextSeq: this.parsePaymentsNextSeq(payload.paymentsNextSeq),
     };
   }
 
@@ -697,6 +767,29 @@ export class DelegateClient {
       throw new DelegateError(
         "Protocol",
         "parentNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
+  }
+
+  /**
+   * A delegate built before v4 has no payments counter; default it to 1 so the
+   * migrated identity can still sign its first payments record.
+   */
+  private parsePaymentsNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validatePaymentsNextSeq(value);
+  }
+
+  private validatePaymentsNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "paymentsNextSeq must be a positive safe integer.",
       );
     }
     return value;

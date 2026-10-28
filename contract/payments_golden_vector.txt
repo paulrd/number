@@ -1,0 +1,100 @@
+number-contract v4 payments signing bytes — golden vector
+============================================================
+
+Domain: b"number:v4:payments" (SIGNING_DOMAIN_PAYMENTS).
+Encoding: domain || seq:u64 LE || settled_count:u8
+|| each settled id (16 raw bytes) || tag:u8 (0 = no entry, 1 = entry),
+then for tag 1: id(16 raw) || src(32) || dst(32) || amount:i64 LE
+|| srcAddr_len:u32 LE || srcAddr || dstAddr_len:u32 LE || dstAddr
+|| cursor:u8 || phase:u8 || status:u8 || fail:u8 || next(32)
+|| legs_count:u8 || per leg: slot:u8 || seq:u64 LE || postValue:i64 LE || sig(64).
+Settled ids are 32 lowercase hex chars (16 raw bytes), oldest first, at most 8,
+no duplicates. The entry encoding after the tag is unchanged from the previous
+vector.
+Tags: phase forward=0/reverse=1/terminal=2;
+status offered=0/acted=1/complete=2/reversing=3/reversed=4/aborted=5/blocked=6/superseded=7;
+fail none=0/negative=1/no-destination=2/busy=3/refused=4/address-mismatch=5/blocked=6/superseded=7.
+Digest is BLAKE3(signing bytes)[0..16], lowercase hex.
+
+Case 1: seq = 6, settled = [], one leg
+Input entry JSON:
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "src": "1111111111111111111111111111111111111111111111111111111111111111",
+  "dst": "2222222222222222222222222222222222222222222222222222222222222222",
+  "amount": 1250,
+  "srcAddr": "52",
+  "dstAddr": "31",
+  "cursor": 2,
+  "phase": "forward",
+  "status": "acted",
+  "next": "3333333333333333333333333333333333333333333333333333333333333333",
+  "fail": null,
+  "legs": [
+    { "slot": 1, "seq": 4, "postValue": 3750, "sig": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" }
+  ]
+}
+
+signing bytes hex:
+6e756d6265723a76343a7061796d656e7473060000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+
+digest16:
+325c8d0a9c2b51ce5f2069e724b39ad3
+
+Case 2: seq = 7, settled = [], two legs (terminal)
+Input entry JSON:
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "src": "1111111111111111111111111111111111111111111111111111111111111111",
+  "dst": "2222222222222222222222222222222222222222222222222222222222222222",
+  "amount": 1250,
+  "srcAddr": "52",
+  "dstAddr": "31",
+  "cursor": 5,
+  "phase": "terminal",
+  "status": "complete",
+  "next": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fail": null,
+  "legs": [
+    { "slot": 1, "seq": 4, "postValue": 3750, "sig": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" },
+    { "slot": 3, "seq": 5, "postValue": -1250, "sig": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" }
+  ]
+}
+
+signing bytes hex:
+6e756d6265723a76343a7061796d656e7473070000000000000000010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+
+digest16:
+9b1419ef01132905668a238ad95e3456
+
+Case 3: seq = 9, settled = two ids, one leg (forward/acted)
+Input record JSON:
+{
+  "seq": 9,
+  "settled": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "entry": {
+    "id": "0123456789abcdef0123456789abcdef",
+    "src": "1111111111111111111111111111111111111111111111111111111111111111",
+    "dst": "2222222222222222222222222222222222222222222222222222222222222222",
+    "amount": 1250,
+    "srcAddr": "52",
+    "dstAddr": "31",
+    "cursor": 2,
+    "phase": "forward",
+    "status": "acted",
+    "next": "3333333333333333333333333333333333333333333333333333333333333333",
+    "fail": null,
+    "legs": [
+      { "slot": 1, "seq": 4, "postValue": 3750, "sig": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" }
+    ]
+  }
+}
+
+signing bytes hex:
+6e756d6265723a76343a7061796d656e7473090000000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb010123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+
+digest16:
+9c92f94d2c39c9ad770814d93488de0e

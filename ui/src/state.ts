@@ -1,17 +1,18 @@
 /**
  * Contract state, delta, and summary codecs plus the client-side merge.
  *
- * These shapes are the v3 wire format in DESIGN.md §2–§5 and the v3 spec §2.
- * The browser cannot run Ed25519 verification here, but it can enforce every
- * structural and bounds rule, build the canonical signing bytes (for summaries
- * and optimistic digests), and merge with exactly the same
- * max-over-seq/signature rule as the contract. The contract remains the
+ * These shapes are the v4 wire format in DESIGN.md §2–§5 and
+ * DESIGN-payments.md. The browser cannot run Ed25519 verification here, but it
+ * can enforce every structural and bounds rule, build the canonical signing
+ * bytes (for summaries and optimistic digests), and merge with exactly the
+ * same max-over-seq/signature rule as the contract. The contract remains the
  * authority; a bad local merge is corrected by the next GET/notification.
  *
- * v3 adds a signed `parent` record (board tree) to the v2 shape. The slot and
- * contacts signing bytes are unchanged from v2, so a v2 state upgrades by
- * adding an empty parent; `validateState`/`decodeState` accept both versions
- * and always return v3.
+ * v4 adds a signed `payments` record (cooperative payments) to the v3 shape.
+ * The slot, contacts and parent signing bytes are unchanged, so a v3 state
+ * upgrades by adding an empty payments record and a v2 state upgrades by
+ * adding an empty parent and payments record. `validateState`/`decodeState`
+ * accept v2, v3 and v4 and always return v4.
  */
 
 import { blake3 } from "@noble/hashes/blake3";
@@ -21,15 +22,29 @@ import {
   parse as parseJsonLossless,
   stringify as stringifyJsonLossless,
 } from "lossless-json";
+import {
+  MAX_PAYMENT_LEGS,
+  ZERO_OWNER,
+  isOctalAddress,
+  type PaymentEntry,
+  type PaymentFail,
+  type PaymentLeg,
+  type PaymentPhase,
+  type PaymentStatus,
+  type PaymentsRecord,
+} from "./payments";
 import { bytesToHex, hexToBytes, isLowerHex, utf8Length } from "./util";
 
 export const SLOT_COUNT = 8;
 export const MAX_CONTACTS = 64;
-export const STATE_VERSION = 3 as const;
+/** Phase 1 bound on the payments record's recently settled id list. */
+export const MAX_PAYMENT_SETTLED = 8;
+export const STATE_VERSION = 4 as const;
 /**
- * The predecessor wire version. A v2 state has no parent and is upgraded on
- * read; it is never written.
+ * The predecessor wire versions. A v3 state has a parent but no payments; a v2
+ * state has neither. Both are upgraded on read and never written.
  */
+export const V3_STATE_VERSION = 3 as const;
 export const LEGACY_STATE_VERSION = 2 as const;
 
 export const LIMITS = {
@@ -44,6 +59,7 @@ export const USER_ID_HEX_LEN = 64;
 export const SIGNING_DOMAIN_SLOT = "number:v2:slot";
 export const SIGNING_DOMAIN_CONTACTS = "number:v2:contacts";
 export const SIGNING_DOMAIN_PARENT = "number:v3:parent";
+export const SIGNING_DOMAIN_PAYMENTS = "number:v4:payments";
 
 export const I64_MIN = -(2n ** 63n);
 export const I64_MAX = 2n ** 63n - 1n;
@@ -87,12 +103,16 @@ export interface ParentRecord {
   sig: string | null;
 }
 
-export interface StateV3 {
-  v: 3;
+export interface StateV4 {
+  v: 4;
   parent: ParentRecord;
   contacts: ContactsRecord;
+  payments: PaymentsRecord;
   slots: Slot[];
 }
+
+/** Compatibility alias: every import that names the current state gets v4. */
+export type StateV3 = StateV4;
 
 export interface DeltaSlot {
   i: number;
@@ -102,20 +122,23 @@ export interface DeltaSlot {
 }
 
 export interface Delta {
-  v: 3;
+  v: 4;
   /** `null` when the parent record is unchanged. */
   parent: ParentRecord | null;
   /** `null` when the contacts record is unchanged. */
   contacts: ContactsRecord | null;
+  /** `null` when the payments record is unchanged. */
+  payments: PaymentsRecord | null;
   slots: DeltaSlot[];
 }
 
 export type SummarySlot = [seq: number, digest16: string];
 
 export interface Summary {
-  v: 3;
+  v: 4;
   parent: SummarySlot;
   contacts: SummarySlot;
+  payments: SummarySlot;
   slots: SummarySlot[];
 }
 
@@ -130,7 +153,37 @@ const textEncoder = new TextEncoder();
 const SLOT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_SLOT);
 const CONTACTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_CONTACTS);
 const PARENT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_PARENT);
+const PAYMENTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_PAYMENTS);
 const ZERO_DIGEST16 = "0".repeat(32);
+
+const PAYMENT_PHASE_TAGS: Record<PaymentPhase, number> = {
+  forward: 0,
+  reverse: 1,
+  terminal: 2,
+};
+
+const PAYMENT_STATUS_TAGS: Record<PaymentStatus, number> = {
+  offered: 0,
+  acted: 1,
+  complete: 2,
+  reversing: 3,
+  reversed: 4,
+  aborted: 5,
+  blocked: 6,
+  superseded: 7,
+};
+
+const PAYMENT_FAIL_TAGS: Record<PaymentFail, number> = {
+  negative: 1,
+  "no-destination": 2,
+  busy: 3,
+  refused: 4,
+  "address-mismatch": 5,
+  blocked: 6,
+  superseded: 7,
+};
+
+const MAX_PAYMENT_CURSOR = 64;
 
 function fail(path: string, message: string): never {
   throw new StateError(`${path}: ${message}`);
@@ -312,6 +365,187 @@ export function validateParent(raw: unknown, path = "parent"): ParentRecord {
   return { seq, userId, sig };
 }
 
+/** Validate/normalise one applied payment leg. */
+export function validatePaymentLeg(raw: unknown, path = "leg"): PaymentLeg {
+  const obj = asRecord(raw, path);
+  const slot = obj.slot;
+  if (
+    typeof slot !== "number" ||
+    !Number.isSafeInteger(slot) ||
+    slot < 0 ||
+    slot >= SLOT_COUNT
+  ) {
+    fail(`${path}.slot`, `expected an integer in 0..${SLOT_COUNT - 1}`);
+  }
+  const seq = validateSeq(obj.seq, `${path}.seq`);
+  if (seq === 0) fail(`${path}.seq`, "must be greater than 0");
+  const postValue = validateValue(obj.postValue, `${path}.postValue`);
+  const sig = validateSignature(obj.sig, `${path}.sig`);
+  return { slot, seq, postValue, sig };
+}
+
+function validatePaymentAddress(value: unknown, path: string): string {
+  if (typeof value !== "string" || !isOctalAddress(value)) {
+    fail(path, "expected an octal address of at most 32 digits 0..7");
+  }
+  return value;
+}
+
+function validatePaymentPhase(value: unknown, path: string): PaymentPhase {
+  if (typeof value !== "string" || !(value in PAYMENT_PHASE_TAGS)) {
+    fail(path, "expected forward, reverse or terminal");
+  }
+  return value as PaymentPhase;
+}
+
+function validatePaymentStatus(value: unknown, path: string): PaymentStatus {
+  if (typeof value !== "string" || !(value in PAYMENT_STATUS_TAGS)) {
+    fail(path, "expected a known payment status");
+  }
+  return value as PaymentStatus;
+}
+
+function validatePaymentFail(value: unknown, path: string): PaymentFail | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !(value in PAYMENT_FAIL_TAGS)) {
+    fail(path, "expected null or a known payment failure");
+  }
+  return value as PaymentFail;
+}
+
+/** Validate/normalise one payment intent, mirroring the contract's shape rules. */
+export function validatePaymentEntry(
+  raw: unknown,
+  path = "payments.entry",
+): PaymentEntry {
+  const obj = asRecord(raw, path);
+
+  const id = obj.id;
+  if (typeof id !== "string" || !isLowerHex(id, 32)) {
+    fail(`${path}.id`, "expected 32 lowercase hex characters");
+  }
+
+  const amount = validateValue(obj.amount, `${path}.amount`);
+  if (amount <= 0n) fail(`${path}.amount`, "must be greater than 0");
+
+  const cursor = obj.cursor;
+  if (
+    typeof cursor !== "number" ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    cursor > MAX_PAYMENT_CURSOR
+  ) {
+    fail(
+      `${path}.cursor`,
+      `expected an integer in 0..${MAX_PAYMENT_CURSOR}`,
+    );
+  }
+
+  if (!Array.isArray(obj.legs)) fail(`${path}.legs`, "expected an array");
+  if (obj.legs.length > MAX_PAYMENT_LEGS) {
+    fail(`${path}.legs`, `expected at most ${MAX_PAYMENT_LEGS} legs`);
+  }
+  const legs = obj.legs.map((leg, index) =>
+    validatePaymentLeg(leg, `${path}.legs[${index}]`),
+  );
+  const seenSlots = new Set<number>();
+  for (const [index, leg] of legs.entries()) {
+    if (seenSlots.has(leg.slot)) {
+      fail(`${path}.legs[${index}].slot`, `duplicate slot ${leg.slot}`);
+    }
+    seenSlots.add(leg.slot);
+  }
+
+  const phase = validatePaymentPhase(obj.phase, `${path}.phase`);
+  const status = validatePaymentStatus(obj.status, `${path}.status`);
+  const failReason = validatePaymentFail(obj.fail, `${path}.fail`);
+
+  const entry: PaymentEntry = {
+    id,
+    src: validateUserId(obj.src, `${path}.src`),
+    dst: validateUserId(obj.dst, `${path}.dst`),
+    amount,
+    srcAddr: validatePaymentAddress(obj.srcAddr, `${path}.srcAddr`),
+    dstAddr: validatePaymentAddress(obj.dstAddr, `${path}.dstAddr`),
+    cursor,
+    phase,
+    status,
+    next: validateUserId(obj.next, `${path}.next`),
+    fail: failReason,
+    legs,
+  };
+
+  // Conservative coherence, matching the contract. Transitional combinations
+  // the protocol needs (acted while forward or reverse, aborted during a
+  // reverse walk, superseded anywhere) remain legal.
+  if (status === "offered" && (cursor !== 0 || legs.length > 0)) {
+    fail(path, "an offered payment must have cursor 0 and no legs");
+  }
+  if (
+    (status === "complete" || status === "reversed" || status === "blocked") &&
+    phase !== "terminal"
+  ) {
+    fail(path, `a ${status} payment must be terminal`);
+  }
+  if (phase === "terminal" && entry.next !== ZERO_OWNER) {
+    fail(`${path}.next`, "a terminal payment must have an all-zero next");
+  }
+
+  return entry;
+}
+
+/** Validate/normalise the bounded, unique `settled` payment-id list. */
+export function validateSettled(raw: unknown, path = "settled"): string[] {
+  if (!Array.isArray(raw)) fail(path, "expected an array");
+  if (raw.length > MAX_PAYMENT_SETTLED) {
+    fail(path, `expected at most ${MAX_PAYMENT_SETTLED} settled ids`);
+  }
+  const seen = new Set<string>();
+  return raw.map((value, index) => {
+    if (typeof value !== "string" || !isLowerHex(value, 32)) {
+      fail(`${path}[${index}]`, "expected 32 lowercase hex characters");
+    }
+    if (seen.has(value)) {
+      fail(`${path}[${index}]`, `duplicate settled id ${value}`);
+    }
+    seen.add(value);
+    return value;
+  });
+}
+
+/** Validate/normalise the signed payments record. */
+export function validatePayments(
+  raw: unknown,
+  path = "payments",
+): PaymentsRecord {
+  const obj = asRecord(raw, path);
+  const seq = validateSeq(obj.seq, `${path}.seq`);
+  const settled = validateSettled(obj.settled, `${path}.settled`);
+  const entryRaw = obj.entry ?? null;
+  const sigRaw = obj.sig ?? null;
+
+  let entry: PaymentEntry | null = null;
+  if (entryRaw !== null) {
+    entry = validatePaymentEntry(entryRaw, `${path}.entry`);
+  }
+
+  let sig: string | null = null;
+  if (sigRaw !== null) {
+    sig = validateSignature(sigRaw, `${path}.sig`);
+  }
+
+  if (seq === 0) {
+    if (settled.length > 0) fail(path, "seq 0 must have no settled ids");
+    if (entry !== null) fail(path, "seq 0 must have a null entry");
+    if (sig !== null) fail(path, "seq 0 must have a null signature");
+  } else if (sig === null) {
+    // seq > 0 with a null entry is a legal tombstone, but still signed.
+    fail(path, "seq > 0 requires a signature");
+  }
+
+  return { seq, settled, entry, sig };
+}
+
 /** Validate/normalise one entry. Optional strings become null, never "". */
 export function validateEntry(raw: unknown, path = "entry"): Entry {
   const obj = asRecord(raw, path);
@@ -353,20 +587,37 @@ export function validateSlot(raw: unknown, index: number, path = `slots[${index}
   return { seq, entry, sig };
 }
 
-export function validateState(raw: unknown): StateV3 {
+export function validateState(raw: unknown): StateV4 {
   const obj = asRecord(raw, "state");
   let parent: ParentRecord;
+  let payments: PaymentsRecord;
   if (obj.v === STATE_VERSION) {
     parent = validateParent(obj.parent, "state.parent");
+    payments = validatePayments(obj.payments, "state.payments");
+  } else if (obj.v === V3_STATE_VERSION) {
+    parent = validateParent(obj.parent, "state.parent");
+    // v3 never had a payments field. Reject it rather than silently dropping
+    // signed data; the client upgrade adds an empty payments record.
+    if (obj.payments !== undefined) {
+      fail("state.payments", "a v3 state must not carry a payments record");
+    }
+    payments = emptyPayments();
   } else if (obj.v === LEGACY_STATE_VERSION) {
-    // v2 never had a parent field. Explicitly reject it rather than silently
-    // dropping signed data; the client upgrade adds an empty parent.
+    // v2 never had a parent or payments field. Explicitly reject them rather
+    // than silently dropping signed data; the upgrade adds empty records.
     if (obj.parent !== undefined) {
       fail("state.parent", "a v2 state must not carry a parent record");
     }
+    if (obj.payments !== undefined) {
+      fail("state.payments", "a v2 state must not carry a payments record");
+    }
     parent = emptyParent();
+    payments = emptyPayments();
   } else {
-    fail("state.v", `expected ${LEGACY_STATE_VERSION} or ${STATE_VERSION}`);
+    fail(
+      "state.v",
+      `expected ${LEGACY_STATE_VERSION}, ${V3_STATE_VERSION} or ${STATE_VERSION}`,
+    );
   }
 
   const contacts = validateContacts(obj.contacts, "state.contacts");
@@ -377,6 +628,7 @@ export function validateState(raw: unknown): StateV3 {
     v: STATE_VERSION,
     parent,
     contacts,
+    payments,
     slots: obj.slots.map((slot, index) => validateSlot(slot, index)),
   };
 }
@@ -394,6 +646,11 @@ export function validateDelta(raw: unknown): Delta {
     obj.contacts === undefined || obj.contacts === null
       ? null
       : validateContacts(obj.contacts, "delta.contacts");
+
+  const payments =
+    obj.payments === undefined || obj.payments === null
+      ? null
+      : validatePayments(obj.payments, "delta.payments");
 
   if (!Array.isArray(obj.slots)) fail("delta.slots", "expected an array");
 
@@ -416,7 +673,7 @@ export function validateDelta(raw: unknown): Delta {
     return { i, ...validated };
   });
 
-  return { v: STATE_VERSION, parent, contacts, slots };
+  return { v: STATE_VERSION, parent, contacts, payments, slots };
 }
 
 function validateSummaryPair(raw: unknown, path: string): SummarySlot {
@@ -436,6 +693,7 @@ export function validateSummary(raw: unknown): Summary {
   if (obj.v !== STATE_VERSION) fail("summary.v", `expected ${STATE_VERSION}`);
   const parent = validateSummaryPair(obj.parent, "summary.parent");
   const contacts = validateSummaryPair(obj.contacts, "summary.contacts");
+  const payments = validateSummaryPair(obj.payments, "summary.payments");
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("summary.slots", `expected exactly ${SLOT_COUNT} pairs`);
   }
@@ -443,6 +701,7 @@ export function validateSummary(raw: unknown): Summary {
     v: STATE_VERSION,
     parent,
     contacts,
+    payments,
     slots: obj.slots.map((pair, index) =>
       validateSummaryPair(pair, `summary.slots[${index}]`),
     ),
@@ -517,6 +776,10 @@ export function emptyParent(): ParentRecord {
   return { seq: 0, userId: null, sig: null };
 }
 
+export function emptyPayments(): PaymentsRecord {
+  return { seq: 0, settled: [], entry: null, sig: null };
+}
+
 export function emptyContacts(): ContactsRecord {
   return { seq: 0, entries: [], sig: null };
 }
@@ -530,6 +793,7 @@ export function emptyState(): StateV3 {
     v: STATE_VERSION,
     parent: emptyParent(),
     contacts: emptyContacts(),
+    payments: emptyPayments(),
     slots: Array.from({ length: SLOT_COUNT }, emptySlot),
   };
 }
@@ -554,11 +818,29 @@ export function cloneParent(record: ParentRecord): ParentRecord {
   return { seq: record.seq, userId: record.userId, sig: record.sig };
 }
 
+export function clonePayment(entry: PaymentEntry | null): PaymentEntry | null {
+  if (entry === null) return null;
+  return {
+    ...entry,
+    legs: entry.legs.map((leg) => ({ ...leg })),
+  };
+}
+
+export function clonePayments(record: PaymentsRecord): PaymentsRecord {
+  return {
+    seq: record.seq,
+    settled: [...record.settled],
+    entry: clonePayment(record.entry),
+    sig: record.sig,
+  };
+}
+
 export function cloneState(state: StateV3): StateV3 {
   return {
     v: STATE_VERSION,
     parent: cloneParent(state.parent),
     contacts: cloneContacts(state.contacts),
+    payments: clonePayments(state.payments),
     slots: state.slots.map(cloneSlot),
   };
 }
@@ -715,6 +997,145 @@ export function parentDigest16(record: ParentRecord): string {
   );
 }
 
+/**
+ * Canonical payments signing bytes from DESIGN-payments.md:
+ *   domain || seq u64 LE || settled_count u8 || each settled id (16 raw)
+ *   || tag u8 || entry fields when tag == 1.
+ * Kept byte-for-byte in sync with the contract and delegate; used here for
+ * summary digests.
+ */
+export function paymentsSigningBytes(
+  seq: number,
+  settled: string[],
+  entry: PaymentEntry | null,
+): Uint8Array {
+  const validatedSeq = validateSeq(seq, "seq");
+  const validatedSettled = validateSettled(settled);
+  const validatedEntry = entry === null ? null : validatePaymentEntry(entry);
+  if (validatedSeq === 0 && validatedEntry !== null) {
+    throw new StateError("seq 0 must have a null entry");
+  }
+  if (validatedSeq === 0 && validatedSettled.length > 0) {
+    throw new StateError("seq 0 must have no settled ids");
+  }
+
+  const settledBytes = validatedSettled.length * 16;
+  const header =
+    PAYMENTS_PREFIX.length + 8 + 1 + settledBytes + 1; // + entry tag
+
+  const writeHeader = (out: Uint8Array): number => {
+    const view = new DataView(out.buffer);
+    let offset = 0;
+    out.set(PAYMENTS_PREFIX, offset);
+    offset += PAYMENTS_PREFIX.length;
+    view.setBigUint64(offset, BigInt(validatedSeq), true);
+    offset += 8;
+    out[offset] = validatedSettled.length;
+    offset += 1;
+    for (const id of validatedSettled) {
+      out.set(hexToBytes(id), offset);
+      offset += 16;
+    }
+    return offset;
+  };
+
+  if (validatedEntry === null) {
+    const out = new Uint8Array(header);
+    const offset = writeHeader(out);
+    out[offset] = 0;
+    return out;
+  }
+
+  const idBytes = hexToBytes(validatedEntry.id);
+  const srcBytes = hexToBytes(validatedEntry.src);
+  const dstBytes = hexToBytes(validatedEntry.dst);
+  const nextBytes = hexToBytes(validatedEntry.next);
+  const srcAddrBytes = textEncoder.encode(validatedEntry.srcAddr);
+  const dstAddrBytes = textEncoder.encode(validatedEntry.dstAddr);
+
+  const legSize = 1 + 8 + 8 + 64;
+  let length =
+    header +
+    16 +
+    32 +
+    32 +
+    8 +
+    4 +
+    srcAddrBytes.length +
+    4 +
+    dstAddrBytes.length +
+    1 +
+    1 +
+    1 +
+    1 +
+    32 +
+    1;
+  length += validatedEntry.legs.length * legSize;
+
+  const out = new Uint8Array(length);
+  const view = new DataView(out.buffer);
+  let offset = writeHeader(out);
+
+  out[offset] = 1;
+  offset += 1;
+
+  out.set(idBytes, offset);
+  offset += 16;
+  out.set(srcBytes, offset);
+  offset += 32;
+  out.set(dstBytes, offset);
+  offset += 32;
+
+  view.setBigInt64(offset, validatedEntry.amount, true);
+  offset += 8;
+
+  for (const bytes of [srcAddrBytes, dstAddrBytes]) {
+    view.setUint32(offset, bytes.length, true);
+    offset += 4;
+    out.set(bytes, offset);
+    offset += bytes.length;
+  }
+
+  out[offset] = validatedEntry.cursor;
+  offset += 1;
+  out[offset] = PAYMENT_PHASE_TAGS[validatedEntry.phase];
+  offset += 1;
+  out[offset] = PAYMENT_STATUS_TAGS[validatedEntry.status];
+  offset += 1;
+  out[offset] =
+    validatedEntry.fail === null ? 0 : PAYMENT_FAIL_TAGS[validatedEntry.fail];
+  offset += 1;
+
+  out.set(nextBytes, offset);
+  offset += 32;
+
+  out[offset] = validatedEntry.legs.length;
+  offset += 1;
+
+  for (const leg of validatedEntry.legs) {
+    out[offset] = leg.slot;
+    offset += 1;
+    view.setBigUint64(offset, BigInt(leg.seq), true);
+    offset += 8;
+    view.setBigInt64(offset, leg.postValue, true);
+    offset += 8;
+    out.set(hexToBytes(leg.sig), offset);
+    offset += 64;
+  }
+
+  return out;
+}
+
+/** First 16 bytes of BLAKE3(payments signing bytes); zeros at seq 0. */
+export function paymentsDigest16(record: PaymentsRecord): string {
+  if (record.seq === 0) return ZERO_DIGEST16;
+  return bytesToHex(
+    blake3(
+      paymentsSigningBytes(record.seq, record.settled, record.entry),
+    ).slice(0, 16),
+  );
+}
+
 /** First 16 bytes of BLAKE3(signing bytes), as 32 lowercase hex chars. */
 export function slotDigest16(index: number, slot: Slot): string {
   if (slot.seq === 0) return ZERO_DIGEST16;
@@ -734,6 +1155,7 @@ export function summaryFromState(state: StateV3): Summary {
     v: STATE_VERSION,
     parent: [validated.parent.seq, parentDigest16(validated.parent)],
     contacts: [validated.contacts.seq, contactsDigest16(validated.contacts)],
+    payments: [validated.payments.seq, paymentsDigest16(validated.payments)],
     slots: validated.slots.map((slot, index) => [
       slot.seq,
       slotDigest16(index, slot),
@@ -757,6 +1179,17 @@ function needsParent(ours: ParentRecord, theirs: ParentRecord): boolean {
     ours.seq > theirs.seq ||
     (ours.seq === theirs.seq &&
       parentDigest16(ours) !== parentDigest16(theirs))
+  );
+}
+
+function needsPayments(
+  ours: PaymentsRecord,
+  theirs: PaymentsRecord,
+): boolean {
+  return (
+    ours.seq > theirs.seq ||
+    (ours.seq === theirs.seq &&
+      paymentsDigest16(ours) !== paymentsDigest16(theirs))
   );
 }
 
@@ -789,6 +1222,9 @@ export function computeDelta(ours: StateV3, theirs: StateV3): Delta {
       : null,
     contacts: needsContacts(mine.contacts, other.contacts)
       ? cloneContacts(mine.contacts)
+      : null,
+    payments: needsPayments(mine.payments, other.payments)
+      ? clonePayments(mine.payments)
       : null,
     slots,
   };
@@ -891,6 +1327,54 @@ export function mergeParent(a: ParentRecord, b: ParentRecord): ParentRecord {
   return cloneParent(aCanonical > bCanonical ? left : right);
 }
 
+/**
+ * Merge the payments record: higher seq wins, then lexicographically greater
+ * signature bytes. A tombstone at a higher seq clears the active payment.
+ */
+export function mergePayments(
+  a: PaymentsRecord,
+  b: PaymentsRecord,
+): PaymentsRecord {
+  const left = validatePayments(a);
+  const right = validatePayments(b);
+  if (left.seq !== right.seq) {
+    return clonePayments(left.seq > right.seq ? left : right);
+  }
+  const sigOrder = compareSignatures(left.sig, right.sig);
+  if (sigOrder !== 0) return clonePayments(sigOrder > 0 ? left : right);
+
+  // Equal seq + sig means the same record for all valid inputs. The canonical
+  // tie-break only makes the function deterministic for malformed duplicates.
+  const aCanonical = stringifyJsonLossless([
+    left.seq,
+    left.settled,
+    left.entry === null
+      ? null
+      : [
+          left.entry.id,
+          left.entry.src,
+          left.entry.dst,
+          left.entry.cursor,
+          left.entry.status,
+        ],
+  ]);
+  const bCanonical = stringifyJsonLossless([
+    right.seq,
+    right.settled,
+    right.entry === null
+      ? null
+      : [
+          right.entry.id,
+          right.entry.src,
+          right.entry.dst,
+          right.entry.cursor,
+          right.entry.status,
+        ],
+  ]);
+  if (aCanonical === bCanonical) return clonePayments(left);
+  return clonePayments((aCanonical ?? "") > (bCanonical ?? "") ? left : right);
+}
+
 export function mergeStates(a: StateV3, b: StateV3): StateV3 {
   const left = validateState(a);
   const right = validateState(b);
@@ -898,6 +1382,7 @@ export function mergeStates(a: StateV3, b: StateV3): StateV3 {
     v: STATE_VERSION,
     parent: mergeParent(left.parent, right.parent),
     contacts: mergeContacts(left.contacts, right.contacts),
+    payments: mergePayments(left.payments, right.payments),
     slots: left.slots.map((slot, index) => mergeSlot(slot, right.slots[index])),
   };
 }
@@ -924,6 +1409,10 @@ export function mergeDelta(state: StateV3, delta: Delta): StateV3 {
       incoming.contacts === null
         ? cloneContacts(base.contacts)
         : mergeContacts(base.contacts, incoming.contacts),
+    payments:
+      incoming.payments === null
+        ? clonePayments(base.payments)
+        : mergePayments(base.payments, incoming.payments),
     slots,
   };
 }

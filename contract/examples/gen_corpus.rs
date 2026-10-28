@@ -32,7 +32,7 @@ use freenet_stdlib::prelude::{
     ContractInterface, Parameters, State, StateDelta, StateSummary, UpdateData,
 };
 use number_contract::{
-    Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent, Slot, StateV3, Summary,
+    Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent, Slot, StateV4, Summary,
     contacts_signing_bytes, parent_signing_bytes, signing_bytes,
 };
 use serde::Serialize;
@@ -102,8 +102,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Base board: one value, one measured value, one cleared slot, the first
     // contact and a parent link. `s1` is the empty predecessor.
-    let s1 = StateV3::empty();
-    let mut s2 = StateV3::empty();
+    let s1 = StateV4::empty();
+    let mut s2 = StateV4::empty();
     s2.parent = signed_parent(&key, 1, Some(ALICE));
     s2.contacts = signed_contacts(&key, 1, vec![contact("Alice", ALICE)]);
     s2.slots[0] = signed(
@@ -230,8 +230,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// actually produces, never a hand-written state.
 fn step(
     verifying: &VerifyingKey,
-    base: &StateV3,
-    expected: &StateV3,
+    base: &StateV4,
+    expected: &StateV4,
     delta: Vec<u8>,
     summary: Vec<u8>,
 ) -> Transition {
@@ -261,7 +261,7 @@ fn params(verifying: &VerifyingKey) -> Parameters<'static> {
     Parameters::from(verifying.to_bytes().to_vec())
 }
 
-fn delta(verifying: &VerifyingKey, sender: &StateV3, recipient_summary: &[u8]) -> Vec<u8> {
+fn delta(verifying: &VerifyingKey, sender: &StateV4, recipient_summary: &[u8]) -> Vec<u8> {
     NumberContract::get_state_delta(
         params(verifying),
         State::from(sender.to_bytes()),
@@ -272,7 +272,7 @@ fn delta(verifying: &VerifyingKey, sender: &StateV3, recipient_summary: &[u8]) -
     .to_vec()
 }
 
-fn apply(verifying: &VerifyingKey, state: &StateV3, delta: &[u8]) -> StateV3 {
+fn apply(verifying: &VerifyingKey, state: &StateV4, delta: &[u8]) -> StateV4 {
     let updated = NumberContract::update_state(
         params(verifying),
         State::from(state.to_bytes()),
@@ -280,7 +280,7 @@ fn apply(verifying: &VerifyingKey, state: &StateV3, delta: &[u8]) -> StateV3 {
     )
     .expect("corpus delta must be accepted")
     .unwrap_valid();
-    StateV3::decode(updated.as_ref()).expect("the contract emits decodable state")
+    StateV4::decode(updated.as_ref()).expect("the contract emits decodable state")
 }
 
 fn signed(key: &SigningKey, index: u8, seq: u64, entry: Option<Entry>) -> Slot {

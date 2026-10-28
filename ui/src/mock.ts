@@ -18,13 +18,22 @@ import {
   mergeDelta,
   validateContactList,
   validateEntry,
+  validatePaymentEntry,
   type Contact,
   type Delta,
+  type DeltaSlot,
   type Entry,
   type StateV3,
 } from "./state";
+import { paymentId, type PaymentEntry } from "./payments";
 import { bytesToHex, delay, isLowerHex } from "./util";
-import type { BoardBackend, BoardCallbacks, BoardSnapshot } from "./board";
+import {
+  nextSettled,
+  type BoardBackend,
+  type BoardCallbacks,
+  type BoardSnapshot,
+  type PaymentSlotWrite,
+} from "./board";
 import type { DelegateIdentity } from "./delegate";
 
 const encoder = new TextEncoder();
@@ -75,6 +84,32 @@ function mockParentSignature(seq: number, userId: string | null): string {
   return bytesToHex(bytes);
 }
 
+function mockPaymentsSignature(
+  seq: number,
+  settled: string[],
+  entry: PaymentEntry | null,
+): string {
+  // bigint fields cannot go through JSON.stringify directly; stringify them
+  // explicitly so the mock digest stays deterministic.
+  const body = JSON.stringify({
+    seq,
+    settled,
+    entry:
+      entry && {
+        ...entry,
+        amount: entry.amount.toString(),
+        legs: entry.legs.map((leg) => ({
+          ...leg,
+          postValue: leg.postValue.toString(),
+        })),
+      },
+  });
+  const bytes = new Uint8Array(64);
+  bytes.set(digest(`number:offline:payments:0:${body}`), 0);
+  bytes.set(digest(`number:offline:payments:1:${body}`), 32);
+  return bytesToHex(bytes);
+}
+
 /**
  * Fixture owner ids for the offline tree. Both are stable across reloads so the
  * e2e suite can reference them, and neither is the own (mock) owner.
@@ -84,6 +119,14 @@ export const MOCK_PARENT_ID = bytesToHex(
 );
 export const MOCK_CHILD_ID = bytesToHex(
   digest("number:offline:v1:fixture-child"),
+);
+/** A child of the own board that already carries an intent for the inbox. */
+export const MOCK_PAYER_ID = bytesToHex(
+  digest("number:offline:v1:fixture-payer"),
+);
+/** A sibling of the own board under MOCK_PARENT_ID, for source-side routing. */
+export const MOCK_SIBLING_ID = bytesToHex(
+  digest("number:offline:v1:fixture-sibling"),
 );
 
 export class OfflineBoard implements BoardBackend {
@@ -106,6 +149,7 @@ export class OfflineBoard implements BoardBackend {
       nextSeq: Array.from({ length: 8 }, () => 1),
       contactsNextSeq: 1,
       parentNextSeq: 1,
+      paymentsNextSeq: 1,
     };
     this.contractKeyBase58 = deriveInstanceIdFromBytes(
       this.codeHashBytes,
@@ -168,13 +212,14 @@ export class OfflineBoard implements BoardBackend {
         this.identity.contactsNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: null,
         contacts: {
           seq,
           entries: validated,
           sig: mockContactsSignature(seq, validated),
         },
+        payments: null,
         slots: [],
       };
 
@@ -216,9 +261,10 @@ export class OfflineBoard implements BoardBackend {
         this.identity.parentNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: { seq, userId, sig: mockParentSignature(seq, userId) },
         contacts: null,
+        payments: null,
         slots: [],
       };
 
@@ -226,6 +272,122 @@ export class OfflineBoard implements BoardBackend {
       this.identity.parentNextSeq = seq + 1;
       this.callbacks.onIdentity(this.snapshotIdentity());
       this.callbacks.onState(this.currentState);
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /**
+   * Sign a payments record and any slot writes as one in-memory delta, using
+   * deterministic mock signatures. Mirrors `OnlineBoard.savePayment`: forward
+   * intents (`legs: []`) gain one leg per slot write, while reversal records
+   * keep their existing legs.
+   */
+  async savePayment(
+    entry: PaymentEntry | null,
+    slots: PaymentSlotWrite[],
+  ): Promise<PaymentEntry | null> {
+    if (!this.started || !this.currentState) {
+      throw new Error("Offline board is not ready yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    const validatedEntry = entry === null ? null : validatePaymentEntry(entry);
+    const seen = new Set<number>();
+    const writes = slots.map((write) => {
+      if (
+        !Number.isInteger(write.index) ||
+        write.index < 0 ||
+        write.index > 7
+      ) {
+        throw new Error(`slot must be in 0..7, got ${write.index}`);
+      }
+      if (seen.has(write.index)) {
+        throw new Error(`duplicate slot index ${write.index}`);
+      }
+      seen.add(write.index);
+      return { index: write.index, entry: validateEntry(write.entry) };
+    });
+
+    this.mutating = true;
+    try {
+      await delay(70);
+      const paymentsSeq = Math.max(
+        this.currentState.payments.seq + 1,
+        this.identity.paymentsNextSeq ?? 1,
+      );
+      // Sign the slot writes first: their seq/sig/postValue become the payment
+      // legs, and the payments signature must cover those completed legs.
+      const nextSeq = [...this.identity.nextSeq];
+      const deltaSlots: DeltaSlot[] = [];
+      const newLegs: PaymentEntry["legs"] = [];
+      for (const write of writes) {
+        const seq = Math.max(
+          this.currentState.slots[write.index].seq + 1,
+          this.identity.nextSeq[write.index] ?? 1,
+        );
+        const sig = mockSignature(write.index, seq, write.entry);
+        deltaSlots.push({
+          i: write.index,
+          seq,
+          entry: write.entry,
+          sig,
+        });
+        newLegs.push({ slot: write.index, seq, postValue: write.entry.value, sig });
+        nextSeq[write.index] = seq + 1;
+      }
+
+      let signedEntry: PaymentEntry | null =
+        validatedEntry === null
+          ? null
+          : {
+              ...validatedEntry,
+              legs:
+                validatedEntry.legs.length === 0 && writes.length > 0
+                  ? newLegs
+                  : validatedEntry.legs.map((leg) => ({ ...leg })),
+            };
+
+      if (
+        signedEntry !== null &&
+        signedEntry.src === this.identity.pubkey &&
+        signedEntry.cursor === 0 &&
+        signedEntry.phase === "forward" &&
+        signedEntry.status === "offered"
+      ) {
+        signedEntry = {
+          ...signedEntry,
+          id: paymentId(
+            signedEntry.src,
+            paymentsSeq,
+            signedEntry.dst,
+            signedEntry.amount,
+          ),
+        };
+      }
+
+      const settled = nextSettled(this.currentState.payments, signedEntry);
+
+      const delta: Delta = {
+        v: 4,
+        parent: null,
+        contacts: null,
+        payments: {
+          seq: paymentsSeq,
+          settled,
+          entry: signedEntry,
+          sig: mockPaymentsSignature(paymentsSeq, settled, signedEntry),
+        },
+        slots: deltaSlots,
+      };
+
+      this.currentState = mergeDelta(this.currentState, delta);
+      this.identity.nextSeq = nextSeq;
+      this.identity.paymentsNextSeq = paymentsSeq + 1;
+
+      this.callbacks.onIdentity(this.snapshotIdentity());
+      this.callbacks.onState(this.currentState);
+      return signedEntry;
     } finally {
       this.mutating = false;
     }
@@ -274,6 +436,7 @@ export class OfflineBoard implements BoardBackend {
       nextSeq: [...this.identity.nextSeq],
       contactsNextSeq: this.identity.contactsNextSeq,
       parentNextSeq: this.identity.parentNextSeq,
+      paymentsNextSeq: this.identity.paymentsNextSeq ?? 1,
     };
   }
 
@@ -283,27 +446,35 @@ export class OfflineBoard implements BoardBackend {
    *  - child: `parent.userId` is the own owner, no slots.
    */
   private fixtureFor(ownerId: string): StateV3 | null {
-    if (ownerId !== MOCK_PARENT_ID && ownerId !== MOCK_CHILD_ID) return null;
+    const known = new Set([
+      MOCK_PARENT_ID,
+      MOCK_CHILD_ID,
+      MOCK_PAYER_ID,
+      MOCK_SIBLING_ID,
+    ]);
+    if (!known.has(ownerId)) return null;
     const cached = this.fixtures.get(ownerId);
     if (cached) return cached;
 
     const own = this.identity.pubkey;
     const fixture = emptyState();
-    const selfName = ownerId === MOCK_CHILD_ID ? "Child board" : "Parent board";
-    const selfEntries: Contact[] = [{ label: selfName, userId: ownerId }];
+    const name =
+      ownerId === MOCK_CHILD_ID
+        ? "Child board"
+        : ownerId === MOCK_PAYER_ID
+          ? "Payer board"
+          : ownerId === MOCK_SIBLING_ID
+            ? "Sibling board"
+            : "Parent board";
+    const selfEntries: Contact[] = [{ label: name, userId: ownerId }];
     fixture.contacts = {
       seq: 1,
       entries: selfEntries,
       sig: mockContactsSignature(1, selfEntries),
     };
-    if (ownerId === MOCK_CHILD_ID) {
-      fixture.parent = {
-        seq: 1,
-        userId: own,
-        sig: mockParentSignature(1, own),
-      };
-    } else {
-      const entry: Entry = {
+
+    if (ownerId === MOCK_PARENT_ID) {
+      const ownEntry: Entry = {
         value: 850n,
         contact: own,
         unit: "kg",
@@ -311,8 +482,56 @@ export class OfflineBoard implements BoardBackend {
       };
       fixture.slots[0] = {
         seq: 1,
-        entry,
-        sig: mockSignature(0, 1, entry),
+        entry: ownEntry,
+        sig: mockSignature(0, 1, ownEntry),
+      };
+      const siblingEntry: Entry = {
+        value: 200n,
+        contact: MOCK_SIBLING_ID,
+        unit: "kg",
+        note: null,
+      };
+      fixture.slots[1] = {
+        seq: 1,
+        entry: siblingEntry,
+        sig: mockSignature(1, 1, siblingEntry),
+      };
+    } else if (ownerId === MOCK_SIBLING_ID) {
+      fixture.parent = {
+        seq: 1,
+        userId: MOCK_PARENT_ID,
+        sig: mockParentSignature(1, MOCK_PARENT_ID),
+      };
+    } else if (ownerId === MOCK_CHILD_ID || ownerId === MOCK_PAYER_ID) {
+      fixture.parent = {
+        seq: 1,
+        userId: own,
+        sig: mockParentSignature(1, own),
+      };
+    }
+
+    if (ownerId === MOCK_PAYER_ID) {
+      // The payer has already offered a payment through the own board (the LCA):
+      // own slot 0 is the payer, own slot 1 is the child destination.
+      const intent: PaymentEntry = {
+        id: paymentId(MOCK_PAYER_ID, 1, MOCK_CHILD_ID, 250n),
+        src: MOCK_PAYER_ID,
+        dst: MOCK_CHILD_ID,
+        amount: 250n,
+        srcAddr: "0",
+        dstAddr: "1",
+        cursor: 0,
+        phase: "forward",
+        status: "offered",
+        next: own,
+        fail: null,
+        legs: [],
+      };
+      fixture.payments = {
+        seq: 1,
+        settled: [],
+        entry: intent,
+        sig: mockPaymentsSignature(1, [], intent),
       };
     }
 
@@ -336,9 +555,10 @@ export class OfflineBoard implements BoardBackend {
       const seq = Math.max(this.currentState.slots[slotIndex].seq + 1, nextSeq);
       const sig = mockSignature(slotIndex, seq, entry);
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: null,
         contacts: null,
+        payments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 

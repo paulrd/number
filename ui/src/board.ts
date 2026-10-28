@@ -22,17 +22,21 @@ import {
   type ExportedSecrets,
 } from "./delegate";
 import {
+  MAX_PAYMENT_SETTLED,
   decodeDelta,
   decodeState,
   entryFromInputs,
   mergeDelta,
   validateContactList,
   validateEntry,
+  validatePaymentEntry,
   type Contact,
   type Delta,
+  type DeltaSlot,
   type Entry,
   type StateV3,
 } from "./state";
+import { paymentId, type PaymentEntry, type PaymentsRecord } from "./payments";
 import { errorMessage, hexToBytes, isLowerHex } from "./util";
 
 export { entryFromInputs };
@@ -99,6 +103,33 @@ export interface BoardSnapshot {
   legacy: boolean;
 }
 
+/** One slot write bundled into a payment delta. */
+export interface PaymentSlotWrite {
+  index: number;
+  entry: Entry;
+}
+
+/**
+ * The next `settled` list for a board that is about to sign `entry`.
+ *
+ * When the outgoing entry is replaced by a different id (or cleared), its id is
+ * appended unless it is already listed, and only the newest `MAX_PAYMENT_SETTLED`
+ * ids are kept (oldest first, so the oldest drop off the front). Signing the
+ * same id again leaves the list untouched.
+ */
+export function nextSettled(
+  previous: PaymentsRecord,
+  entry: PaymentEntry | null,
+): string[] {
+  const outgoing = previous.entry;
+  const settled = [...previous.settled];
+  if (outgoing !== null && (entry === null || entry.id !== outgoing.id)) {
+    if (!settled.includes(outgoing.id)) settled.push(outgoing.id);
+    return settled.slice(-MAX_PAYMENT_SETTLED);
+  }
+  return settled;
+}
+
 export interface BoardBackend {
   readonly mode: "online" | "offline";
   readonly identity: DelegateIdentity | null;
@@ -111,6 +142,14 @@ export interface BoardBackend {
   saveContacts(entries: Contact[]): Promise<void>;
   /** Set (or clear with null) this board's signed parent link. */
   saveParent(userId: string | null): Promise<void>;
+  /**
+   * Sign a payments record and any slot writes it performed, and send them as
+   * one delta. A null entry is a tombstone at the new seq.
+   */
+  savePayment(
+    entry: PaymentEntry | null,
+    slots: PaymentSlotWrite[],
+  ): Promise<PaymentEntry | null>;
   /** Read one board by owner id; null when no instance/state exists. */
   readBoard(ownerId: string): Promise<BoardSnapshot | null>;
   retry(): Promise<StateV3>;
@@ -122,6 +161,7 @@ export interface BoardBackend {
     nextSeq: number[],
     contactsNextSeq: number,
     parentNextSeq: number,
+    paymentsNextSeq?: number,
   ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
@@ -465,9 +505,10 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signContacts(seq, validated);
 
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: null,
         contacts: { seq, entries: validated, sig },
+        payments: null,
         slots: [],
       };
 
@@ -534,9 +575,10 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signParent(seq, userId);
 
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: { seq, userId, sig },
         contacts: null,
+        payments: null,
         slots: [],
       };
 
@@ -567,6 +609,166 @@ export class OnlineBoard implements BoardBackend {
     } finally {
       this.mutating = false;
     }
+  }
+
+  /**
+   * Sign the payments record and every slot write it made, then send them as
+   * one delta. Same optimistic/rollback shape and single-write guard as
+   * `write`. The payments seq beats both the contract's record and the
+   * delegate's payments counter; slot seqs use the existing slot helper.
+   *
+   * Returns the signed entry. Forward intents (`legs: []`) gain one leg per slot
+   * write; reversal records keep their existing legs so the reversal engine can
+   * compare exactly what was originally signed.
+   */
+  async savePayment(
+    entry: PaymentEntry | null,
+    slots: PaymentSlotWrite[],
+  ): Promise<PaymentEntry | null> {
+    if (!this.started || !this.currentState || !this.identity || !this.contract) {
+      throw new Error("The board is not connected yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    const validatedEntry = entry === null ? null : validatePaymentEntry(entry);
+    const seen = new Set<number>();
+    const writes = slots.map((write) => {
+      if (
+        !Number.isInteger(write.index) ||
+        write.index < 0 ||
+        write.index > 7
+      ) {
+        throw new Error(`slot must be in 0..7, got ${write.index}`);
+      }
+      if (seen.has(write.index)) {
+        throw new Error(`duplicate slot index ${write.index}`);
+      }
+      seen.add(write.index);
+      return { index: write.index, entry: validateEntry(write.entry) };
+    });
+
+    this.mutating = true;
+    const previous = this.currentState;
+    let updateStarted = false;
+
+    try {
+      const paymentsSeq = Math.max(
+        previous.payments.seq + 1,
+        this.identity.paymentsNextSeq ?? 1,
+      );
+
+      // Sign the slot writes first: their seq/sig/postValue become the payment
+      // legs, and the payments signature must cover those completed legs.
+      const deltaSlots: DeltaSlot[] = [];
+      const newLegs: PaymentEntry["legs"] = [];
+      const nextSeq = [...this.identity.nextSeq];
+      for (const write of writes) {
+        const seq = this.nextSlotSeq(previous, this.identity, write.index);
+        const sig = await this.delegate.sign(write.index, seq, write.entry);
+        deltaSlots.push({ i: write.index, seq, entry: write.entry, sig });
+        newLegs.push({ slot: write.index, seq, postValue: write.entry.value, sig });
+        nextSeq[write.index] = seq + 1;
+      }
+
+      // A forward intent starts with no legs and gains them from this actor's
+      // slot writes. A reversal record already carries the legs being undone;
+      // preserve them byte-for-byte.
+      let signedEntry: PaymentEntry | null =
+        validatedEntry === null
+          ? null
+          : {
+              ...validatedEntry,
+              legs:
+                validatedEntry.legs.length === 0 && writes.length > 0
+                  ? newLegs
+                  : validatedEntry.legs.map((leg) => ({ ...leg })),
+            };
+
+      // A source intent's id is derived from the payments sequence that is
+      // actually signed, not the caller's possibly stale estimate.
+      if (
+        signedEntry !== null &&
+        signedEntry.src === this.identity.pubkey &&
+        signedEntry.cursor === 0 &&
+        signedEntry.phase === "forward" &&
+        signedEntry.status === "offered"
+      ) {
+        signedEntry = {
+          ...signedEntry,
+          id: paymentId(
+            signedEntry.src,
+            paymentsSeq,
+            signedEntry.dst,
+            signedEntry.amount,
+          ),
+        };
+      }
+
+      // Carry the bounded settled list through the signature. Replacing or
+      // clearing a different entry appends the outgoing id (see nextSettled).
+      const settled = nextSettled(previous.payments, signedEntry);
+
+      const paymentsSig = await this.delegate.signPayments(
+        paymentsSeq,
+        signedEntry,
+        settled,
+      );
+
+      const delta: Delta = {
+        v: 4,
+        parent: null,
+        contacts: null,
+        payments: {
+          seq: paymentsSeq,
+          settled,
+          entry: signedEntry,
+          sig: paymentsSig,
+        },
+        slots: deltaSlots,
+      };
+
+      const optimistic = mergeDelta(previous, delta);
+      this.currentState = optimistic;
+      this.callbacks.onState(optimistic);
+
+      this.identity = {
+        ...this.identity,
+        nextSeq,
+        paymentsNextSeq: paymentsSeq + 1,
+      };
+      this.callbacks.onIdentity(this.identity);
+
+      updateStarted = true;
+      await this.contract.updateDelta(delta);
+
+      try {
+        const fresh = await this.contract.getState();
+        this.currentState = fresh;
+        this.callbacks.onState(fresh);
+      } catch (error) {
+        this.callbacks.onWarning?.(
+          `Saved the payment, but could not refresh the board: ${errorMessage(error)}`,
+        );
+      }
+
+      return signedEntry;
+    } catch (error) {
+      this.currentState = previous;
+      this.callbacks.onState(previous);
+      if (updateStarted) void this.refresh();
+      throw error;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /** DESIGN §8 slot seq: max(contract.seq + 1, delegate.nextSeq). */
+  private nextSlotSeq(
+    state: StateV3,
+    identity: DelegateIdentity,
+    index: number,
+  ): number {
+    return Math.max(state.slots[index].seq + 1, identity.nextSeq[index] ?? 1);
   }
 
   /**
@@ -648,12 +850,14 @@ export class OnlineBoard implements BoardBackend {
     nextSeq: number[],
     contactsNextSeq: number,
     parentNextSeq: number,
+    paymentsNextSeq = 1,
   ): Promise<void> {
     await this.delegate.importSecrets(
       seed,
       nextSeq,
       contactsNextSeq,
       parentNextSeq,
+      paymentsNextSeq,
     );
   }
 
@@ -699,16 +903,15 @@ export class OnlineBoard implements BoardBackend {
       // DESIGN §8: max(contract.seq, delegate.nextSeq). `+ 1` only matters if
       // the contract advanced without the delegate's counter (e.g. delegate
       // storage was reset): it guarantees the new delta actually wins.
-      const contractSeq = previous.slots[slotIndex].seq;
-      const delegateNext = this.identity.nextSeq[slotIndex] ?? 1;
-      const seq = Math.max(contractSeq + 1, delegateNext);
+      const seq = this.nextSlotSeq(previous, this.identity, slotIndex);
 
       const sig = await this.delegate.sign(slotIndex, seq, entry);
 
       const delta: Delta = {
-        v: 3,
+        v: 4,
         parent: null,
         contacts: null,
+        payments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 

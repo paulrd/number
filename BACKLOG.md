@@ -20,15 +20,15 @@ peer; the live test identity opens the v3 contract as a root board.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb` (v3, recorded) |
-| Current delegate code hash | `FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH` |
-| Current contract code hash | `7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg` (v3) |
+| Current delegate key | `6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1` (v4, recorded; v3 and first-v4 predecessors registered) |
+| Current delegate code hash | `48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw` |
+| Current contract code hash | `C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT` (v4) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
 | Live v3 test board | `BtZsxDDXxFBYDT5uuoSh94DrKVU1SLNp3aUFaxhdEHbe` (live test identity; root; slot 6 “Tim” = `44.40`) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v3 + board-name/header + parent-value/octal-address UI deployed (2026-10-28); gateway smoke passed on `:7511` and `:7509` |
+| Live site | v3 + board-name/header + parent-value/octal-address UI deployed (2026-10-28); v4 payments is built/recorded but **not deployed** |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | v3 delegate + website and the UI-only board-name update published through the `:7509` SSH forward |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -419,6 +419,47 @@ frame.
   (`index-DhtyiHEf.js`, `index-C--X85rJ.css`). Gateway smoke passed on both
   `:7511` (14.9 s) and `:7509` (13.6 s). No contract/delegate/artifact change,
   so the webapp id, contract id, and delegate key are unchanged.
+
+### #20 — Cooperative payments (v4)
+
+- State v4 adds a signed `payments` record: at most one active intent per board,
+  with `id/src/dst/amount/srcAddr/dstAddr/cursor/phase/status/next/fail/legs`.
+  It merges like parent/contacts, has its own summary pair, delta field and
+  `number:v4:payments` signing bytes. Slot/contacts/parent signing bytes are
+  unchanged, so v3 boards migrate by adding an empty payments record.
+- A payment is a sequence of signed legs, not a transaction. The source writes
+  the offer; each ancestor up to the LCA debits its slot; the LCA applies the
+  debit and credit in one delta; each destination-side ancestor credits; the
+  destination's parent verifies the user id. A board's inbox is its parent plus
+  its eight children; owners advance it manually. There is no push/timeout.
+- A debit that would go below `0.00` aborts before signing. A missing
+  destination, mismatched user id, failed leg or later superseding write starts
+  a reverse walk. Reverse checks the exact leg `seq`+`sig`; it never overwrites
+  a later write, and reports `superseded`/`blocked` rather than pretending to
+  undo it. One active payment per board; a settled source can start the next.
+- UI: payment ledger panel, source dialog (octal address + user id + amount),
+  inbox with `Sign my leg`/`Undo my leg`, status card, `Check for payments`,
+  read-only/offline-safe. No visual change to slots or header.
+- Migration: v3 contract hash `7j8y…` and v3 delegate key `FtdT…` registered,
+  plus the first, unreleased v4 build (`6h9u…`, `8ChE…`) so the record gate
+  cannot orphan it; that first v4 board schema is marked unmigratable. Final
+  artifacts: contract `C8An…`, delegate code `48A8…`, delegate key `6FN3…`.
+  Delegate version 7 carries `paymentsNextSeq` through identity/export/import
+  (old backups default it to 1).
+- Verification: contract 88 tests, delegate 26, UI 149, offline e2e 9/9
+  (including a real LCA payment and a source offer), `make check`,
+  `make check-artifacts`, `make verify-merge` (293 cases, 14 laws, 0
+  violations), production build. Visual review light/dark/mobile.
+- Oracle gate: blockers B1–B4 (source-slot binding, reverse/source-close
+  binding, intermediate settlement, settled replay) fixed; attempt 2 cleared.
+  Known Phase 1 limits: the settled window is 8 ids; the browser cannot verify
+  Ed25519; discovery is manual; unequal-depth routes change the touched sum by
+  design. A multi-device same-seed payment race is pre-existing and can lose the
+  record merge while slot writes win.
+- Not deployed yet: a v4 deploy re-keys the contract and delegate. The live v3
+  site is unchanged; publishing requires the v4 delegate install, board
+  re-PUT/migration, and gateway smoke.
+
 
 ## Remaining
 

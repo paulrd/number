@@ -7,9 +7,11 @@
     "repoRoot": "/build"
   },
   "contract": {
-    "codeHash": "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",
+    "codeHash": "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
     "file": "published/contract/number_contract.wasm",
     "generations": [
+      "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
+      "6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57",
       "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",
       "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
       "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
@@ -18,11 +20,21 @@
     ]
   },
   "delegate": {
-    "codeHash": "FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH",
-    "key": "FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb",
+    "codeHash": "48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw",
+    "key": "6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1",
     "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
     "file": "published/delegate/number_delegate.wasm",
     "generations": [
+      {
+        "key": "6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1",
+        "codeHash": "48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
+      {
+        "key": "8ChETsjiDWRDQ9C696EvDM81hUidjPgikpKrcA8LJPwx",
+        "codeHash": "7R5J4SQErkVKVzkWaG7cPfQFbRva1GpaVTRTGcKQ4tmc",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
       {
         "key": "FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb",
         "codeHash": "FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH",

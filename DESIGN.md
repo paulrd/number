@@ -1,4 +1,4 @@
-# number — design (v3)
+# number — design (v4)
 
 A personal Freenet app: one board per user, holding exactly **8 slots** and an
 **address book**, arranged as a **tree of boards**. A board is a node; its 8
@@ -49,6 +49,23 @@ choosing a current contact when saving.
   entry's value, unit, note, and zero-based slot prominently above the grid;
   a root, pending link, or cleared parent slot shows no such band. Both views
   are read-only derivations; neither changes contract state or the wire format.
+
+### Payments (v4)
+
+v4 adds a signed `payments` record (one active intent per board). A payment
+moves an amount from a source board to a destination board named by an octal
+address and user id. Because every board signs only its own state, the payment
+is a sequence of signed legs: the source offers it, each ancestor up to the LCA
+debits its edge, the LCA debits and credits in one delta, each descendant on the
+destination side credits its edge, and the destination's parent verifies the
+user id. A debit that would go below zero aborts before signing; any later
+failure starts a reverse walk in which each actor that already signed undoes
+its own leg. The reverse walk never overwrites a later signed write: it reports
+`superseded`/`blocked` instead. The exact record, signing bytes, route table,
+statuses and reversal rules are in [DESIGN-payments.md](./DESIGN-payments.md).
+Discovery is deliberately manual — a board's inbox is its parent plus its eight
+children, read when the owner opens the board. There is no push channel, so a
+payment can wait indefinitely and must be shown as pending, not as delivered.
 
 v2 boards migrate to v3: the slot and contacts signing bytes are unchanged, and
 the client adds an empty parent when it re-PUTs the old signed state. v1 boards

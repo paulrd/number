@@ -232,6 +232,31 @@ id is under **Details**, not in the primary header.
   one signed parent per board and rejects a board parenting itself; it cannot
   enforce agreement or acyclicity across boards.
 
+### Payments
+
+A payment moves a positive amount from one board to another along the unique
+path through their least common ancestor (LCA). The sender supplies the
+destination's **octal address**, the destination **user id**, and the amount.
+
+- Each board owner signs only their own state, so a payment is a sequence of
+  signed legs, not one transaction. The source writes the offer; each board on
+  the upward path signs a debit, the LCA signs the paired debit and credit in
+  one delta, and each board on the downward path signs a credit. A board
+  advances the payments it can see in its inbox (its parent and eight children)
+  when its owner opens it.
+- An upward debit that would take a value below `0.00` fails before signing.
+  A missing destination, a user id that does not match the board at the address,
+  or a failed leg starts a **reverse** walk: every board that already acted undoes
+  its own leg. A reversal is best effort; a later signed write can supersede a
+  leg, and an offline owner can leave the payment reversing. The UI reports the
+  state rather than pretending it settled.
+- There is one active payment per board in this version. Discovery is manual:
+  **Check for payments** clears the session cache. There is no push or timeout,
+  so a payment can wait indefinitely for an owner to open their board.
+- The v4 `payments` record is signed like the parent and address book. v3 boards
+  upgrade by adding an empty payments record; the v4 contract and delegate are a
+  new generation with the usual migration path.
+
 ## Identity backup and restore
 
 The owner identity is an Ed25519 seed held in this device's Freenet delegate.

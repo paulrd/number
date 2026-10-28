@@ -28,6 +28,7 @@ export interface IdentityDialogDeps {
     nextSeq: number[],
     contactsNextSeq: number,
     parentNextSeq: number,
+    paymentsNextSeq?: number,
   ): Promise<void>;
   announce(message: string): void;
   copy(
@@ -196,6 +197,7 @@ export function createIdentityDialogs(
           decoded.nextSeq,
           decoded.contactsNextSeq,
           decoded.parentNextSeq,
+          decoded.paymentsNextSeq,
         );
       } catch (error) {
         setImporting(false);

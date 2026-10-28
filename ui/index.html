@@ -247,6 +247,32 @@
           </p>
           <p id="parent-value-note" class="parent-value-note" hidden></p>
         </section>
+        <section id="payments" class="payments" aria-labelledby="payments-title" hidden>
+          <div class="payments-head">
+            <div class="payments-heading">
+              <p class="eyebrow">Ledger</p>
+              <h2 id="payments-title" class="payments-title">Payments</h2>
+            </div>
+            <div class="payments-actions">
+              <button id="payment-check" class="meta-action" type="button">Check for payments</button>
+              <button id="payment-open" class="button button--small button--primary" type="button" aria-haspopup="dialog" aria-controls="payment-dialog">Make a payment…</button>
+            </div>
+          </div>
+          <p id="payment-note" class="payment-note">Payments move one board at a time. Each owner opens their board to sign their leg.</p>
+          <div id="payment-status" class="payment-status" hidden>
+            <span id="payment-status-badge" class="state-badge" role="status"></span>
+            <div class="payment-status-copy">
+              <p id="payment-status-title" class="payment-status-title"></p>
+              <p id="payment-status-detail" class="payment-status-detail"></p>
+              <p id="payment-status-route" class="payment-status-route"></p>
+            </div>
+          </div>
+          <div id="payment-inbox" class="payment-inbox" hidden>
+            <h3 class="payment-inbox-title">Waiting for you</h3>
+            <ul id="payment-inbox-list" class="payment-inbox-list"></ul>
+          </div>
+          <p id="payment-empty" class="payment-empty">No payment activity.</p>
+        </section>
         <div
           id="board"
           class="slot-grid"
@@ -276,6 +302,41 @@
           <span class="sr-only"> (opens in a new tab)</span>
         </a>
       </footer>
+
+      <dialog id="payment-dialog" class="editor payment-dialog" aria-labelledby="payment-dialog-title" aria-describedby="payment-dialog-desc payment-amount-hint">
+        <form id="payment-form" class="editor-form" novalidate>
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Cooperative payment</p>
+              <h2 id="payment-dialog-title" tabindex="-1">Make a payment</h2>
+              <p id="payment-dialog-desc" class="identity-intro">The amount moves up to the least common ancestor, then down to the destination. Every board owner signs only their own leg, so each hop waits for that owner.</p>
+            </div>
+            <button id="payment-close" class="icon-button" type="button" aria-label="Close payment">×</button>
+          </header>
+          <div class="editor-body">
+            <label class="field"><span>Destination octal address</span>
+              <input id="payment-address" name="payment-address" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 13" aria-describedby="payment-address-hint" />
+            </label>
+            <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>). The root itself is the empty address and cannot receive.</p>
+            <label class="field"><span>Destination user ID</span>
+              <input id="payment-user" name="payment-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64-character public key" aria-describedby="payment-user-hint" />
+            </label>
+            <p id="payment-user-hint" class="field-hint">The owner of the board at that address. The payment is reversed if the id does not match.</p>
+            <label class="field"><span>Amount</span>
+              <input id="payment-amount" name="payment-amount" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="e.g. 12.50" aria-describedby="payment-amount-hint" />
+            </label>
+            <p id="payment-amount-hint" class="field-hint">Positive, up to two decimals. Every debit must stay at or above 0.00 or the payment is reversed.</p>
+            <p id="payment-warning" class="field-warning" role="status" hidden></p>
+            <p id="payment-error" class="form-error" role="alert" hidden></p>
+          </div>
+          <footer class="editor-actions">
+            <div class="editor-actions-right">
+              <button id="payment-cancel" class="button button--quiet" type="button">Cancel</button>
+              <button id="payment-submit" class="button button--primary" type="submit">Offer payment</button>
+            </div>
+          </footer>
+        </form>
+      </dialog>
 
       <dialog id="editor" class="editor" aria-labelledby="editor-title" aria-describedby="editor-seq">
         <form id="editor-form" class="editor-form" novalidate>

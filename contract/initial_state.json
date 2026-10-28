@@ -1,7 +1,8 @@
 {
-  "v": 3,
+  "v": 4,
   "parent": { "seq": 0, "userId": null, "sig": null },
   "contacts": { "seq": 0, "entries": [], "sig": null },
+  "payments": { "seq": 0, "settled": [], "entry": null, "sig": null },
   "slots": [
     { "seq": 0, "entry": null, "sig": null },
     { "seq": 0, "entry": null, "sig": null },
