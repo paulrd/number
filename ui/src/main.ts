@@ -1499,6 +1499,9 @@ function paintStatus(detail?: string): void {
     detail?.trim() || STATUS_DEFAULT_DETAIL[boardStatus];
   renderControls();
   renderBoard();
+  // The payment panel depends on the ready state; a status transition must
+  // repaint it even when no state/identity callback follows.
+  void renderPayments();
 }
 
 function setStatus(next: BoardStatus, detail?: string): void {
