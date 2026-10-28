@@ -1731,6 +1731,53 @@ body:has(#delegate-install[open]) {
   line-height: 1.45;
 }
 
+.field-hint.is-warning {
+  color: var(--warning);
+}
+
+.field-hint.is-warning::before {
+  content: "! ";
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+/* Child link panel in the slot editor ------------------------------------- */
+
+.child-link {
+  display: grid;
+  padding: 0.75rem 0.8rem 0.8rem;
+  gap: 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.child-link-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.child-link h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.child-link .button {
+  justify-self: start;
+  margin-top: 0.1rem;
+}
+
+.parent-error.form-error {
+  margin: 0;
+}
+
 .field-hint code {
   color: var(--muted);
   font-size: 0.95em;
@@ -1942,7 +1989,277 @@ body:has(#delegate-install[open]) {
   line-height: 1;
 }
 
+/* Board and parent rows --------------------------------------------------- */
+
+.meta-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.meta-line .copy-button {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.meta-actions {
+  display: flex;
+  margin-left: -0.35rem;
+  align-items: center;
+  gap: 0.1rem;
+  flex-wrap: wrap;
+}
+
+.meta-actions .meta-action {
+  margin-left: 0;
+}
+
+.meta-action--danger {
+  color: var(--danger);
+}
+
+.meta-action--danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.parent-name {
+  display: block;
+  min-width: 0;
+  padding: 0.2rem 0.35rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parent-name.is-root {
+  color: var(--faint);
+}
+
+.meta-note {
+  margin: 0.15rem 0 0;
+  padding: 0 0.35rem;
+  color: var(--warning);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+/* Link-state badges ------------------------------------------------------- */
+
+.state-badge {
+  display: inline-flex;
+  min-height: 1.45rem;
+  padding: 0.1rem 0.45rem;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.state-badge--readonly {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+}
+
+.state-badge[data-state="linked"] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.state-badge[data-state="pending"] {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.state-badge[data-state="not-created"] {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+}
+
+.state-badge[data-state="legacy"] {
+  border-color: color-mix(in srgb, var(--warning) 36%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.state-badge[data-state="error"],
+.state-badge[data-state="unreadable"] {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.state-badge[data-state="checking"] {
+  color: var(--faint);
+}
+
+.state-badge[data-state="checking"]::before {
+  content: "";
+  width: 0.34rem;
+  height: 0.34rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  animation: breathe 1.5s ease-in-out infinite;
+}
+
+/* Breadcrumbs ------------------------------------------------------------- */
+
+.breadcrumbs {
+  display: flex;
+  margin: 0 0 0.9rem;
+  padding: 0.2rem 0 0.75rem;
+  align-items: center;
+  gap: 0.25rem 0.65rem;
+  flex-wrap: wrap;
+  border-bottom: 1px dashed var(--rule);
+}
+
+.breadcrumbs::before {
+  content: "Path";
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.breadcrumb-list {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  align-items: center;
+  gap: 0.1rem;
+  flex-wrap: wrap;
+  list-style: none;
+}
+
+.breadcrumb-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.breadcrumb-item + .breadcrumb-item::before {
+  content: "›";
+  padding-inline: 0.25rem;
+  color: var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.breadcrumb-link {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0.2rem 0.35rem;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 550;
+  letter-spacing: 0.03em;
+  line-height: 1.3;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--border-strong) 65%, transparent);
+  text-underline-offset: 0.22em;
+  transition:
+    background-color 140ms var(--ease),
+    border-color 140ms var(--ease),
+    color 140ms var(--ease);
+}
+
+.breadcrumb-link:hover {
+  border-color: var(--border);
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.breadcrumb-current {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0.2rem 0.35rem;
+  align-items: center;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1.3;
+}
+
+.breadcrumb-pending {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0.2rem 0.35rem;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  line-height: 1.3;
+}
+
+.breadcrumb-badge {
+  min-height: 1.25rem;
+  font-size: 0.5rem;
+}
+
+.breadcrumb-warning {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--warning);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.board-title:focus {
+  outline: none;
+}
+
 /* Address book ------------------------------------------------------------ */
+
+html:has(#parent-dialog[open]),
+body:has(#parent-dialog[open]) {
+  overflow: hidden;
+}
+
+.parent-dialog {
+  width: min(34rem, calc(100vw - 2rem));
+}
+
+.parent-dialog .editor-actions {
+  justify-content: flex-end;
+}
 
 html:has(#contacts-dialog[open]),
 body:has(#contacts-dialog[open]) {
@@ -2371,6 +2688,20 @@ body:has(#contacts-dialog[open]) {
 
   .contact-row {
     flex-wrap: wrap;
+  }
+
+  .breadcrumbs {
+    gap: 0.15rem 0.35rem;
+  }
+
+  .breadcrumb-item + .breadcrumb-item::before {
+    padding-inline: 0.1rem;
+  }
+
+  .breadcrumb-link,
+  .breadcrumb-current,
+  .breadcrumb-pending {
+    font-size: 0.64rem;
   }
 
   .contacts-form-actions {

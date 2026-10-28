@@ -1,5 +1,6 @@
 {
-  "v": 2,
+  "v": 3,
+  "parent": { "seq": 0, "userId": null, "sig": null },
   "contacts": { "seq": 0, "entries": [], "sig": null },
   "slots": [
     { "seq": 0, "entry": null, "sig": null },

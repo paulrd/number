@@ -77,12 +77,14 @@ describe("delegate transport", () => {
       pubkey: "ab".repeat(32),
       nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
       contactsNextSeq: 3,
+      parentNextSeq: 4,
     };
     const identity = await client.identity();
     expect(identity).toEqual({
       pubkey: "ab".repeat(32),
       nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
       contactsNextSeq: 3,
+      parentNextSeq: 4,
     });
     expect(sent).toHaveLength(1);
 
@@ -103,7 +105,7 @@ describe("delegate transport", () => {
     });
   });
 
-  it("defaults a missing contactsNextSeq to 1 (v1 delegate)", async () => {
+  it("defaults missing contactsNextSeq and parentNextSeq to 1 (pre-v4 delegate)", async () => {
     let reply: object = {};
     let client!: DelegateClient;
     client = new DelegateClient(
@@ -118,11 +120,15 @@ describe("delegate transport", () => {
       pubkey: "ab".repeat(32),
       nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
     };
-    await expect(client.identity()).resolves.toMatchObject({ contactsNextSeq: 1 });
+    await expect(client.identity()).resolves.toMatchObject({
+      contactsNextSeq: 1,
+      parentNextSeq: 1,
+    });
 
     reply = { ok: true, seed: "cd".repeat(32), nextSeq: [1, 1, 1, 1, 1, 1, 1, 1] };
     await expect(client.exportSecrets()).resolves.toMatchObject({
       contactsNextSeq: 1,
+      parentNextSeq: 1,
     });
   });
 
@@ -144,6 +150,91 @@ describe("delegate transport", () => {
       };
       await expect(client.identity()).rejects.toMatchObject({ code: "Protocol" });
     }
+  });
+
+  it("rejects a malformed parentNextSeq", async () => {
+    for (const parentNextSeq of [0, -1, 1.5, "2", null, true]) {
+      let reply: object = {};
+      let client!: DelegateClient;
+      client = new DelegateClient(
+        () => client.handleResponse(response(reply)),
+        KEY_BYTES,
+        CODE_HASH_BYTES,
+        PARAMS_BYTES,
+      );
+      reply = {
+        ok: true,
+        pubkey: "ab".repeat(32),
+        nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+        parentNextSeq,
+      };
+      await expect(client.identity()).rejects.toMatchObject({ code: "Protocol" });
+    }
+  });
+
+  it("signs a parent link with the signParent command", async () => {
+    let reply: object = {};
+    let client!: DelegateClient;
+    const sent: ClientRequestT[] = [];
+    client = new DelegateClient(
+      (request) => {
+        sent.push(request);
+        client.handleResponse(response(reply));
+      },
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    reply = { ok: true, sig: SIG };
+    await expect(client.signParent(3, CONTACT_A)).resolves.toBe(SIG);
+    expect(sentPayload(sent)).toEqual({
+      cmd: "signParent",
+      seq: 3,
+      userId: CONTACT_A,
+    });
+
+    // A null parent clears the link; it is still signed.
+    await expect(client.signParent(4, null)).resolves.toBe(SIG);
+    expect(sentPayload(sent)).toEqual({ cmd: "signParent", seq: 4, userId: null });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("rejects malformed signParent arguments before sending", async () => {
+    const sent: ClientRequestT[] = [];
+    const client = new DelegateClient(
+      (request) => sent.push(request),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    await expect(client.signParent(0, CONTACT_A)).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(client.signParent(1.5, CONTACT_A)).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(client.signParent(1, "ab")).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(
+      client.signParent(1, CONTACT_HEX.toUpperCase()),
+    ).rejects.toMatchObject({ code: "Protocol" });
+
+    expect(sent).toHaveLength(0);
+  });
+
+  it("rejects a malformed signParent signature", async () => {
+    const client = new DelegateClient(
+      () => client.handleResponse(response({ ok: true, sig: "not-a-sig" })),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+    await expect(client.signParent(1, CONTACT_A)).rejects.toMatchObject({
+      code: "Protocol",
+    });
   });
 
   it("handles status, export, and import responses", async () => {
@@ -172,6 +263,7 @@ describe("delegate transport", () => {
       pubkey: "ab".repeat(32),
       nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
       contactsNextSeq: 4,
+      parentNextSeq: 7,
     };
     await expect(client.status()).resolves.toEqual({
       hasSeed: true,
@@ -179,6 +271,7 @@ describe("delegate transport", () => {
         pubkey: "ab".repeat(32),
         nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
         contactsNextSeq: 4,
+        parentNextSeq: 7,
       },
     });
 
@@ -187,27 +280,33 @@ describe("delegate transport", () => {
       seed: "cd".repeat(32),
       nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
       contactsNextSeq: 5,
+      parentNextSeq: 8,
     };
     await expect(client.exportSecrets()).resolves.toEqual({
       seed: "cd".repeat(32),
       nextSeq: [1, 2, 3, 4, 5, 6, 7, 8],
       contactsNextSeq: 5,
+      parentNextSeq: 8,
     });
 
     reply = { ok: true };
     await expect(
-      client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1], 6),
+      client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1], 6, 9),
     ).resolves.toBeUndefined();
     expect(sentPayload(sent)).toEqual({
       cmd: "import",
       seed: "ef".repeat(32),
       nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
       contactsNextSeq: 6,
+      parentNextSeq: 9,
     });
 
-    // The default contacts counter is 1 for callers that omit it.
+    // The default counters are 1 for callers that omit them.
     await client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1]);
-    expect(sentPayload(sent)).toMatchObject({ contactsNextSeq: 1 });
+    expect(sentPayload(sent)).toMatchObject({
+      contactsNextSeq: 1,
+      parentNextSeq: 1,
+    });
   });
 
   it("rejects a non-positive contactsNextSeq on import", async () => {

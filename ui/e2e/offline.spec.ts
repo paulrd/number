@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { MOCK_CHILD_ID, MOCK_PARENT_ID } from "../src/mock";
 
 /**
  * Offline tier: the real built UI, the real state codec/merge code, and the
@@ -8,6 +9,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 const ALICE_ID = "ABCDEF0123456789".repeat(4);
 const BOB_ID = "2222222222222222".repeat(4);
+const GHOST_ID = "3333333333333333".repeat(4);
+const CAROL_ID = "4444444444444444".repeat(4);
 
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
@@ -130,7 +133,8 @@ test("a blank value saves as 0.00 and more than two decimals is rejected", async
   await page.goto("/");
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await addContact(page, "Alice", ALICE_ID);
-  await expect(page.locator("#contacts-count")).toHaveText("1");
+  await addContact(page, "Bob", BOB_ID);
+  await expect(page.locator("#contacts-count")).toHaveText("2");
 
   // Blank value: optional, stored as zero hundredths.
   await page.locator(".slot").first().click();
@@ -140,9 +144,10 @@ test("a blank value saves as 0.00 and more than two decimals is rejected", async
   await expect(page.locator(".slot .slot-value").first()).toHaveText("0.00");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Alice");
 
-  // Three decimal places never reaches the board.
+  // Three decimal places never reaches the board. A different child board is
+  // used because a child id may only appear in one slot.
   await page.locator(".slot").nth(1).click();
-  await page.locator("#contact-select").selectOption(aliceId);
+  await page.locator("#contact-select").selectOption(BOB_ID.toLowerCase());
   await page.locator("#value-input").fill("1.234");
   await expect(page.locator("#value-warning")).toBeVisible();
   await expect(page.locator("#value-warning")).toContainText("2 decimal places");
@@ -167,6 +172,7 @@ test("saves and reopens the full cents range exactly", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await addContact(page, "Bob", BOB_ID);
+  await addContact(page, "Carol", CAROL_ID);
   const bobId = BOB_ID.toLowerCase();
 
   // 92233720368547758.07 is i64 max cents and not representable as a JS number.
@@ -181,9 +187,10 @@ test("saves and reopens the full cents range exactly", async ({ page }) => {
   await expect(page.locator("#value-input")).toHaveValue(max);
   await page.locator("#cancel-button").click();
 
-  // One hundredth past the bound is rejected inline, not rounded.
+  // One hundredth past the bound is rejected inline, not rounded. A different
+  // child board is used because a child id may only appear in one slot.
   await page.locator(".slot").nth(1).click();
-  await page.locator("#contact-select").selectOption(bobId);
+  await page.locator("#contact-select").selectOption(CAROL_ID.toLowerCase());
   await page.locator("#value-input").fill("92233720368547758.08");
   await expect(page.locator("#value-warning")).toBeVisible();
   await expect(page.locator("#value-warning")).toContainText(
@@ -203,6 +210,123 @@ test("saves and reopens the full cents range exactly", async ({ page }) => {
   await page.locator(".slot").nth(1).click();
   await expect(page.locator("#value-input")).toHaveValue(min);
   await page.locator("#cancel-button").click();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("navigates boards as a tree, sets a parent, and rejects duplicate children", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#read-only-badge")).toBeHidden();
+  await expect(page.locator("#parent-name")).toHaveText("Root");
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Your board",
+  );
+
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+  await addContact(page, "Ghost", GHOST_ID);
+  await expect(page.locator("#contacts-count")).toHaveText("3");
+
+  // A child slot is Linked when both signed sides agree.
+  await page.locator(".slot").first().click();
+  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
+  await expect(page.locator("#child-link-status")).toHaveText("Linked");
+  await expect(page.locator("#child-link-detail")).toContainText(
+    "lists this board as its parent",
+  );
+  await page.locator("#value-input").fill("3.25");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("3.25");
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
+
+  // Open the child board read-only from the editor, then return home.
+  await page.locator(".slot").first().click();
+  await expect(page.locator("#child-link-status")).toHaveText("Linked");
+  await page.locator("#child-open").click();
+  await expect(page.locator("#read-only-badge")).toBeVisible();
+  await expect(page.locator("#board-home")).toBeVisible();
+  await expect(page.locator("#contacts-open")).toBeDisabled();
+  await expect(page.locator("#parent-edit")).toBeHidden();
+  await expect(page.locator("#parent-clear")).toBeHidden();
+  await expect(page.locator("#board-mode")).toContainText("Read-only");
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Child",
+  );
+  await expect(page.locator("#breadcrumb-list")).toContainText("Your board");
+  // The fixture child has no slots, and they are not editable.
+  await expect(page.locator(".slot").first()).toBeDisabled();
+
+  await page.locator("#board-home").click();
+  await expect(page.locator("#read-only-badge")).toBeHidden();
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Your board",
+  );
+
+  // A one-sided child link is Pending: the parent fixture exists, but its own
+  // parent is empty, so it has not added this board as a parent.
+  await page.locator(".slot").nth(1).click();
+  await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
+  await expect(page.locator("#child-link-status")).toHaveText("Pending");
+  await expect(page.locator("#child-link-detail")).toContainText(
+    "has not set this board as its parent",
+  );
+  await page.locator("#value-input").fill("1.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
+
+  // Setting this board's parent to the child would close a loop, so it is
+  // blocked before anything is signed.
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_CHILD_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-error")).toContainText("loop");
+  await expect(page.locator("#parent-name")).toHaveText("Root");
+
+  // A mutual link is Linked: the parent fixture has a slot pointing here.
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await page.locator("#parent-open").click();
+  await expect(page.locator("#read-only-badge")).toBeVisible();
+  await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
+    "Parent",
+  );
+  await page.locator("#board-home").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+
+  // Duplicate child ids are rejected before saving.
+  await page.locator(".slot").nth(2).click();
+  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
+  await expect(page.locator("#contact-hint")).toContainText("already in slot 1");
+  await expect(page.locator("#save-button")).toBeDisabled();
+  await page.locator("#cancel-button").click();
+
+  // A contact with no board is "Not created yet"; the slot still saves.
+  await page.locator(".slot").nth(3).click();
+  await page.locator("#contact-select").selectOption(GHOST_ID);
+  await page.locator("#value-input").fill("1.00");
+  await page.locator("#save-button").click();
+  await expect(page.locator(".slot .slot-label").nth(3)).toHaveText("Ghost");
+  await page.locator(".slot").nth(3).click();
+  await expect(page.locator("#child-link-status")).toHaveText("Not created yet");
+  await expect(page.locator("#child-open")).toBeDisabled();
+  await page.locator("#cancel-button").click();
+
+  // Clearing the parent returns this board to a root.
+  await page.locator("#parent-clear").click();
+  await expect(page.locator("#parent-name")).toHaveText("Root");
+  await expect(page.locator("#parent-clear")).toBeHidden();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });

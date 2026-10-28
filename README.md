@@ -1,10 +1,17 @@
 # number
 
 A small Freenet dApp: one personal board of **8 number slots** and a shared
-**address book**. Each slot is linked to a contact (label + user id/public key)
-from the address book and holds a two-decimal number (optional; blank is
-`0.00`) plus optional unit and note. The contact is mandatory; the slot stores
-the contact's public key, so renaming a label keeps the link.
+**address book**, arranged as a **tree of boards**. Each board is a node: its 8
+slots are its children (each linked to a contact — label + user id/public key)
+and it has at most one parent board. A slot holds a two-decimal number
+(optional; blank is `0.00`) plus optional unit and note. The child contact is
+mandatory; the slot stores the contact's public key, so renaming a label keeps
+the link.
+
+A parent/child edge is a tree edge only when **both sides agree**: the parent
+board has a slot for the child, and the child board's parent points back to the
+parent. One-sided links are shown as pending. Other owners' boards are readable
+in the UI but only the owner can sign them.
 
 - **Contract** (`contract/`) — shared, replicated state. One instance per owner,
   parameterised by the owner's Ed25519 verifying key. Signed slot and address
@@ -96,10 +103,11 @@ Append the outgoing artifact to `ui/src/migrations.ts` **before** rebuilding:
 - delegate change: append the current delegate key, code hash, and webapp id
   to `LEGACY_DELEGATES`.
 
-The v2 address-book release is the breaking case: its state schema and signing
-bytes changed, so all v1 contract hashes are unmigratable. The owner identity
-still migrates through the delegate, but the v2 board starts empty (same owner
-key, no contacts or slots).
+The v2 address-book release was the breaking case: its state schema and signing
+bytes changed, so v1 contract hashes are unmigratable. The v3 tree release is
+migratable: it keeps the v2 slot/contacts signing bytes and adds a parent
+record, so v2 boards are upgraded with an empty parent. The owner identity
+migrates through the delegate in both cases.
 
 This is enforced, not just documented: `scripts/record-artifacts.sh` refuses to
 supersede a generation missing from the registry, and `migrations.test.ts`
@@ -175,6 +183,28 @@ server after restarting the node. None of this runs for `npm run build`,
 The dev server proxies a node credential, so keep it on loopback: do not pass
 `--host 0.0.0.0` on a machine where other users can reach the port.
 
+## Boards as a tree
+
+Every board is a node in a tree. Its 8 slots are its **children** (each slot's
+contact is the child board owner's user id) and it has at most one **parent**.
+
+- **Link a child:** open a slot, choose the child's contact, and save. The
+  child's owner opens *their* board, sets its parent to your board, and adds
+  your contact if needed.
+- **Link a parent:** open **Parent → Set parent** on your board and choose the
+  parent's contact. Clear it to become a root.
+- **Mutual match:** an edge is a tree edge only when both boards agree — the
+  parent has a slot for the child and the child's parent points back. One-sided
+  links show as **Pending**; a board that does not exist shows **Not created**.
+  A v2 board can be a parent (its slots are readable) but must be opened in v3
+  to become a child.
+- **Navigate:** breadcrumbs follow mutual parent edges to the root; **Home**
+  returns to your own board. Other owners' boards are read-only. The address
+  book labels a board's own slots; a viewed board's labels come from its state.
+- **Cycles** are detected by the UI and are not followed. The contract enforces
+  one signed parent per board and rejects a board parenting itself; it cannot
+  enforce agreement or acyclicity across boards.
+
 ## Identity backup and restore
 
 The owner identity is an Ed25519 seed held in this device's Freenet delegate.
@@ -222,13 +252,18 @@ updates are in place. Any node that can fetch the contract serves it at
 
 ## Behaviour notes
 
-- **A slot's contact is mandatory.** It is selected from the address book and
-  stored as the contact's 64-hex public key. Removing a contact does not
-  invalidate old signed slots; they show an "unknown contact" id until re-linked.
+- **A slot's contact is mandatory and is the child node.** It is selected from
+  the address book and stored as the child board owner's 64-hex public key.
+  Removing a contact does not invalidate old signed slots; they show an
+  "unknown contact" id until re-linked.
+- **A board has one signed parent record.** Setting a parent is a signed write;
+  clearing it writes a parent tombstone at a higher `seq`. A parent edge only
+  counts as a tree edge when the other side links back; one-sided links are
+  shown as pending. Cycles are detected by the UI, not the contract.
 - **Clearing a slot tombstones it** (`seq > 0`, `entry: null`), so an older peer
   cannot resurrect the value. "Removed", not "erased from the network". The
-  address book has its own signed sequence: removing every contact leaves a
-  legal empty record at a higher `seq`.
+  address book and parent record have their own signed sequences: removing every
+  contact or clearing the parent leaves a legal empty record at a higher `seq`.
 - **Identity lives in the delegate** on this node. A different device has a
   different owner key and therefore a different board until key export/import
   exists.
@@ -237,10 +272,11 @@ updates are in place. Any node that can fetch the contract serves it at
   `-92233720368547758.08` … `92233720368547758.07` (displayed) survives editing,
   signing, and reload exactly. A blank input saves `0.00`; more than two decimal
   places is rejected.
-- **v2 does not carry v1 boards forward.** The address book changed the state
-  schema and signing bytes. The owner key is preserved through delegate
-  migration, but the new board starts with an empty address book and slots; v1
-  contract hashes are registered as unmigratable.
+- **v3 carries v2 boards forward.** v3 keeps the v2 slot/contacts signing bytes
+  and adds a signed parent record; the client upgrades a v2 state with an empty
+  parent and re-PUTs it. v1 boards remain unmigratable (the v2 address book
+  changed their schema/signing bytes). The owner key is preserved through
+  delegate migration in both cases.
 - **Live updates** arrive through subscription deltas. The node currently
   serializes `SubscribeResponse` as `PutResponse` (upstream freenet-stdlib bug;
   see `reports/upstream-subscribe-response.md`), so a subscribe timeout is

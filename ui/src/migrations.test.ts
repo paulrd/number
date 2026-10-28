@@ -122,6 +122,22 @@ describe("migration registry", () => {
     }
   });
 
+  it("treats v2 as migratable and v1 as unmigratable", () => {
+    // v3 keeps the v2 slot/contacts signing bytes; the client only adds an
+    // empty parent. v1 changed the slot schema and cannot be re-PUT.
+    expect(LEGACY_CONTRACT_CODE_HASHES).toContain(
+      "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
+    );
+    for (const v1 of [
+      "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
+      "3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd",
+      "7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez",
+    ]) {
+      expect(UNMIGRATABLE_CONTRACT_CODE_HASHES).toContain(v1);
+      expect(LEGACY_CONTRACT_CODE_HASHES).not.toContain(v1);
+    }
+  });
+
   it("keeps every superseded generation registered", () => {
     const registeredContracts = [
       ...LEGACY_CONTRACT_CODE_HASHES,

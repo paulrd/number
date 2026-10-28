@@ -31,11 +31,18 @@ import {
   type Contact,
   type Delta,
   type Entry,
-  type StateV2,
+  type StateV3,
 } from "./state";
-import { errorMessage, hexToBytes } from "./util";
+import { errorMessage, hexToBytes, isLowerHex } from "./util";
 
 export { entryFromInputs };
+
+/**
+ * Tree reads are best-effort. A missing instance can surface as a 12 s GET
+ * timeout on this node, so do not let a missing child/parent stall navigation
+ * for the full request budget; try the next legacy generation quickly.
+ */
+const BOARD_READ_TIMEOUT_MS = 4_000;
 
 export type BoardStatus =
   | "starting"
@@ -48,7 +55,7 @@ export type BoardStatus =
 
 export interface BoardCallbacks {
   onStatus: (status: BoardStatus, detail?: string) => void;
-  onState: (state: StateV2) => void;
+  onState: (state: StateV3) => void;
   onIdentity: (identity: DelegateIdentity) => void;
   onContractKey: (keyBase58: string) => void;
   onError: (error: Error) => void;
@@ -79,17 +86,31 @@ export interface BoardConfig {
   delegateParamsBytes: number[];
 }
 
+export interface BoardSnapshot {
+  /** Owner pubkey of this board (64 lowercase hex). */
+  ownerId: string;
+  state: StateV3;
+  /** Base58 code hash of the contract instance the state was read from. */
+  codeHash: string;
+  /** True when the state came from a superseded (v2) contract generation. */
+  legacy: boolean;
+}
+
 export interface BoardBackend {
   readonly mode: "online" | "offline";
   readonly identity: DelegateIdentity | null;
   readonly contractKeyBase58: string | null;
-  readonly currentState: StateV2 | null;
-  start(): Promise<StateV2>;
+  readonly currentState: StateV3 | null;
+  start(): Promise<StateV3>;
   save(slotIndex: number, entry: Entry): Promise<void>;
   clear(slotIndex: number): Promise<void>;
   /** Replace the signed address book with `entries`. */
   saveContacts(entries: Contact[]): Promise<void>;
-  retry(): Promise<StateV2>;
+  /** Set (or clear with null) this board's signed parent link. */
+  saveParent(userId: string | null): Promise<void>;
+  /** Read one board by owner id; null when no instance/state exists. */
+  readBoard(ownerId: string): Promise<BoardSnapshot | null>;
+  retry(): Promise<StateV3>;
   /** Export the owner seed and counters for a backup. */
   exportIdentity(): Promise<ExportedSecrets>;
   /** Restore a seed into a delegate that has none (a new device). */
@@ -97,6 +118,7 @@ export interface BoardBackend {
     seed: string,
     nextSeq: number[],
     contactsNextSeq: number,
+    parentNextSeq: number,
   ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
@@ -108,14 +130,16 @@ export class OnlineBoard implements BoardBackend {
 
   identity: DelegateIdentity | null = null;
   contractKeyBase58: string | null = null;
-  currentState: StateV2 | null = null;
+  currentState: StateV3 | null = null;
 
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
   private readonly delegateClients: DelegateClient[] = [];
+  /** Read-only viewers for other owners' boards, keyed by code hash. */
+  private readonly viewers = new Map<string, NumberContract>();
   private migrating = false;
   private started = false;
-  private startPromise: Promise<StateV2> | null = null;
+  private startPromise: Promise<StateV3> | null = null;
   private mutating = false;
 
   constructor(
@@ -136,7 +160,7 @@ export class OnlineBoard implements BoardBackend {
     this.delegateClients.push(this.delegate);
   }
 
-  start(): Promise<StateV2> {
+  start(): Promise<StateV3> {
     if (this.started && this.currentState) return Promise.resolve(this.currentState);
     if (this.startPromise) return this.startPromise;
 
@@ -222,6 +246,7 @@ export class OnlineBoard implements BoardBackend {
             exported.seed,
             exported.nextSeq,
             exported.contactsNextSeq,
+            exported.parentNextSeq,
           );
           this.callbacks.onWarning?.(
             "Recovered the owner identity from the previous delegate.",
@@ -240,7 +265,7 @@ export class OnlineBoard implements BoardBackend {
     }
   }
 
-  private async doStart(): Promise<StateV2> {
+  private async doStart(): Promise<StateV3> {
     if (!this.config.contractCodeHash.trim()) {
       throw new ContractBuildError(
         "ContractBuildMissing",
@@ -437,7 +462,8 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signContacts(seq, validated);
 
       const delta: Delta = {
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: { seq, entries: validated, sig },
         slots: [],
       };
@@ -471,6 +497,136 @@ export class OnlineBoard implements BoardBackend {
     }
   }
 
+  /**
+   * Set (or clear with null) the signed parent link. Same optimistic/rollback
+   * shape and single-write guard as `write`. The seq beats both the contract's
+   * record and the delegate's parent counter.
+   */
+  async saveParent(userId: string | null): Promise<void> {
+    if (userId !== null) {
+      if (!isLowerHex(userId, 64)) {
+        throw new Error(
+          "The parent must be a 64-character lowercase hex user id.",
+        );
+      }
+      if (this.identity && userId === this.identity.pubkey) {
+        throw new Error("A board cannot be its own parent.");
+      }
+    }
+
+    if (!this.started || !this.currentState || !this.identity || !this.contract) {
+      throw new Error("The board is not connected yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    this.mutating = true;
+    const previous = this.currentState;
+    let updateStarted = false;
+
+    try {
+      const seq = Math.max(
+        previous.parent.seq + 1,
+        this.identity.parentNextSeq ?? 1,
+      );
+      const sig = await this.delegate.signParent(seq, userId);
+
+      const delta: Delta = {
+        v: 3,
+        parent: { seq, userId, sig },
+        contacts: null,
+        slots: [],
+      };
+
+      const optimistic = mergeDelta(previous, delta);
+      this.currentState = optimistic;
+      this.callbacks.onState(optimistic);
+
+      this.identity = { ...this.identity, parentNextSeq: seq + 1 };
+      this.callbacks.onIdentity(this.identity);
+
+      updateStarted = true;
+      await this.contract.updateDelta(delta);
+
+      try {
+        const fresh = await this.contract.getState();
+        this.currentState = fresh;
+        this.callbacks.onState(fresh);
+      } catch (error) {
+        this.callbacks.onWarning?.(
+          `Saved the parent link, but could not refresh the board: ${errorMessage(error)}`,
+        );
+      }
+    } catch (error) {
+      this.currentState = previous;
+      this.callbacks.onState(previous);
+      if (updateStarted) void this.refresh();
+      throw error;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /**
+   * Read one board by owner id. The own board comes from the in-memory state;
+   * any other owner is read through a lazy read-only viewer, trying the current
+   * code hash first and then each legacy (v2) generation. Returns null when no
+   * instance holds a readable state.
+   */
+  async readBoard(ownerId: string): Promise<BoardSnapshot | null> {
+    if (!isLowerHex(ownerId, 64)) {
+      throw new Error(
+        `The board owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
+      );
+    }
+
+    if (this.identity && ownerId === this.identity.pubkey) {
+      if (!this.currentState) return null;
+      return {
+        ownerId,
+        state: this.currentState,
+        codeHash: this.config.contractCodeHash,
+        legacy: false,
+      };
+    }
+
+    const parameters = hexToBytes(ownerId);
+    for (const codeHash of [
+      this.config.contractCodeHash,
+      ...LEGACY_CONTRACT_CODE_HASHES,
+    ]) {
+      const legacy = codeHash !== this.config.contractCodeHash;
+      try {
+        const viewer = await this.viewerFor(codeHash);
+        const state = await viewer.readState(parameters, BOARD_READ_TIMEOUT_MS);
+        return { ownerId, state, codeHash, legacy };
+      } catch {
+        // No instance, unreadable state, or a timeout: try the next generation.
+      }
+    }
+    return null;
+  }
+
+  private async viewerFor(codeHash: string): Promise<NumberContract> {
+    const existing = this.viewers.get(codeHash);
+    if (existing) {
+      await existing.connect();
+      return existing;
+    }
+
+    // No callbacks: a remote board must never feed the own board's state,
+    // delegate queue, or error banner.
+    const viewer = new NumberContract(codeHash, this.config.contractWasmUrl);
+    this.viewers.set(codeHash, viewer);
+    try {
+      await viewer.connect();
+    } catch (error) {
+      this.viewers.delete(codeHash);
+      viewer.close();
+      throw error;
+    }
+    return viewer;
+  }
+
   /** Ask the delegate for the seed and counters behind this identity. */
   exportIdentity(): Promise<ExportedSecrets> {
     return this.delegate.exportSecrets();
@@ -485,8 +641,14 @@ export class OnlineBoard implements BoardBackend {
     seed: string,
     nextSeq: number[],
     contactsNextSeq: number,
+    parentNextSeq: number,
   ): Promise<void> {
-    await this.delegate.importSecrets(seed, nextSeq, contactsNextSeq);
+    await this.delegate.importSecrets(
+      seed,
+      nextSeq,
+      contactsNextSeq,
+      parentNextSeq,
+    );
   }
 
   /**
@@ -538,7 +700,8 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.sign(slotIndex, seq, entry);
 
       const delta: Delta = {
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
@@ -594,7 +757,7 @@ export class OnlineBoard implements BoardBackend {
     }
   }
 
-  async retry(): Promise<StateV2> {
+  async retry(): Promise<StateV3> {
     this.close();
     return this.start();
   }
@@ -602,6 +765,8 @@ export class OnlineBoard implements BoardBackend {
   close(): void {
     this.started = false;
     this.delegate.failAll();
+    for (const viewer of this.viewers.values()) viewer.close();
+    this.viewers.clear();
     this.contract?.close();
     this.contract = null;
   }

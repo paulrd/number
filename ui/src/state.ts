@@ -1,12 +1,17 @@
 /**
  * Contract state, delta, and summary codecs plus the client-side merge.
  *
- * These shapes are the v2 wire format in DESIGN.md §2–§5 and
- * `number-v2-spec.md` §2. The browser cannot run Ed25519 verification here, but
- * it can enforce every structural and bounds rule, build the canonical signing
- * bytes (for summaries and optimistic digests), and merge with exactly the same
+ * These shapes are the v3 wire format in DESIGN.md §2–§5 and the v3 spec §2.
+ * The browser cannot run Ed25519 verification here, but it can enforce every
+ * structural and bounds rule, build the canonical signing bytes (for summaries
+ * and optimistic digests), and merge with exactly the same
  * max-over-seq/signature rule as the contract. The contract remains the
  * authority; a bad local merge is corrected by the next GET/notification.
+ *
+ * v3 adds a signed `parent` record (board tree) to the v2 shape. The slot and
+ * contacts signing bytes are unchanged from v2, so a v2 state upgrades by
+ * adding an empty parent; `validateState`/`decodeState` accept both versions
+ * and always return v3.
  */
 
 import { blake3 } from "@noble/hashes/blake3";
@@ -20,7 +25,12 @@ import { bytesToHex, hexToBytes, isLowerHex, utf8Length } from "./util";
 
 export const SLOT_COUNT = 8;
 export const MAX_CONTACTS = 64;
-export const STATE_VERSION = 2 as const;
+export const STATE_VERSION = 3 as const;
+/**
+ * The predecessor wire version. A v2 state has no parent and is upgraded on
+ * read; it is never written.
+ */
+export const LEGACY_STATE_VERSION = 2 as const;
 
 export const LIMITS = {
   /** Contact label limit, in UTF-8 bytes. */
@@ -33,6 +43,7 @@ export const USER_ID_HEX_LEN = 64;
 
 export const SIGNING_DOMAIN_SLOT = "number:v2:slot";
 export const SIGNING_DOMAIN_CONTACTS = "number:v2:contacts";
+export const SIGNING_DOMAIN_PARENT = "number:v3:parent";
 
 export const I64_MIN = -(2n ** 63n);
 export const I64_MAX = 2n ** 63n - 1n;
@@ -69,8 +80,16 @@ export interface Slot {
   sig: string | null;
 }
 
-export interface StateV2 {
-  v: 2;
+export interface ParentRecord {
+  seq: number;
+  /** Parent board owner id, or null for a root / cleared parent. */
+  userId: string | null;
+  sig: string | null;
+}
+
+export interface StateV3 {
+  v: 3;
+  parent: ParentRecord;
   contacts: ContactsRecord;
   slots: Slot[];
 }
@@ -83,7 +102,9 @@ export interface DeltaSlot {
 }
 
 export interface Delta {
-  v: 2;
+  v: 3;
+  /** `null` when the parent record is unchanged. */
+  parent: ParentRecord | null;
   /** `null` when the contacts record is unchanged. */
   contacts: ContactsRecord | null;
   slots: DeltaSlot[];
@@ -92,7 +113,8 @@ export interface Delta {
 export type SummarySlot = [seq: number, digest16: string];
 
 export interface Summary {
-  v: 2;
+  v: 3;
+  parent: SummarySlot;
   contacts: SummarySlot;
   slots: SummarySlot[];
 }
@@ -107,6 +129,7 @@ export class StateError extends Error {
 const textEncoder = new TextEncoder();
 const SLOT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_SLOT);
 const CONTACTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_CONTACTS);
+const PARENT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_PARENT);
 const ZERO_DIGEST16 = "0".repeat(32);
 
 function fail(path: string, message: string): never {
@@ -263,6 +286,32 @@ export function validateContacts(raw: unknown, path = "contacts"): ContactsRecor
   return { seq, entries, sig };
 }
 
+/** Validate/normalise the signed parent record. */
+export function validateParent(raw: unknown, path = "parent"): ParentRecord {
+  const obj = asRecord(raw, path);
+  const seq = validateSeq(obj.seq, `${path}.seq`);
+
+  let userId: string | null = null;
+  if (obj.userId !== undefined && obj.userId !== null) {
+    userId = validateUserId(obj.userId, `${path}.userId`);
+  }
+
+  let sig: string | null = null;
+  if (obj.sig !== undefined && obj.sig !== null) {
+    sig = validateSignature(obj.sig, `${path}.sig`);
+  }
+
+  if (seq === 0) {
+    if (userId !== null) fail(path, "seq 0 must have a null userId");
+    if (sig !== null) fail(path, "seq 0 must have a null signature");
+  } else {
+    // seq > 0 always signs a record, even when userId is null (cleared).
+    if (sig === null) fail(path, "seq > 0 requires a signature");
+  }
+
+  return { seq, userId, sig };
+}
+
 /** Validate/normalise one entry. Optional strings become null, never "". */
 export function validateEntry(raw: unknown, path = "entry"): Entry {
   const obj = asRecord(raw, path);
@@ -304,15 +353,29 @@ export function validateSlot(raw: unknown, index: number, path = `slots[${index}
   return { seq, entry, sig };
 }
 
-export function validateState(raw: unknown): StateV2 {
+export function validateState(raw: unknown): StateV3 {
   const obj = asRecord(raw, "state");
-  if (obj.v !== STATE_VERSION) fail("state.v", "expected 2");
+  let parent: ParentRecord;
+  if (obj.v === STATE_VERSION) {
+    parent = validateParent(obj.parent, "state.parent");
+  } else if (obj.v === LEGACY_STATE_VERSION) {
+    // v2 never had a parent field. Explicitly reject it rather than silently
+    // dropping signed data; the client upgrade adds an empty parent.
+    if (obj.parent !== undefined) {
+      fail("state.parent", "a v2 state must not carry a parent record");
+    }
+    parent = emptyParent();
+  } else {
+    fail("state.v", `expected ${LEGACY_STATE_VERSION} or ${STATE_VERSION}`);
+  }
+
   const contacts = validateContacts(obj.contacts, "state.contacts");
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("state.slots", `expected exactly ${SLOT_COUNT} slots`);
   }
   return {
     v: STATE_VERSION,
+    parent,
     contacts,
     slots: obj.slots.map((slot, index) => validateSlot(slot, index)),
   };
@@ -320,7 +383,12 @@ export function validateState(raw: unknown): StateV2 {
 
 export function validateDelta(raw: unknown): Delta {
   const obj = asRecord(raw, "delta");
-  if (obj.v !== STATE_VERSION) fail("delta.v", "expected 2");
+  if (obj.v !== STATE_VERSION) fail("delta.v", `expected ${STATE_VERSION}`);
+
+  const parent =
+    obj.parent === undefined || obj.parent === null
+      ? null
+      : validateParent(obj.parent, "delta.parent");
 
   const contacts =
     obj.contacts === undefined || obj.contacts === null
@@ -348,7 +416,7 @@ export function validateDelta(raw: unknown): Delta {
     return { i, ...validated };
   });
 
-  return { v: STATE_VERSION, contacts, slots };
+  return { v: STATE_VERSION, parent, contacts, slots };
 }
 
 function validateSummaryPair(raw: unknown, path: string): SummarySlot {
@@ -365,13 +433,15 @@ function validateSummaryPair(raw: unknown, path: string): SummarySlot {
 
 export function validateSummary(raw: unknown): Summary {
   const obj = asRecord(raw, "summary");
-  if (obj.v !== STATE_VERSION) fail("summary.v", "expected 2");
+  if (obj.v !== STATE_VERSION) fail("summary.v", `expected ${STATE_VERSION}`);
+  const parent = validateSummaryPair(obj.parent, "summary.parent");
   const contacts = validateSummaryPair(obj.contacts, "summary.contacts");
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("summary.slots", `expected exactly ${SLOT_COUNT} pairs`);
   }
   return {
     v: STATE_VERSION,
+    parent,
     contacts,
     slots: obj.slots.map((pair, index) =>
       validateSummaryPair(pair, `summary.slots[${index}]`),
@@ -411,7 +481,7 @@ function parseJson(input: Uint8Array | string, label: string): unknown {
   }
 }
 
-export function decodeState(input: Uint8Array | string): StateV2 {
+export function decodeState(input: Uint8Array | string): StateV3 {
   return validateState(parseJson(input, "state"));
 }
 
@@ -423,7 +493,7 @@ function encodeJson(value: unknown): Uint8Array {
   return textEncoder.encode(stringifyJsonLossless(value));
 }
 
-export function encodeState(state: StateV2): Uint8Array {
+export function encodeState(state: StateV3): Uint8Array {
   return encodeJson(validateState(state));
 }
 
@@ -443,6 +513,10 @@ export function encodeSummary(summary: Summary): Uint8Array {
   return encodeJson(validateSummary(summary));
 }
 
+export function emptyParent(): ParentRecord {
+  return { seq: 0, userId: null, sig: null };
+}
+
 export function emptyContacts(): ContactsRecord {
   return { seq: 0, entries: [], sig: null };
 }
@@ -451,9 +525,10 @@ export function emptySlot(): Slot {
   return { seq: 0, entry: null, sig: null };
 }
 
-export function emptyState(): StateV2 {
+export function emptyState(): StateV3 {
   return {
     v: STATE_VERSION,
+    parent: emptyParent(),
     contacts: emptyContacts(),
     slots: Array.from({ length: SLOT_COUNT }, emptySlot),
   };
@@ -475,9 +550,14 @@ export function cloneContacts(record: ContactsRecord): ContactsRecord {
   };
 }
 
-export function cloneState(state: StateV2): StateV2 {
+export function cloneParent(record: ParentRecord): ParentRecord {
+  return { seq: record.seq, userId: record.userId, sig: record.sig };
+}
+
+export function cloneState(state: StateV3): StateV3 {
   return {
     v: STATE_VERSION,
+    parent: cloneParent(state.parent),
     contacts: cloneContacts(state.contacts),
     slots: state.slots.map(cloneSlot),
   };
@@ -592,6 +672,49 @@ export function contactsSigningBytes(
   return out;
 }
 
+/**
+ * Canonical parent signing bytes from spec §2/§3:
+ *   b"number:v3:parent" || seq u64 LE || tag u8 || (userId 32 raw when tag == 1)
+ * seq 0 is never signed; the digest is zeros for it.
+ */
+export function parentSigningBytes(
+  seq: number,
+  userId: string | null,
+): Uint8Array {
+  const validatedSeq = validateSeq(seq, "seq");
+  const hasParent = userId !== null;
+  const userIdBytes = hasParent ? hexToBytes(validateUserId(userId, "userId")) : null;
+
+  const out = new Uint8Array(
+    PARENT_PREFIX.length + 8 + 1 + (userIdBytes === null ? 0 : 32),
+  );
+  const view = new DataView(out.buffer);
+  let offset = 0;
+
+  out.set(PARENT_PREFIX, offset);
+  offset += PARENT_PREFIX.length;
+
+  view.setBigUint64(offset, BigInt(validatedSeq), true);
+  offset += 8;
+
+  out[offset] = hasParent ? 1 : 0;
+  offset += 1;
+
+  if (userIdBytes !== null) {
+    out.set(userIdBytes, offset);
+  }
+
+  return out;
+}
+
+/** First 16 bytes of BLAKE3(parent signing bytes); zeros at seq 0. */
+export function parentDigest16(record: ParentRecord): string {
+  if (record.seq === 0) return ZERO_DIGEST16;
+  return bytesToHex(
+    blake3(parentSigningBytes(record.seq, record.userId)).slice(0, 16),
+  );
+}
+
 /** First 16 bytes of BLAKE3(signing bytes), as 32 lowercase hex chars. */
 export function slotDigest16(index: number, slot: Slot): string {
   if (slot.seq === 0) return ZERO_DIGEST16;
@@ -605,10 +728,11 @@ export function contactsDigest16(record: ContactsRecord): string {
   );
 }
 
-export function summaryFromState(state: StateV2): Summary {
+export function summaryFromState(state: StateV3): Summary {
   const validated = validateState(state);
   return {
     v: STATE_VERSION,
+    parent: [validated.parent.seq, parentDigest16(validated.parent)],
     contacts: [validated.contacts.seq, contactsDigest16(validated.contacts)],
     slots: validated.slots.map((slot, index) => [
       slot.seq,
@@ -628,13 +752,21 @@ function needsContacts(
   );
 }
 
+function needsParent(ours: ParentRecord, theirs: ParentRecord): boolean {
+  return (
+    ours.seq > theirs.seq ||
+    (ours.seq === theirs.seq &&
+      parentDigest16(ours) !== parentDigest16(theirs))
+  );
+}
+
 /**
- * Delta the contract would produce for `theirs` (spec §2.7): include contacts
- * when ours is newer or diverged at equal seq; include a slot iff ours is
- * strictly newer, or same seq with a different canonical digest. When the
+ * Delta the contract would produce for `theirs` (spec §2): include parent and
+ * contacts when ours is newer or diverged at equal seq; include a slot iff ours
+ * is strictly newer, or same seq with a different canonical digest. When the
  * states are converged this returns a literally empty delta.
  */
-export function computeDelta(ours: StateV2, theirs: StateV2): Delta {
+export function computeDelta(ours: StateV3, theirs: StateV3): Delta {
   const mine = validateState(ours);
   const other = validateState(theirs);
   const slots: DeltaSlot[] = [];
@@ -652,6 +784,9 @@ export function computeDelta(ours: StateV2, theirs: StateV2): Delta {
 
   return {
     v: STATE_VERSION,
+    parent: needsParent(mine.parent, other.parent)
+      ? cloneParent(mine.parent)
+      : null,
     contacts: needsContacts(mine.contacts, other.contacts)
       ? cloneContacts(mine.contacts)
       : null,
@@ -735,18 +870,40 @@ export function mergeSlot(a: Slot, b: Slot): Slot {
   return cloneSlot(aEntry > bEntry ? a : b);
 }
 
-export function mergeStates(a: StateV2, b: StateV2): StateV2 {
+/**
+ * Merge the parent record: higher seq wins, then lexicographically greater
+ * signature bytes. A null userId at the winning seq is a legal tombstone.
+ */
+export function mergeParent(a: ParentRecord, b: ParentRecord): ParentRecord {
+  const left = validateParent(a);
+  const right = validateParent(b);
+  if (left.seq !== right.seq) {
+    return cloneParent(left.seq > right.seq ? left : right);
+  }
+  const sigOrder = compareSignatures(left.sig, right.sig);
+  if (sigOrder !== 0) return cloneParent(sigOrder > 0 ? left : right);
+
+  // Equal seq + sig means the same record for all valid inputs. The userId
+  // tie-break only makes the function deterministic for malformed duplicates.
+  const aCanonical = stringifyJsonLossless([left.seq, left.userId]) ?? "null";
+  const bCanonical = stringifyJsonLossless([right.seq, right.userId]) ?? "null";
+  if (aCanonical === bCanonical) return cloneParent(left);
+  return cloneParent(aCanonical > bCanonical ? left : right);
+}
+
+export function mergeStates(a: StateV3, b: StateV3): StateV3 {
   const left = validateState(a);
   const right = validateState(b);
   return {
     v: STATE_VERSION,
+    parent: mergeParent(left.parent, right.parent),
     contacts: mergeContacts(left.contacts, right.contacts),
     slots: left.slots.map((slot, index) => mergeSlot(slot, right.slots[index])),
   };
 }
 
 /** Apply a delta slot-wise (spec §3). Incoming records may lose the merge. */
-export function mergeDelta(state: StateV2, delta: Delta): StateV2 {
+export function mergeDelta(state: StateV3, delta: Delta): StateV3 {
   const base = validateState(state);
   const incoming = validateDelta(delta);
   const slots = base.slots.map(cloneSlot);
@@ -759,6 +916,10 @@ export function mergeDelta(state: StateV2, delta: Delta): StateV2 {
   }
   return {
     v: STATE_VERSION,
+    parent:
+      incoming.parent === null
+        ? cloneParent(base.parent)
+        : mergeParent(base.parent, incoming.parent),
     contacts:
       incoming.contacts === null
         ? cloneContacts(base.contacts)
@@ -773,7 +934,7 @@ export function mergeDelta(state: StateV2, delta: Delta): StateV2 {
  * The full i64 range is supported exactly (lossless JSON), so there is nothing
  * left to warn about here. Kept as the single place for future advisories.
  */
-export function stateWarnings(_state: StateV2): string[] {
+export function stateWarnings(_state: StateV3): string[] {
   return [];
 }
 

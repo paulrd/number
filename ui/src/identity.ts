@@ -33,6 +33,11 @@ export interface IdentityBackup {
    * means 1.
    */
   contactsNextSeq?: number;
+  /**
+   * Next sequence value for the signed parent record, >= 1. Optional so
+   * backups written before the tree existed still decode; missing means 1.
+   */
+  parentNextSeq?: number;
   /** Owner public key for human comparison; not verified at decode time. */
   pubkey?: string;
   /** ISO timestamp, informational. */
@@ -44,6 +49,8 @@ export interface DecodedIdentityBackup {
   nextSeq: number[];
   /** Defaults to 1 for a v1 backup that has no contacts counter. */
   contactsNextSeq: number;
+  /** Defaults to 1 for a backup written before the parent link existed. */
+  parentNextSeq: number;
   pubkey?: string;
 }
 
@@ -65,6 +72,7 @@ export function encodeIdentityBackup(
     seed: secrets.seed.toLowerCase(),
     nextSeq: [...secrets.nextSeq],
     contactsNextSeq: secrets.contactsNextSeq,
+    parentNextSeq: secrets.parentNextSeq,
     ...(pubkey ? { pubkey: pubkey.toLowerCase() } : {}),
     createdAt: now.toISOString(),
   };
@@ -136,6 +144,20 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     contactsNextSeq = record.contactsNextSeq;
   }
 
+  let parentNextSeq = 1;
+  if (record.parentNextSeq !== undefined) {
+    if (
+      typeof record.parentNextSeq !== "number" ||
+      !Number.isSafeInteger(record.parentNextSeq) ||
+      record.parentNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup parent sequence must be a positive integer.",
+      );
+    }
+    parentNextSeq = record.parentNextSeq;
+  }
+
   let pubkey: string | undefined;
   if (record.pubkey !== undefined) {
     if (
@@ -153,6 +175,7 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     seed: record.seed.toLowerCase(),
     nextSeq: nextSeq as number[],
     contactsNextSeq,
+    parentNextSeq,
     ...(pubkey ? { pubkey } : {}),
   };
 }

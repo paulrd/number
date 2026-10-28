@@ -198,8 +198,8 @@ export function createContactsDialog(
     pendingRemove = contact;
     confirmText.textContent =
       used === 1
-        ? `“${contact.label}” is used by 1 slot. That slot will show an unknown contact until you choose a new one.`
-        : `“${contact.label}” is used by ${used} slots. Those slots will show an unknown contact until you choose new ones.`;
+        ? `“${contact.label}” is linked from this board. That link will show an unknown contact until you choose a new one.`
+        : `“${contact.label}” is linked from ${used} places on this board. Those links will show an unknown contact until you choose new ones.`;
     confirmBox.hidden = false;
     confirmBox.scrollIntoView({ block: "nearest" });
     confirmCancel.focus({ preventScroll: true });

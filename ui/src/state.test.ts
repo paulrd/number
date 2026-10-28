@@ -4,6 +4,7 @@ import {
   CENTS_RANGE,
   I64_MAX,
   I64_MIN,
+  LEGACY_STATE_VERSION,
   LIMITS,
   MAX_CONTACTS,
   StateError,
@@ -14,6 +15,7 @@ import {
   decodeState,
   decodeSummary,
   emptyContacts,
+  emptyParent,
   emptyState,
   encodeDelta,
   encodeState,
@@ -23,8 +25,11 @@ import {
   isI64,
   mergeContacts,
   mergeDelta,
+  mergeParent,
   mergeStates,
   optionalText,
+  parentDigest16,
+  parentSigningBytes,
   parseCents,
   signingBytes,
   slotDigest16,
@@ -33,13 +38,15 @@ import {
   validateContacts,
   validateDelta,
   validateEntry,
+  validateParent,
   validateState,
   validateSummary,
   type Contact,
   type ContactsRecord,
   type Entry,
+  type ParentRecord,
   type Slot,
-  type StateV2,
+  type StateV3,
 } from "./state";
 import { bytesToHex } from "./util";
 
@@ -68,6 +75,18 @@ const GOLDEN_CONTACTS_BYTES =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const GOLDEN_CONTACTS_DIGEST16 = "415fee80ba4f302cac4cd169a7f075a4";
 
+// Spec §2/§4: parent signing bytes, seq 1, userId 0x11 × 32.
+const PARENT_USER = "11".repeat(32);
+const GOLDEN_PARENT_BYTES =
+  "6e756d6265723a76333a706172656e74" + // "number:v3:parent"
+  "0100000000000000" + // seq 1
+  "01" + // tag: parent set
+  PARENT_USER;
+const GOLDEN_PARENT_DIGEST16 = "a3b70e503d1951bb363f6fbf310d4782";
+const GOLDEN_PARENT_CLEARED_BYTES =
+  "6e756d6265723a76333a706172656e74" + "0100000000000000" + "00"; // tag: cleared
+const GOLDEN_PARENT_CLEARED_DIGEST16 = "3b38efbfcc7bd18dce1d5e265151e9f0";
+
 function entry(value: number | bigint, overrides: Partial<Entry> = {}): Entry {
   return {
     value: typeof value === "bigint" ? value : BigInt(value),
@@ -89,8 +108,10 @@ function contacts(overrides: Partial<ContactsRecord> = {}): ContactsRecord {
 function stateWith(
   slots: Record<number, Slot>,
   record: ContactsRecord = emptyContacts(),
-): StateV2 {
+  parent: ParentRecord = emptyParent(),
+): StateV3 {
   const state = emptyState();
+  state.parent = { ...parent };
   state.contacts = {
     seq: record.seq,
     entries: record.entries.map((item) => ({ ...item })),
@@ -137,10 +158,26 @@ describe("golden vectors (spec §2.5)", () => {
         "00000000",
     );
   });
+
+  it("builds the exact parent signing bytes and digest16", () => {
+    expect(bytesToHex(parentSigningBytes(1, PARENT_USER))).toBe(
+      GOLDEN_PARENT_BYTES,
+    );
+    expect(
+      parentDigest16({ seq: 1, userId: PARENT_USER, sig: SIG_A }),
+    ).toBe(GOLDEN_PARENT_DIGEST16);
+    expect(bytesToHex(parentSigningBytes(1, null))).toBe(
+      GOLDEN_PARENT_CLEARED_BYTES,
+    );
+    expect(parentDigest16({ seq: 1, userId: null, sig: SIG_A })).toBe(
+      GOLDEN_PARENT_CLEARED_DIGEST16,
+    );
+    expect(parentDigest16(emptyParent())).toBe("0".repeat(32));
+  });
 });
 
 describe("state encode/decode", () => {
-  it("round-trips the exact v2 state shape, including tombstones", () => {
+  it("round-trips the exact v3 state shape, including tombstones", () => {
     const state = stateWith(
       {
         0: { seq: 0, entry: null, sig: null },
@@ -158,7 +195,8 @@ describe("state encode/decode", () => {
     expect(decodeState(encoded)).toEqual(state);
 
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(2);
+    expect(json.v).toBe(3);
+    expect(json.parent).toEqual(emptyParent());
     expect(json.contacts).toEqual({
       seq: 2,
       entries: [{ label: "Alice", userId: CONTACT_A }],
@@ -175,7 +213,8 @@ describe("state encode/decode", () => {
 
   it("normalises absent value and empty optional strings", () => {
     const state = validateState({
-      v: 2,
+      v: 3,
+      parent: emptyParent(),
       contacts: { seq: 0, entries: [], sig: null },
       slots: emptyState().slots.map((slot, index) => {
         if (index === 2) {
@@ -210,7 +249,8 @@ describe("state encode/decode", () => {
 
   it("round-trips delta and summary encodings with contacts", () => {
     const delta = {
-      v: 2 as const,
+      v: 3 as const,
+      parent: null,
       contacts: contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
       slots: [
         { i: 2, seq: 4, entry: entry(8, { unit: "kg" }), sig: SIG_C },
@@ -226,7 +266,8 @@ describe("state encode/decode", () => {
       ),
     );
     expect(decodeSummary(encodeSummary(summary))).toEqual(summary);
-    expect(summary.v).toBe(2);
+    expect(summary.v).toBe(3);
+    expect(summary.parent).toEqual([0, "0".repeat(32)]);
     expect(summary.contacts).toEqual([1, GOLDEN_CONTACTS_DIGEST16]);
     expect(summary.slots).toHaveLength(8);
     expect(summary.slots[0]).toEqual([0, "0".repeat(32)]);
@@ -235,8 +276,8 @@ describe("state encode/decode", () => {
 
   it("accepts an absent or null delta contacts record", () => {
     for (const raw of [
-      { v: 2, slots: [] },
-      { v: 2, contacts: null, slots: [] },
+      { v: 3, slots: [] },
+      { v: 3, parent: null, contacts: null, slots: [] },
     ]) {
       expect(validateDelta(raw).contacts).toBeNull();
     }
@@ -248,18 +289,20 @@ describe("state encode/decode", () => {
       validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
     ).toThrow(/state\.v/);
     expect(() =>
-      validateState({ v: 2, slots: emptyState().slots }),
+      validateState({ v: 3, parent: emptyParent(), slots: emptyState().slots }),
     ).toThrow(/state\.contacts/);
     expect(() =>
       validateState({
-        v: 2,
+        v: 3,
+        parent: emptyParent(),
         contacts: emptyContacts(),
         slots: emptyState().slots.slice(0, 7),
       }),
     ).toThrow(/exactly 8/);
     expect(() =>
       validateDelta({
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: null,
         slots: [
           { i: 1, seq: 1, entry: entry(1), sig: SIG_A },
@@ -268,11 +311,217 @@ describe("state encode/decode", () => {
       }),
     ).toThrow(/duplicate/);
     expect(() =>
-      validateSummary({ v: 2, contacts: [0, "0".repeat(32)], slots: [] }),
+      validateSummary({ v: 3, parent: [0, "0".repeat(32)], contacts: [0, "0".repeat(32)], slots: [] }),
     ).toThrow(/exactly 8/);
     expect(() =>
-      validateSummary({ v: 2, slots: [] }),
-    ).toThrow(/summary\.contacts/);
+      validateSummary({ v: 3, slots: [] }),
+    ).toThrow(/summary\.parent/);
+  });
+});
+
+describe("v2 → v3 upgrade", () => {
+  it("normalises a v2 state to v3 with an empty parent", () => {
+    const v2 = {
+      v: LEGACY_STATE_VERSION,
+      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+      slots: emptyState().slots,
+    };
+    const upgraded = validateState(v2);
+    expect(upgraded.v).toBe(3);
+    expect(upgraded.parent).toEqual(emptyParent());
+    expect(upgraded.contacts).toEqual(v2.contacts);
+
+    // A v2 state's slot/contacts signatures are unchanged, so encoding writes
+    // the same records under v3.
+    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
+    expect(json.v).toBe(3);
+    expect(json.parent).toEqual({ seq: 0, userId: null, sig: null });
+    expect(json.contacts).toEqual(v2.contacts);
+  });
+
+  it("rejects a v2 state that carries a parent", () => {
+    for (const parent of [emptyParent(), null, { seq: 1, userId: CONTACT_A, sig: SIG_A }]) {
+      expect(() =>
+        validateState({
+          v: LEGACY_STATE_VERSION,
+          parent,
+          contacts: emptyContacts(),
+          slots: emptyState().slots,
+        }),
+      ).toThrow(/v2 state must not carry a parent/);
+    }
+  });
+
+  it("rejects an unknown state version and a v3 state without a parent", () => {
+    expect(() =>
+      validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
+    ).toThrow(/state\.v/);
+    expect(() =>
+      validateState({ v: 3, contacts: emptyContacts(), slots: emptyState().slots }),
+    ).toThrow(/state\.parent/);
+  });
+});
+
+describe("parent codec", () => {
+  it("accepts a root, a set parent, and a cleared parent", () => {
+    expect(validateParent({ seq: 0, userId: null, sig: null })).toEqual(
+      emptyParent(),
+    );
+    expect(validateParent({ seq: 3, userId: CONTACT_B, sig: SIG_A })).toEqual({
+      seq: 3,
+      userId: CONTACT_B,
+      sig: SIG_A,
+    });
+    expect(validateParent({ seq: 3, userId: null, sig: SIG_A })).toEqual({
+      seq: 3,
+      userId: null,
+      sig: SIG_A,
+    });
+  });
+
+  it("rejects impossible seq/userId/sig combinations", () => {
+    expect(() =>
+      validateParent({ seq: 0, userId: CONTACT_A, sig: null }),
+    ).toThrow(/seq 0 must have a null userId/);
+    expect(() =>
+      validateParent({ seq: 0, userId: null, sig: SIG_A }),
+    ).toThrow(/seq 0 must have a null signature/);
+    expect(() =>
+      validateParent({ seq: 1, userId: CONTACT_A, sig: null }),
+    ).toThrow(/requires a signature/);
+    expect(() =>
+      validateParent({ seq: 1, userId: "AB".repeat(32), sig: SIG_A }),
+    ).toThrow(/userId/);
+    expect(() =>
+      validateParent({ seq: 1, userId: CONTACT_A, sig: "A".repeat(128) }),
+    ).toThrow(/lowercase hex/);
+    expect(() => validateParent(null)).toThrow(/expected an object/);
+  });
+
+  it("does not enforce self-parent (that is a UI/contract rule)", () => {
+    // Format-only: a parent id equal to the owner is structurally valid here.
+    expect(
+      validateParent({ seq: 1, userId: CONTACT_A, sig: SIG_A }).userId,
+    ).toBe(CONTACT_A);
+  });
+});
+
+describe("parent in state, delta, summary, merge", () => {
+  it("round-trips a v3 state with a parent", () => {
+    const state = stateWith(
+      { 0: { seq: 1, entry: entry(5), sig: SIG_A } },
+      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
+      { seq: 4, userId: CONTACT_B, sig: SIG_C },
+    );
+    const encoded = encodeState(state);
+    const json = JSON.parse(new TextDecoder().decode(encoded));
+    expect(json.v).toBe(3);
+    expect(json.parent).toEqual({
+      seq: 4,
+      userId: CONTACT_B,
+      sig: SIG_C,
+    });
+    expect(decodeState(encoded)).toEqual(state);
+  });
+
+  it("includes the parent pair in the summary", () => {
+    const summary = summaryFromState(
+      stateWith({}, emptyContacts(), {
+        seq: 1,
+        userId: PARENT_USER,
+        sig: SIG_A,
+      }),
+    );
+    expect(summary.parent).toEqual([1, GOLDEN_PARENT_DIGEST16]);
+    const cleared = summaryFromState(
+      stateWith({}, emptyContacts(), { seq: 1, userId: null, sig: SIG_A }),
+    );
+    expect(cleared.parent).toEqual([1, GOLDEN_PARENT_CLEARED_DIGEST16]);
+    expect(summaryFromState(emptyState()).parent).toEqual([0, "0".repeat(32)]);
+  });
+
+  it("includes a newer parent in computeDelta", () => {
+    const ours = stateWith({}, emptyContacts(), {
+      seq: 2,
+      userId: CONTACT_B,
+      sig: SIG_B,
+    });
+    const theirs = stateWith({}, emptyContacts(), {
+      seq: 1,
+      userId: CONTACT_A,
+      sig: SIG_A,
+    });
+    expect(computeDelta(ours, theirs).parent).toEqual(ours.parent);
+    expect(computeDelta(theirs, ours).parent).toBeNull();
+    expect(computeDelta(ours, ours).parent).toBeNull();
+    expect(computeDelta(emptyState(), emptyState())).toEqual({
+      v: 3,
+      parent: null,
+      contacts: null,
+      slots: [],
+    });
+  });
+
+  it("includes a parent at equal seq when the digests diverge", () => {
+    const a = stateWith({}, emptyContacts(), {
+      seq: 2,
+      userId: CONTACT_A,
+      sig: SIG_A,
+    });
+    const b = stateWith({}, emptyContacts(), {
+      seq: 2,
+      userId: CONTACT_B,
+      sig: SIG_B,
+    });
+    expect(computeDelta(a, b).parent).toEqual(a.parent);
+  });
+
+  it("round-trips a parent delta and lets stale parents lose", () => {
+    const base = stateWith({}, emptyContacts(), {
+      seq: 2,
+      userId: CONTACT_A,
+      sig: SIG_A,
+    });
+    const delta = {
+      v: 3 as const,
+      parent: { seq: 3, userId: CONTACT_B, sig: SIG_B },
+      contacts: null,
+      slots: [],
+    };
+    expect(decodeDelta(encodeDelta(delta))).toEqual(delta);
+
+    const next = mergeDelta(base, delta);
+    expect(next.parent).toEqual(delta.parent);
+
+    const stale = {
+      v: 3 as const,
+      parent: { seq: 1, userId: null, sig: SIG_C },
+      contacts: null,
+      slots: [],
+    };
+    expect(mergeDelta(next, stale).parent).toEqual(delta.parent);
+  });
+
+  it("merges parent by seq, then signature bytes, including a null tombstone", () => {
+    const low = { seq: 1, userId: CONTACT_A, sig: SIG_A };
+    const high = { seq: 2, userId: CONTACT_B, sig: SIG_A };
+    expect(mergeParent(low, high)).toEqual(high);
+    expect(mergeParent(high, low)).toEqual(high);
+
+    const tieLow = { seq: 2, userId: CONTACT_A, sig: SIG_A };
+    const tieHigh = { seq: 2, userId: CONTACT_B, sig: SIG_B };
+    expect(mergeParent(tieLow, tieHigh)).toEqual(tieHigh);
+    expect(mergeParent(tieHigh, tieLow)).toEqual(tieHigh);
+
+    // A cleared parent (null userId) at the higher seq is a legal tombstone.
+    const cleared = { seq: 3, userId: null, sig: SIG_C };
+    expect(mergeParent(tieHigh, cleared)).toEqual(cleared);
+    expect(mergeParent(cleared, tieHigh)).toEqual(cleared);
+
+    expect(mergeStates(
+      stateWith({}, emptyContacts(), low),
+      stateWith({}, emptyContacts(), high),
+    ).parent).toEqual(high);
   });
 });
 
@@ -557,7 +806,8 @@ describe("merge determinism", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
     );
     const delta = {
-      v: 2 as const,
+      v: 3 as const,
+      parent: null,
       contacts: contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_C }),
       slots: [],
     };
@@ -566,7 +816,8 @@ describe("merge determinism", () => {
     expect(next.slots).toEqual(base.slots);
 
     const stale = {
-      v: 2 as const,
+      v: 3 as const,
+      parent: null,
       contacts: contacts({ seq: 1, entries: [contact("Old", CONTACT_A)], sig: SIG_A }),
       slots: [],
     };
@@ -576,14 +827,16 @@ describe("merge determinism", () => {
   it("treats a repeated delta as a no-op and lets stale slots lose", () => {
     const base = stateWith({ 0: { seq: 2, entry: entry(2), sig: SIG_B } });
     const stale = {
-      v: 2 as const,
+      v: 3 as const,
+      parent: null,
       contacts: null,
       slots: [{ i: 0, seq: 1, entry: entry(1), sig: SIG_A }],
     };
     expect(mergeDelta(base, stale)).toEqual(base);
 
     const fresh = {
-      v: 2 as const,
+      v: 3 as const,
+      parent: null,
       contacts: null,
       slots: [{ i: 0, seq: 3, entry: entry(3), sig: SIG_C }],
     };
@@ -602,13 +855,14 @@ describe("delta filtering", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
     );
     expect(computeDelta(state, state)).toEqual({
-      v: 2,
+      v: 3,
+      parent: null,
       contacts: null,
       slots: [],
     });
     expect(
       JSON.parse(new TextDecoder().decode(encodeDelta(computeDelta(state, state)))),
-    ).toEqual({ v: 2, contacts: null, slots: [] });
+    ).toEqual({ v: 3, parent: null, contacts: null, slots: [] });
   });
 
   it("includes contacts when ours is newer, otherwise leaves them null", () => {
@@ -714,7 +968,8 @@ describe("bounds and invariants", () => {
   it("enforces slot seq-0 and signature invariants atomically", () => {
     expect(() =>
       validateState({
-        v: 2,
+        v: 3,
+        parent: emptyParent(),
         contacts: emptyContacts(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: entry(1), sig: null } : slot,
@@ -724,7 +979,8 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 2,
+        v: 3,
+        parent: emptyParent(),
         contacts: emptyContacts(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: null, sig: SIG_A } : slot,
@@ -734,7 +990,8 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 2,
+        v: 3,
+        parent: emptyParent(),
         contacts: emptyContacts(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: null } : slot,
@@ -744,7 +1001,8 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 2,
+        v: 3,
+        parent: emptyParent(),
         contacts: emptyContacts(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: "A".repeat(128) } : slot,
@@ -754,7 +1012,8 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateDelta({
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: null,
         slots: [{ i: 8, seq: 1, entry: entry(1), sig: SIG_A }],
       }),

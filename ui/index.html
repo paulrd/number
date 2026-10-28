@@ -65,11 +65,74 @@
               </dd>
             </div>
             <div class="meta-row">
+              <dt>Board</dt>
+              <dd>
+                <div class="meta-value">
+                  <div class="meta-line">
+                    <button id="board-copy" class="copy-button" type="button" disabled>
+                      <code id="board-owner">Loading…</code>
+                    </button>
+                    <span id="read-only-badge" class="state-badge state-badge--readonly" hidden>
+                      Read-only
+                    </span>
+                    <span
+                      id="legacy-badge"
+                      class="state-badge"
+                      data-state="legacy"
+                      hidden
+                    >
+                      Previous version
+                    </span>
+                  </div>
+                  <button id="board-home" class="meta-action" type="button" hidden>
+                    Home
+                  </button>
+                </div>
+              </dd>
+            </div>
+            <div class="meta-row">
               <dt>Contract</dt>
               <dd>
                 <button id="contract-copy" class="copy-button" type="button" disabled>
                   <code id="contract-short">Not derived</code>
                 </button>
+              </dd>
+            </div>
+            <div class="meta-row">
+              <dt>Parent</dt>
+              <dd>
+                <div class="meta-value">
+                  <div class="meta-line">
+                    <code id="parent-name" class="parent-name">Root</code>
+                    <span id="parent-status" class="state-badge" role="status" hidden></span>
+                  </div>
+                  <div class="meta-actions">
+                    <button id="parent-open" class="meta-action" type="button" hidden>
+                      Open parent
+                    </button>
+                    <button
+                      id="parent-edit"
+                      class="meta-action"
+                      type="button"
+                      aria-haspopup="dialog"
+                      aria-controls="parent-dialog"
+                      hidden
+                    >
+                      Set parent…
+                    </button>
+                    <button
+                      id="parent-clear"
+                      class="meta-action meta-action--danger"
+                      type="button"
+                      hidden
+                    >
+                      Clear parent
+                    </button>
+                  </div>
+                  <p id="parent-note" class="meta-note" hidden>
+                    Parent board is on the previous version.
+                  </p>
+                </div>
               </dd>
             </div>
             <div class="meta-row">
@@ -110,9 +173,13 @@
       </div>
 
       <main class="board-section">
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Board path">
+          <ol id="breadcrumb-list" class="breadcrumb-list"></ol>
+          <p id="breadcrumb-warning" class="breadcrumb-warning" role="status" hidden></p>
+        </nav>
         <div class="board-head">
-          <h2 class="board-title">The board</h2>
-          <p class="board-meta">Signed · two decimals</p>
+          <h2 id="board-title" class="board-title" tabindex="-1">The board</h2>
+          <p id="board-mode" class="board-meta">Signed · two decimals</p>
         </div>
         <div
           id="board"
@@ -195,6 +262,17 @@
             </div>
             <p id="contact-hint" class="field-hint" aria-live="polite"></p>
 
+            <section id="child-link" class="child-link" aria-labelledby="child-link-title" hidden>
+              <div class="child-link-head">
+                <h3 id="child-link-title">Child board</h3>
+                <span id="child-link-status" class="state-badge" role="status">Checking…</span>
+              </div>
+              <p id="child-link-detail" class="field-hint" hidden></p>
+              <button id="child-open" class="button button--small" type="button">
+                Open child board
+              </button>
+            </section>
+
             <label class="field">
               <span>Unit</span>
               <input id="unit-input" name="unit" type="text" maxlength="16" placeholder="kg" />
@@ -219,6 +297,66 @@
             <div class="editor-actions-right">
               <button id="cancel-button" class="button button--quiet" type="button">Cancel</button>
               <button id="save-button" class="button button--primary" type="submit">Save</button>
+            </div>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog
+        id="parent-dialog"
+        class="editor parent-dialog"
+        aria-labelledby="parent-dialog-title"
+        aria-describedby="parent-dialog-desc"
+      >
+        <form id="parent-form" class="editor-form" novalidate>
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Parent board</p>
+              <h2 id="parent-dialog-title" tabindex="-1">Set a parent</h2>
+              <p id="parent-dialog-desc" class="identity-intro">
+                A parent is the board one level above this one. The link shows
+                Linked only when both boards point at each other.
+              </p>
+            </div>
+            <button
+              id="parent-close"
+              class="icon-button"
+              type="button"
+              aria-label="Close parent settings"
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="editor-body">
+            <div class="field">
+              <label for="parent-select">Parent</label>
+              <div class="field-inline">
+                <select id="parent-select" name="parent" aria-describedby="parent-hint"></select>
+                <button
+                  id="parent-add-contact"
+                  class="button button--small"
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-controls="contacts-dialog"
+                >
+                  Add contact…
+                </button>
+              </div>
+            </div>
+            <p id="parent-hint" class="field-hint" aria-live="polite"></p>
+            <p id="parent-warning" class="field-warning" role="status" hidden></p>
+            <p id="parent-error" class="form-error parent-error" role="alert" hidden></p>
+          </div>
+
+          <footer class="editor-actions">
+            <div class="editor-actions-right">
+              <button id="parent-cancel" class="button button--quiet" type="button">
+                Cancel
+              </button>
+              <button id="parent-save" class="button button--primary" type="submit">
+                Save parent
+              </button>
             </div>
           </footer>
         </form>

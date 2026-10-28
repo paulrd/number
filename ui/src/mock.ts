@@ -5,6 +5,10 @@
  * The store is deliberately memory-only: reloading the page starts fresh. The
  * signatures are deterministic mock bytes, not Ed25519 signatures, because
  * nothing verifies them in this mode.
+ *
+ * A small fixture tree is exposed so offline e2e can exercise the tree UI:
+ * `MOCK_PARENT_ID` has a slot pointing at the own board and no parent, while
+ * `MOCK_CHILD_ID` names the own board as its parent and has no slots.
  */
 
 import { blake3 } from "@noble/hashes/blake3";
@@ -17,10 +21,10 @@ import {
   type Contact,
   type Delta,
   type Entry,
-  type StateV2,
+  type StateV3,
 } from "./state";
-import { bytesToHex, delay } from "./util";
-import type { BoardBackend, BoardCallbacks } from "./board";
+import { bytesToHex, delay, isLowerHex } from "./util";
+import type { BoardBackend, BoardCallbacks, BoardSnapshot } from "./board";
 import type { DelegateIdentity } from "./delegate";
 
 const encoder = new TextEncoder();
@@ -57,14 +61,34 @@ function mockContactsSignature(seq: number, entries: Contact[]): string {
   return bytesToHex(bytes);
 }
 
+function mockParentSignature(seq: number, userId: string | null): string {
+  const body = JSON.stringify({ seq, userId });
+  const bytes = new Uint8Array(64);
+  bytes.set(digest(`number:offline:parent:0:${body}`), 0);
+  bytes.set(digest(`number:offline:parent:1:${body}`), 32);
+  return bytesToHex(bytes);
+}
+
+/**
+ * Fixture owner ids for the offline tree. Both are stable across reloads so the
+ * e2e suite can reference them, and neither is the own (mock) owner.
+ */
+export const MOCK_PARENT_ID = bytesToHex(
+  digest("number:offline:v1:fixture-parent"),
+);
+export const MOCK_CHILD_ID = bytesToHex(
+  digest("number:offline:v1:fixture-child"),
+);
+
 export class OfflineBoard implements BoardBackend {
   readonly mode = "offline" as const;
   readonly identity: DelegateIdentity;
   readonly contractKeyBase58: string;
-  currentState: StateV2 | null = null;
+  currentState: StateV3 | null = null;
 
   private readonly codeHashBytes: Uint8Array;
   private readonly pubkeyBytes: Uint8Array;
+  private readonly fixtures = new Map<string, StateV3>();
   private started = false;
   private mutating = false;
 
@@ -75,6 +99,7 @@ export class OfflineBoard implements BoardBackend {
       pubkey: bytesToHex(this.pubkeyBytes),
       nextSeq: Array.from({ length: 8 }, () => 1),
       contactsNextSeq: 1,
+      parentNextSeq: 1,
     };
     this.contractKeyBase58 = deriveInstanceIdFromBytes(
       this.codeHashBytes,
@@ -82,7 +107,7 @@ export class OfflineBoard implements BoardBackend {
     ).base58;
   }
 
-  async start(): Promise<StateV2> {
+  async start(): Promise<StateV3> {
     if (this.started && this.currentState) return this.currentState;
 
     this.callbacks.onStatus("connecting", "starting offline mock");
@@ -90,7 +115,7 @@ export class OfflineBoard implements BoardBackend {
 
     this.currentState = emptyState();
     this.started = true;
-    this.callbacks.onIdentity(this.identity);
+    this.callbacks.onIdentity(this.snapshotIdentity());
     this.callbacks.onContractKey(this.contractKeyBase58);
     this.callbacks.onState(this.currentState);
     this.callbacks.onStatus("offline", "in-memory mock; changes reset on reload");
@@ -125,7 +150,8 @@ export class OfflineBoard implements BoardBackend {
         this.identity.contactsNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: {
           seq,
           entries: validated,
@@ -136,15 +162,71 @@ export class OfflineBoard implements BoardBackend {
 
       this.currentState = mergeDelta(this.currentState, delta);
       this.identity.contactsNextSeq = seq + 1;
-      this.callbacks.onIdentity({
-        pubkey: this.identity.pubkey,
-        nextSeq: [...this.identity.nextSeq],
-        contactsNextSeq: this.identity.contactsNextSeq,
-      });
+      this.callbacks.onIdentity(this.snapshotIdentity());
       this.callbacks.onState(this.currentState);
     } finally {
       this.mutating = false;
     }
+  }
+
+  /**
+   * Set (or clear) the mock parent link with a deterministic mock signature.
+   * Self-parent is rejected here as well, matching the delegate/contract rule.
+   */
+  async saveParent(userId: string | null): Promise<void> {
+    if (userId !== null) {
+      if (!isLowerHex(userId, 64)) {
+        throw new Error(
+          "The parent must be a 64-character lowercase hex user id.",
+        );
+      }
+      if (userId === this.identity.pubkey) {
+        throw new Error("A board cannot be its own parent.");
+      }
+    }
+
+    if (!this.started || !this.currentState) {
+      throw new Error("Offline board is not ready yet");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    this.mutating = true;
+    try {
+      await delay(70);
+      const seq = Math.max(
+        this.currentState.parent.seq + 1,
+        this.identity.parentNextSeq ?? 1,
+      );
+      const delta: Delta = {
+        v: 3,
+        parent: { seq, userId, sig: mockParentSignature(seq, userId) },
+        contacts: null,
+        slots: [],
+      };
+
+      this.currentState = mergeDelta(this.currentState, delta);
+      this.identity.parentNextSeq = seq + 1;
+      this.callbacks.onIdentity(this.snapshotIdentity());
+      this.callbacks.onState(this.currentState);
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  async readBoard(ownerId: string): Promise<BoardSnapshot | null> {
+    if (!isLowerHex(ownerId, 64)) {
+      throw new Error(
+        `The board owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
+      );
+    }
+
+    if (ownerId === this.identity.pubkey) {
+      if (!this.currentState) return null;
+      return this.snapshot(ownerId, this.currentState);
+    }
+
+    const fixture = this.fixtureFor(ownerId);
+    return fixture === null ? null : this.snapshot(ownerId, fixture);
   }
 
   async exportIdentity(): Promise<never> {
@@ -157,6 +239,55 @@ export class OfflineBoard implements BoardBackend {
 
   async installDelegate(): Promise<never> {
     throw new Error("Offline mode cannot install a delegate.");
+  }
+
+  private snapshot(ownerId: string, state: StateV3): BoardSnapshot {
+    return {
+      ownerId,
+      state,
+      codeHash: encodeBase58(this.codeHashBytes),
+      legacy: false,
+    };
+  }
+
+  private snapshotIdentity(): DelegateIdentity {
+    return {
+      pubkey: this.identity.pubkey,
+      nextSeq: [...this.identity.nextSeq],
+      contactsNextSeq: this.identity.contactsNextSeq,
+      parentNextSeq: this.identity.parentNextSeq,
+    };
+  }
+
+  /**
+   * Fixed offline fixture boards so the tree UI has something to navigate:
+   *  - parent: one slot whose contact is the own owner, no parent;
+   *  - child: `parent.userId` is the own owner, no slots.
+   */
+  private fixtureFor(ownerId: string): StateV3 | null {
+    if (ownerId !== MOCK_PARENT_ID && ownerId !== MOCK_CHILD_ID) return null;
+    const cached = this.fixtures.get(ownerId);
+    if (cached) return cached;
+
+    const own = this.identity.pubkey;
+    const fixture = emptyState();
+    if (ownerId === MOCK_CHILD_ID) {
+      fixture.parent = {
+        seq: 1,
+        userId: own,
+        sig: mockParentSignature(1, own),
+      };
+    } else {
+      const entry: Entry = { value: 0n, contact: own, unit: null, note: null };
+      fixture.slots[0] = {
+        seq: 1,
+        entry,
+        sig: mockSignature(0, 1, entry),
+      };
+    }
+
+    this.fixtures.set(ownerId, fixture);
+    return fixture;
   }
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
@@ -175,25 +306,22 @@ export class OfflineBoard implements BoardBackend {
       const seq = Math.max(this.currentState.slots[slotIndex].seq + 1, nextSeq);
       const sig = mockSignature(slotIndex, seq, entry);
       const delta: Delta = {
-        v: 2,
+        v: 3,
+        parent: null,
         contacts: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 
       this.currentState = mergeDelta(this.currentState, delta);
       this.identity.nextSeq[slotIndex] = seq + 1;
-      this.callbacks.onIdentity({
-        pubkey: this.identity.pubkey,
-        nextSeq: [...this.identity.nextSeq],
-        contactsNextSeq: this.identity.contactsNextSeq,
-      });
+      this.callbacks.onIdentity(this.snapshotIdentity());
       this.callbacks.onState(this.currentState);
     } finally {
       this.mutating = false;
     }
   }
 
-  async retry(): Promise<StateV2> {
+  async retry(): Promise<StateV3> {
     if (this.currentState) return this.currentState;
     return this.start();
   }

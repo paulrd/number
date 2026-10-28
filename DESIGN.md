@@ -1,13 +1,14 @@
-# number — design (v2)
+# number — design (v3)
 
 A personal Freenet app: one board per user, holding exactly **8 slots** and an
-**address book**. Each slot is either empty or holds an i64 **count of
-hundredths** (displayed with exactly two decimal places), a mandatory
-**contact** (the `userId` of an address-book entry), and optional `unit` and
-`note`. Only the board's owner can write. The board is a contract instance
-parameterised by the owner's Ed25519 verifying key, so the owner's identity is
-the stable anchor (a new WASM version re-keys the instance, but the client
-re-derives it from the same owner key).
+**address book**, arranged as a **tree of boards**. A board is a node; its 8
+slots are its children; it has at most one parent. A slot is either empty or
+holds an i64 **count of hundredths** (displayed with exactly two decimal
+places), a mandatory **child contact** (the child board owner's `userId`), and
+optional `unit` and `note`. Only the board's owner can write. The board is a
+contract instance parameterised by the owner's Ed25519 verifying key, so the
+owner's identity is the stable anchor (a new WASM version re-keys the instance,
+but the client re-derives it from the same owner key).
 
 The address book lives in the signed, replicated contract state. A contact
 associates a human **label** with a **user id** (an Ed25519 public key, 32 bytes
@@ -17,9 +18,32 @@ it deliberately does not require the id to still be present in the book, so
 removing a contact cannot invalidate already-signed slot state. The UI requires
 choosing a current contact when saving.
 
-v2 is an incompatible schema/signature change. Existing v1 boards cannot be
-migrated into a v2 contract (see §7 "Migration"). The owner identity is carried
-forward by the delegate's seed export/import path.
+### Tree model
+
+- A **node** is one owner's board. The child board for a user is derived from the
+  same contract code hash and that user's public key, exactly like the owner's
+  own board.
+- A board's **parent** is a signed record holding at most one parent user id
+  (`null` = root). It has its own monotonic `seq`, signature, summary pair and
+  delta, and merges by the same seq/signature order as contacts and slots.
+- A parent edge is **mutual** only when the parent board has a slot whose
+  `entry.contact` equals the child owner id **and** the child board's
+  `parent.userId` equals the parent owner id. Only mutual edges are tree edges.
+  A one-sided link is shown as pending; a board whose instance does not exist is
+  "not created"; a board still on v2 is "previous version".
+- The contract cannot enforce mutual agreement, acyclicity, or unique children
+  across boards. It enforces the local invariants: one parent field, a valid
+  signed parent, no self-parent, at most 8 child slots. The UI enforces no
+  self-child, no duplicate child ids on new writes, and best-effort cycle
+  detection.
+- Other owners' boards are public/read-only in the UI; only the owner can sign.
+  Labels on a viewed board come from that board's own address book.
+
+v2 boards migrate to v3: the slot and contacts signing bytes are unchanged, and
+the client adds an empty parent when it re-PUTs the old signed state. v1 boards
+remain unmigratable (their slot schema/signing bytes changed in v2). See §7
+"Migration". The owner identity is carried forward by the delegate's seed
+export/import path.
 
 Components:
 
@@ -46,7 +70,12 @@ Instance id: `BLAKE3(code_hash_bytes || parameters)` (exactly as
 
 ```json
 {
-  "v": 2,
+  "v": 3,
+  "parent": {
+    "seq": 2,
+    "userId": "2222222222222222222222222222222222222222222222222222222222222222",
+    "sig": "<128 lowercase hex chars>"
+  },
   "contacts": {
     "seq": 1,
     "entries": [
@@ -75,12 +104,22 @@ Rules:
   type as v1; only its interpretation changed (the UI divides by 100 for
   display). The UI parses and emits numbers losslessly (BigInt via
   `lossless-json`), so the full i64 range survives exactly.
-- `contact` is mandatory: exactly 64 lowercase hex characters, the 32-byte
-  Ed25519 public key of an address-book entry. The contract checks the format,
-  not membership (see the introduction).
+- `contact` is mandatory: exactly 64 lowercase hex characters, the child board
+  owner's Ed25519 public key (the child node). The contract checks the format,
+  not membership or uniqueness (see the tree model).
 - `unit` ≤ 16 and `note` ≤ 512 bytes (UTF-8). `null` and absent are equivalent
   for the optional strings; serialise `null`.
-- `v` must be `2`.
+- `v` must be `3`.
+
+### Parent (`parent` record)
+
+- `seq == 0` ⇒ `userId == null` and `sig == null` (root / never set).
+- `seq > 0` ⇒ `sig` is a valid signature over the parent signing bytes.
+  `userId == null` with `seq > 0` is legal (the parent was cleared).
+- `userId`, when present, is exactly 64 lowercase hex characters.
+- `userId` must not equal the board's own owner pubkey (no self-parent).
+- At most one parent is represented by the single record. Mutual agreement with
+  the parent board is a UI rule, not a contract rule.
 
 ### Address book (`contacts` record)
 
@@ -92,7 +131,8 @@ Rules:
 - `seq > 0` ⇒ `sig` is a valid signature over the contacts signing bytes.
   `entries == []` with `seq > 0` is legal (all contacts removed).
 - A contact update replaces the whole record at a higher `seq`; the UI signs a
-  new record for add, remove, or rename. There are no per-contact counters.
+  new record for add or remove (re-adding the same user id under a new label is
+  a rename). There are no per-contact counters.
 
 ### Signing bytes — slot (canonical, hand-built)
 
@@ -128,34 +168,56 @@ b"number:v2:contacts"
 An empty list with `seq > 0` signs `count = 0`. Entry order is part of the
 signature.
 
+### Signing bytes — parent
+
+```
+b"number:v3:parent"
+|| seq: u64 little-endian
+|| tag: u8                 // 0 = no parent, 1 = parent set
+// only when tag == 1:
+|| userId: 32 raw bytes
+```
+
+A cleared parent at `seq > 0` signs `tag = 0`; `seq 0` is never signed.
+
 ## 3. Summary (JSON, UTF-8)
 
 ```json
 {
-  "v": 2,
+  "v": 3,
+  "parent": [2, "<32 hex chars>"],
   "contacts": [1, "<32 hex chars>"],
   "slots": [ [3, "<32 hex chars>"], [0, "00000000000000000000000000000000"] ]
 }
 ```
 
-`contacts` is one `[seq, digest16]` pair; `slots` is exactly 8 pairs. `digest16`
-is the first 16 bytes of `BLAKE3(signing bytes for that record/slot)` for
-`seq > 0`, and 16 zero bytes for an empty record/slot. The digest exists so two
-peers that hold the same `seq` but different content (owner equivocation) still
-notice and heal. Every summary field is read by `get_state_delta`.
+`parent` and `contacts` are one `[seq, digest16]` pair each; `slots` is exactly
+8 pairs. `digest16` is the first 16 bytes of `BLAKE3(signing bytes for that
+record/slot)` for `seq > 0`, and 16 zero bytes for an empty record/slot. The
+digest exists so two peers that hold the same `seq` but different content (owner
+equivocation) still notice and heal. Every summary field is read by
+`get_state_delta`.
 
 ## 4. Delta (JSON, UTF-8)
 
 ```json
 {
-  "v": 2,
+  "v": 3,
+  "parent": { "seq": 3, "userId": null, "sig": "<hex>" },
   "contacts": { "seq": 5, "entries": [], "sig": "<hex>" },
   "slots": [ { "i": 2, "seq": 4, "entry": null, "sig": "<hex>" } ]
 }
 ```
 
-`contacts` is `null` when unchanged; otherwise it is the full contacts record.
-`get_state_delta` includes contacts iff
+`parent` and `contacts` are `null` when unchanged; otherwise they are the full
+records. `get_state_delta` includes the parent iff
+
+```
+our.parent.seq > their.parent.seq
+|| (equal seq && our.parent.digest16 != their.parent.digest16)
+```
+
+and includes contacts iff
 
 ```
 our.contacts.seq > their.contacts.seq
@@ -169,14 +231,14 @@ our.slots[i].seq > their.slots[i].seq
 || (equal seq && our.slots[i].digest16 != their.slots[i].digest16)
 ```
 
-With an empty (or undecodable) summary — a new subscriber — include contacts
-iff `seq > 0`, and every slot with `seq > 0`. If nothing qualifies, return a
-literally empty `StateDelta::from(vec![])`. A contacts-only delta has
-`"slots": []`.
+With an empty (or undecodable) summary — a new subscriber — include the parent
+and contacts iff `seq > 0`, and every slot with `seq > 0`. If nothing
+qualifies, return a literally empty `StateDelta::from(vec![])`. A
+parent/contacts-only delta has `"slots": []`.
 
 ## 5. Merge rule
 
-Contacts and slots each merge by `max` over the total order:
+Parent, contacts, and slots each merge by `max` over the total order:
 
 1. higher `seq` wins;
 2. equal `seq` → the record whose **signature bytes** are lexicographically
@@ -184,26 +246,28 @@ Contacts and slots each merge by `max` over the total order:
 3. equal `seq` and equal signature → identical record.
 
 Properties: associative, commutative, idempotent, absorbing. A full-state
-update merges contacts and every slot; a delta merges the contacts record (when
-present) and every included slot; re-applying either is a no-op.
+update merges the parent, contacts, and every slot; a delta merges whichever
+records are present; re-applying either is a no-op.
 
 Invalid input is **rejected atomically** for state/delta (single writer →
 atomic is correct): any bad signature, out-of-bounds metadata, malformed
-contact, duplicate contact id/label, or `seq == 0` with non-empty content
-rejects the whole update. Stale (lower-seq) records are not an error — they
-lose the merge.
+contact/parent, duplicate contact id/label, self-parent, or `seq == 0` with
+non-empty content rejects the whole update. Stale (lower-seq) records are not
+an error — they lose the merge.
 
 ## 6. ContractInterface behaviour
 
 - `validate_state(parameters, state, related)`:
   - params length 32 and a valid Ed25519 point;
-  - state decodes as a valid `StateV2` per §2, exactly 8 slots, a valid contacts
-    record;
-  - the contacts signature (when `seq > 0`) and every `seq > 0` slot signature
-    verify under the params key.
+  - state decodes as a valid `StateV3` per §2, exactly 8 slots, a valid parent
+    record and contacts record;
+  - the parent signature (when `seq > 0`), contacts signature (when `seq > 0`),
+    and every `seq > 0` slot signature verify under the params key;
+  - the parent is not the owner itself.
 - `update_state(parameters, state, data)`:
   - decode current state; for each `UpdateData::State` / `Delta` /
-    `StateAndDelta`, validate the incoming contacts/slots, then merge per §5;
+    `StateAndDelta`, validate the incoming parent/contacts/slots, then merge per
+    §5;
   - `UpdateData::Related*` is not used (no related contracts);
   - return `UpdateModification::valid(merged_bytes)`.
 - `summarize_state`: §3.
@@ -222,19 +286,20 @@ Request:
 { "cmd": "sign", "slot": 3, "seq": 7, "entry": { "value": 1250, "contact": "<64 hex>", "unit": null, "note": null } }
 { "cmd": "sign", "slot": 3, "seq": 8, "entry": null }
 { "cmd": "signContacts", "seq": 2, "entries": [ { "label": "Alice", "userId": "<64 hex>" } ] }
+{ "cmd": "signParent", "seq": 3, "userId": "<64 hex>" | null }
 { "cmd": "status" }
 { "cmd": "export" }
-{ "cmd": "import", "seed": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1 }
+{ "cmd": "import", "seed": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1, "parentNextSeq": 1 }
 ```
 
 Response (outbound `ApplicationMessage`):
 
 ```json
-{ "ok": true, "pubkey": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1 } // identity
-{ "ok": true, "sig": "<128 hex>" }                                   // sign / signContacts
+{ "ok": true, "pubkey": "<64 hex>", "nextSeq": [1,1,1,1,1,1,1,1], "contactsNextSeq": 1, "parentNextSeq": 1 } // identity
+{ "ok": true, "sig": "<128 hex>" }                                   // sign / signContacts / signParent
 { "ok": true, "hasSeed": false }                                     // status, fresh
-{ "ok": true, "hasSeed": true, "pubkey": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1 } // status, initialized
-{ "ok": true, "seed": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1 } // export
+{ "ok": true, "hasSeed": true, "pubkey": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1, "parentNextSeq": 1 } // status, initialized
+{ "ok": true, "seed": "<64 hex>", "nextSeq": [...], "contactsNextSeq": 1, "parentNextSeq": 1 } // export
 { "ok": true }                                                       // import
 { "ok": false, "error": "..." }                                      // any failure
 ```
@@ -246,7 +311,9 @@ Secrets (delegate secret store):
   v1 so the seed's meaning does not move with the generation.
 - `number.v1.nextseq.<i>` — 8-byte little-endian u64, per slot, default 1.
 - `number.v2.nextseq.contacts` — 8-byte little-endian u64, contacts record,
-  default 1. `DELEGATE_VERSION` is 4.
+  default 1.
+- `number.v3.nextseq.parent` — 8-byte little-endian u64, parent record, default
+  1. `DELEGATE_VERSION` is 5.
 
 Parameters:
 
@@ -265,9 +332,12 @@ Rules:
 - `signContacts`: `seq >= contactsNextSeq`; `seq > 0`; enforce the §2 contacts
   bounds (count, labels, user ids, uniqueness); sign the contacts bytes; then
   store `contactsNextSeq = seq + 1`.
-- Import writes the contacts counter and per-slot counters before the seed, so
-  a failed import can be retried. A v1 `export` response has no
-  `contactsNextSeq`; the UI treats it as 1.
+- `signParent`: `seq >= parentNextSeq`; `seq > 0`; `userId` is null or 64
+  lowercase hex; reject the delegate's own pubkey; sign the parent bytes; then
+  store `parentNextSeq = seq + 1`.
+- Import writes the parent/contacts/per-slot counters before the seed, so a
+  failed import can be retried. Older `export` responses have no
+  `parentNextSeq`/`contactsNextSeq`; the UI treats a missing value as 1.
 - Only accept messages whose `origin` is
   `Some(MessageOrigin::WebApp(id))` and `id` equals the pinned webapp contract
   id. Reject a different `WebApp(id)`, `MessageOrigin::Delegate`, `None`, and
@@ -323,12 +393,20 @@ install it on first use.
   probes each old hash with the same owner pubkey, GETs the old state, and PUTs
   it into the current contract; `validate_state` re-checks every signature.
   Only list versions whose state/signing bytes the current contract accepts.
-- **v2 is a breaking contract generation.** The state schema and signing bytes
-  changed, so no v1 board can be re-PUT into v2. All v1 hashes live in
+- **v2 is migratable into v3.** v3 keeps the v2 slot and contacts signing bytes
+  and only adds a parent record. The client decodes a v2 state, adds
+  `parent: {seq: 0, userId: null, sig: null}`, writes `v: 3`, and PUTs it into
+  the v3 contract, which validates the old slot/contacts signatures. The v2
+  contract hash `A1J4…` is in `LEGACY_CONTRACT_CODE_HASHES`.
+- **v1 remains a breaking generation.** v1 changed the slot schema and signing
+  bytes; no v1 board can be re-PUT into v3. v1 hashes stay in
   `UNMIGRATABLE_CONTRACT_CODE_HASHES` (registered for the record gate, never
-  probed by the UI). The owner identity survives through the delegate migration,
-  but the v2 board starts empty: same owner key, empty address book and slots.
-  This is deliberate; do not "fix" it by listing a v1 hash as migratable.
+  probed by the UI). This is deliberate; do not list a v1 hash as migratable.
+- **Other owners' boards may still be on v2.** The tree reader probes the
+  current code hash and then the migratable legacy hashes for a child/parent
+  owner. A v2 board is readable and normalised with an empty parent, but it
+  cannot be a mutual tree edge until its owner opens the v3 app and sets a
+  parent.
 
 ## 8. UI flow
 
@@ -355,13 +433,26 @@ install it on first use.
    `seq = max(contract.contacts.seq + 1, delegate.contactsNextSeq)`, sends it as
    a `Delta` with `contacts` set and `slots: []`, and updates the address book
    from the response / subscription notification.
-7. Send `UpdateRequest(key, DeltaUpdate(delta bytes))`; update UI from the
+7. A parent change (set or clear) signs a new parent record at
+   `seq = max(contract.parent.seq + 1, delegate.parentNextSeq)`, sends it as a
+   `Delta` with `parent` set and `slots: []`, and updates from the response /
+   subscription notification.
+8. Send `UpdateRequest(key, DeltaUpdate(delta bytes))`; update UI from the
    response / subscription notification.
-8. Clearing a slot sends `entry: null` with a higher `seq` (tombstone).
-9. The editor's value is optional: blank saves `0`. It accepts at most two
-   decimals, converts to an exact i64 count of hundredths, and displays every
-   value with exactly two decimals. The contact select is mandatory and lists
-   the current address book; adding a contact writes it before the slot save.
+9. Clearing a slot sends `entry: null` with a higher `seq` (tombstone).
+10. The editor's value is optional: blank saves `0`. It accepts at most two
+    decimals, converts to an exact i64 count of hundredths, and displays every
+    value with exactly two decimals. The contact select is mandatory and lists
+    the current address book; adding a contact writes it before the slot save.
+11. The tree UI loads the own board from the delegate key. A child or parent
+    board is read by deriving its contract key from that owner's user id and the
+    current code hash, then GETting it read-only (no PUT/subscribe). It falls
+    back to the migratable v2 code hash and marks the board "previous version".
+    Another owner's board is never signed by this device.
+12. A parent→child edge is a tree edge only when both signed sides agree (see
+    the tree model). Breadcrumbs follow mutual parent edges, cache fetched
+    boards, cap the depth, and stop on a cycle. Pending/not-created/legacy
+    edges are shown but not followed as tree edges.
 
 ### Identity backup and restore (user-facing)
 
@@ -419,32 +510,39 @@ Contract and delegate are excluded from any workspace (see build-system →
 ## 10. Acceptance
 
 - `cargo test` in `contract/` covers: signature tamper per field, slot and
-  contacts bounds, seq-0 invariants, contacts uniqueness, merkle-free
-  summary/delta round-trip including contacts, contacts-only delta, empty
-  delta when converged, property tests for slot and contacts merge
-  comm/assoc/idempotence/absorption.
-- `cargo test` in `delegate/` covers: identity creation/stability, slot and
-  contacts signing golden vectors, seq monotonicity for both counters, slot and
-  contacts bounds, pinned-webapp acceptance, foreign webapp / `Delegate` /
-  missing-origin rejection, malformed delegate parameters failing closed,
-  `status` without seed creation, export/import round-trip preserving identity
-  and all counters, and import refusing to overwrite an existing seed.
+  contacts bounds, parent bounds/self-parent/tamper, seq-0 invariants, contacts
+  uniqueness, v2-signed slots/contacts with an empty parent validating as v3,
+  summary/delta round-trip including parent and contacts, parent/contacts-only
+  delta, empty delta when converged, property tests for parent/slot/contacts
+  merge comm/assoc/idempotence/absorption.
+- `cargo test` in `delegate/` covers: identity creation/stability, slot,
+  contacts, and parent signing golden vectors, seq monotonicity for all three
+  counters, slot/contacts/parent bounds, parent self-check, pinned-webapp
+  acceptance, foreign webapp / `Delegate` / missing-origin rejection,
+  malformed delegate parameters failing closed, `status` without seed creation,
+  export/import round-trip preserving identity and all counters, and import
+  refusing to overwrite an existing seed.
 - `make check-artifacts` rebuilds both WASMs reproducibly and byte-compares
   them to `published/`; `migrations.test.ts` proves every superseded generation
-  in `published/manifest.json` is still in a migration registry, and that a
-  v1 hash is never listed as migratable into v2.
+  in `published/manifest.json` is still in a migration registry, that v2 is
+  migratable, and that a v1 hash is never listed as migratable.
 - `make verify-merge`: the generated bundle carries states, deltas, summaries
-  and transitions, including a contacts change; 0 violations, 0 inconclusive,
-  and each of the 14 laws generates at least one case.
+  and transitions, including parent and contacts changes; 0 violations, 0
+  inconclusive, and each of the 14 laws generates at least one case.
 - `npm run build` in `ui/`, then the in-repo Playwright offline spec
   (`ui/e2e/offline.spec.ts`) against `vite preview` with the mock backend:
-  mount, add a contact, save a decimal, axe, clean console, a blank value that
-  displays `0.00`, more than two decimals rejected, and the full i64-cents
-  range displaying and reopening exactly one past the bound.
+  mount, add contacts, save decimals, set/clear a parent, open a fixture child
+  read-only, navigate breadcrumbs/home, see pending/not-created states, reject
+  duplicate children, axe, clean console, blank `0.00`, >2 decimals rejected,
+  and the full i64-cents range.
 - Real node: add a contact, save a two-decimal value, reload, and confirm the
-  contact label and exact hundredths survive; add a second contact and confirm
-  the address book replicates; clear a contact and confirm old slots show an
-  unknown id rather than becoming invalid.
+  contact label and exact hundredths survive; set a parent/child link and
+  confirm the mutual check on two identities (or the offline fixture); clear a
+  contact and confirm old slots show an unknown id rather than becoming
+  invalid.
+- v2→v3 migration on a real node: load a v2 board through the v3 UI, confirm
+  the client PUTs the upgraded v3 state, the contacts/slots/values survive, and
+  the parent is empty (root).
 - Gateway spec (`ui/e2e/gateway.spec.ts`) with `FREENET_BASE_URL` pointing at a
   `/v1/contract/web/<id>/` URL: shell bridge, sandboxed iframe, identity and
   board mount, no fatal console/network errors.
@@ -456,11 +554,10 @@ Contract and delegate are excluded from any workspace (see build-system →
   confirm persistence; tombstone a slot and confirm it does not resurrect.
 - Migration: publish a successor delegate, confirm the UI exports the
   predecessor seed and imports it before identity creation (same owner key);
-  for a normal, schema-compatible contract change, list the outgoing hash in
+  for a schema-compatible contract change, list the outgoing hash in
   `LEGACY_CONTRACT_CODE_HASHES` and confirm the new instance receives the old
-  signed state. For v2, confirm the UI does **not** probe the v1 hashes in
-  `UNMIGRATABLE_CONTRACT_CODE_HASHES` and starts the same owner with an empty
-  v2 board.
+  signed state. v2→v3 is exactly this case. Confirm the UI does **not** probe
+  the v1 hashes in `UNMIGRATABLE_CONTRACT_CODE_HASHES`.
 
 ## 11. Verified behaviours (local-node findings)
 
@@ -507,8 +604,10 @@ These are not design preferences; each was observed against `freenet` 0.2.150
   owner key and slot value. A schema-compatible contract WASM change with the
   outgoing hash in `LEGACY_CONTRACT_CODE_HASHES` re-PUT the old signed state
   into the new instance; the owner identity and slot value survived.
-- **v2 is a deliberate board break.** The address book changed the state
-  schema and signing bytes, so v1 boards are not carried forward. The delegate
-  seed is migrated (same owner public key), which is what keeps the account and
-  a future migration anchor intact. Do not add a v1 hash to the migratable list
-  to "preserve" a board: `validate_state` would reject the PUT.
+- **v1 was a deliberate board break; v2→v3 is not.** The address book changed
+  the v1 state schema and signing bytes, so v1 boards are not carried forward.
+  v3 keeps the v2 slot/contacts bytes and adds a parent record, so v2 boards
+  migrate by adding an empty parent. The delegate seed is migrated in both
+  cases (same owner public key), which keeps the account and migration anchor.
+  Do not add a v1 hash to the migratable list: `validate_state` would reject
+  the PUT.

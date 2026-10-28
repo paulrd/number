@@ -32,8 +32,8 @@ use freenet_stdlib::prelude::{
     ContractInterface, Parameters, State, StateDelta, StateSummary, UpdateData,
 };
 use number_contract::{
-    Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Slot, StateV2, Summary,
-    contacts_signing_bytes, signing_bytes,
+    Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent, Slot, StateV3, Summary,
+    contacts_signing_bytes, parent_signing_bytes, signing_bytes,
 };
 use serde::Serialize;
 
@@ -100,10 +100,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let verifying = key.verifying_key();
     std::fs::write(directory.join("params.bin"), verifying.to_bytes())?;
 
-    // Base board: one value, one measured value, one cleared slot, and the
-    // first contact. `s1` is the empty predecessor.
-    let s1 = StateV2::empty();
-    let mut s2 = StateV2::empty();
+    // Base board: one value, one measured value, one cleared slot, the first
+    // contact and a parent link. `s1` is the empty predecessor.
+    let s1 = StateV3::empty();
+    let mut s2 = StateV3::empty();
+    s2.parent = signed_parent(&key, 1, Some(ALICE));
     s2.contacts = signed_contacts(&key, 1, vec![contact("Alice", ALICE)]);
     s2.slots[0] = signed(
         &key,
@@ -114,10 +115,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     s2.slots[2] = signed(&key, 2, 3, Some(entry(-42, ALICE, Some("kg"), None)));
     s2.slots[5] = signed(&key, 5, 1, None); // tombstone: a slot that was cleared
 
-    // A later state from the same owner: a second contact (contacts seq 2),
-    // higher seq on slot 0, an extreme i64 at u64::MAX seq, and a longer note
-    // near the metadata limit.
+    // A later state from the same owner: a second parent link (parent seq 2), a
+    // second contact (contacts seq 2), higher seq on slot 0, an extreme i64 at
+    // u64::MAX seq, and a longer note near the metadata limit.
     let mut s3 = s2.clone();
+    s3.parent = signed_parent(&key, 2, Some(BOB));
     s3.contacts = signed_contacts(&key, 2, vec![contact("Alice", ALICE), contact("Bob", BOB)]);
     s3.slots[0] = signed(
         &key,
@@ -145,13 +147,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Three independent updates to the SAME base `s2`: the concurrent-update
     // scenario `delta_permutation_invariance` is a law about. Two add a slot, one
-    // clears a slot with a tombstone.
+    // clears a slot with a tombstone and also clears the parent.
     let mut a = s2.clone();
     a.slots[3] = signed(&key, 3, 1, Some(entry(100, ALICE, Some("items"), None)));
     let mut b = s2.clone();
     b.slots[4] = signed(&key, 4, 2, Some(entry(7, BOB, None, Some("concurrent"))));
     let mut c = s2.clone();
     c.slots[2] = signed(&key, 2, 5, None); // tombstone an existing slot
+    c.parent = signed_parent(&key, 2, None); // clear the parent
 
     // A second base with its own update, so transition provenance is not all one
     // board.
@@ -227,8 +230,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// actually produces, never a hand-written state.
 fn step(
     verifying: &VerifyingKey,
-    base: &StateV2,
-    expected: &StateV2,
+    base: &StateV3,
+    expected: &StateV3,
     delta: Vec<u8>,
     summary: Vec<u8>,
 ) -> Transition {
@@ -258,7 +261,7 @@ fn params(verifying: &VerifyingKey) -> Parameters<'static> {
     Parameters::from(verifying.to_bytes().to_vec())
 }
 
-fn delta(verifying: &VerifyingKey, sender: &StateV2, recipient_summary: &[u8]) -> Vec<u8> {
+fn delta(verifying: &VerifyingKey, sender: &StateV3, recipient_summary: &[u8]) -> Vec<u8> {
     NumberContract::get_state_delta(
         params(verifying),
         State::from(sender.to_bytes()),
@@ -269,7 +272,7 @@ fn delta(verifying: &VerifyingKey, sender: &StateV2, recipient_summary: &[u8]) -
     .to_vec()
 }
 
-fn apply(verifying: &VerifyingKey, state: &StateV2, delta: &[u8]) -> StateV2 {
+fn apply(verifying: &VerifyingKey, state: &StateV3, delta: &[u8]) -> StateV3 {
     let updated = NumberContract::update_state(
         params(verifying),
         State::from(state.to_bytes()),
@@ -277,7 +280,7 @@ fn apply(verifying: &VerifyingKey, state: &StateV2, delta: &[u8]) -> StateV2 {
     )
     .expect("corpus delta must be accepted")
     .unwrap_valid();
-    StateV2::decode(updated.as_ref()).expect("the contract emits decodable state")
+    StateV3::decode(updated.as_ref()).expect("the contract emits decodable state")
 }
 
 fn signed(key: &SigningKey, index: u8, seq: u64, entry: Option<Entry>) -> Slot {
@@ -285,6 +288,15 @@ fn signed(key: &SigningKey, index: u8, seq: u64, entry: Option<Entry>) -> Slot {
     Slot {
         seq,
         entry,
+        sig: Some(hex::encode(signature.to_bytes())),
+    }
+}
+
+fn signed_parent(key: &SigningKey, seq: u64, user_id: Option<&str>) -> Parent {
+    let signature = key.sign(&parent_signing_bytes(seq, user_id));
+    Parent {
+        seq,
+        user_id: user_id.map(str::to_owned),
         sig: Some(hex::encode(signature.to_bytes())),
     }
 }

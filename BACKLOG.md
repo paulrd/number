@@ -6,7 +6,9 @@ This file is the durable state for the project. Read it with `README.md` and
 ## Current state
 
 Published on the live Freenet network (same webapp id as local; the website key
-did not change). The local node remains the owner's node.
+did not change). The local node remains the owner's node. v3 (boards as a tree)
+is recorded in `published/` but the live site still serves the v2 build until
+the deploy step below is run.
 
 | Item | Value |
 |---|---|
@@ -18,16 +20,16 @@ did not change). The local node remains the owner's node.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` (v2, recorded) |
-| Current delegate code hash | `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj` |
-| Current contract code hash | `A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur` (v2) |
+| Current delegate key | `FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb` (v3, recorded) |
+| Current delegate code hash | `FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH` |
+| Current contract code hash | `7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg` (v3) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
-| Board contract id | `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC` (v2, empty) |
-| Slot 1 | empty (v2 board is new; the v1 board `4JkW…` is not migratable) |
+| Board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
+| Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v2 build deployed (2026-10-28); gateway smoke passed on `:7509` |
+| Live site | still the v2 build; v3 is recorded but not deployed |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
-| VPS peer | v2 delegate + website published from this environment through the `:7509` SSH forward |
+| VPS peer | v2 delegate + website published; v3 delegate/site publish is the next deploy step |
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -328,6 +330,33 @@ frame.
   laws, 0 violations); offline e2e covers add/remove contact, decimals, blank
   zero, the cents bounds, axe, and a clean console.
 
+### #17 — Boards as a tree (v3)
+
+- Contract v3 adds a signed single-`parent` record (`{seq,userId,sig}`) with
+  its own monotonic sequence, summary pair, delta, and merge. The 8 slots are
+  children; a slot's `contact` is the child board owner. At most one parent is
+  enforced by the single record; self-parent is rejected. The contract cannot
+  enforce mutual agreement, cycles, or unique children across boards.
+- A tree edge is **mutual**: the parent has a slot for the child and the child's
+  parent points back. The UI shows linked/pending/not-created/previous-version;
+  only mutual edges make breadcrumbs. A v2 board can be a parent (slots are
+  signed) but must be opened in v3 to become a child.
+- UI: own board stays live/editable; other boards are read-only. Parent
+  set/change/clear with a best-effort cycle check, breadcrumbs capped at 32 with
+  cycle detection, child link status in the editor, `Open child board`, Home,
+  and duplicate/self child rejection. The address book edits the own board only.
+- Migration: **v2 is migratable**. v3 keeps the v2 slot/contacts signing bytes;
+  the client adds an empty parent and re-PUTs the signed state. The v4 delegate
+  export migrates its seed/counters; `parentNextSeq` defaults to 1. v1 remains
+  unmigratable.
+- New recorded artifacts: contract `7j8y…`, delegate code `FHGW…`, delegate key
+  `FtdT…`. Verified: contract 75 tests, delegate 21, UI 97, `make check-artifacts`,
+  `make verify-merge` (293 cases, 14 laws, 0 violations), offline e2e 4/4
+  (including the tree, parent, read-only, pending, duplicate, axe).
+- Not deployed live yet. Deploy: `make publish-delegate` on `:7510` and the VPS
+  peer, then `fdev --port <port> website update --key number-local ui/dist`.
+  The v2→v3 migration runs when the owner opens the v3 site.
+
 ## Remaining
 
 ### #15 — Atlas listing (blocked)
@@ -355,8 +384,11 @@ the Atlas operator to crawl it.
   `7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY`, pinned to the webapp above.
   Superseded by v2; registered in `LEGACY_DELEGATES`, so its seed migrates
   forward.
-- `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` — **current (v2)**, code hash
-  `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj`. Recorded in
+- `BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef` — previous (v2), code hash
+  `CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj`. Superseded by v3; registered
+  in `LEGACY_DELEGATES`.
+- `FtdTGtdvZT3j71nr8yF2L7qsqdLTdwKrWfjMSoPg7iEb` — **current (v3)**, code hash
+  `FHGW7JXm4XPdTo5ezG5wThTd6CCVAEmQEFM8vJB1mdjH`. Recorded in
   `published/manifest.json`; append to `LEGACY_DELEGATES` before the next
   delegate change (the record gate enforces it).
 - Contract `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` — old v1 hash,
@@ -366,9 +398,14 @@ the Atlas operator to crawl it.
 - Contract `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` — v1, reproducible,
   registered as unmigratable in v2. Board
   `4JkW7tMySXeg4vzsFGcnEyXpq7NNjGBGd9eQmqRGgbsk`.
-- Contract `A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur` — **current (v2)**,
+- Contract `A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur` — previous (v2),
   address book + hundredths. Board
-  `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC`. Recorded in
+  `Ge6fPDvarU7qiGBRQk69bXst4yqdpRLtdMHLMSNkrwaC`. Registered in
+  `LEGACY_CONTRACT_CODE_HASHES` (migratable: v3 keeps the slot/contacts signing
+  bytes and adds an empty parent).
+- Contract `7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg` — **current (v3)**,
+  boards as a tree. Board
+  `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv`. Recorded in
   `published/manifest.json`; append to `LEGACY_CONTRACT_CODE_HASHES` or
   `UNMIGRATABLE_CONTRACT_CODE_HASHES` before the next contract change.
 
@@ -386,6 +423,10 @@ the Atlas operator to crawl it.
 - Never remove a migration registry entry.
 - The build remap namespace (`/cargo`, `/rustup`, `/build`) is frozen: changing
   a replacement root re-keys everything.
+- The slot/contacts signing domains (`number:v2:slot`, `number:v2:contacts`) are
+  frozen while v2-board migration is supported. Changing them makes the v2
+  generation unmigratable; do it only with a deliberate break and a registry
+  move.
 - A predecessor pinned to a different webapp id cannot be called from the new
   UI; migrate before changing the webapp id.
 - Delegates and contracts are content-addressed: any WASM change re-keys them.
@@ -404,20 +445,20 @@ make verify-merge
 
 ## Working tree
 
-Clean; the v2 address-book change is committed as `e1301f5` and pushed to
-`origin/main`. #13's report is committed and filed as freenet-stdlib#140; #14 is
-in `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
-`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
-`ba81747`.
+Contains the uncommitted v3 tree change. The v2 address-book change is committed
+as `e1301f5` and pushed to `origin/main`. #13's report is committed and filed as
+freenet-stdlib#140; #14 is in `1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10
+in `9eb7a35`, #9 in `2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in
+`8bba3e2`, #1/#2/#4/#5/#6 in `ba81747`.
 
-`published/` records the v2 generation; `make check-artifacts` proves the bytes.
-The v2 delegate and website were published to both the local node (`:7510`) and
-the live VPS peer (`:7509` through the SSH forward); the gateway smoke passed on
-both (the first live attempt exceeded the 30 s smoke timeout while the new
-contract's initial PUT propagated; the retry took 13.5 s). The website id did
-not move, so the delegate pin is unchanged. A visitor's existing v1 board is not
-migrated (same owner key, new empty v2 board); the first-run flow recovers the
-seed from the v1 delegate. The VPS test seed from #12 remains; the isolated test
+`published/` records the v3 generation; `make check-artifacts` proves the bytes.
+The live site still serves the v2 build. To deploy v3: publish
+`FtdT…` to the local `:7510` and the live VPS `:7509`, then
+`fdev --port <port> website update --key number-local ui/dist`. The v2 website id
+does not move. A v2 board migrates when its owner opens the v3 site: the client
+adds an empty parent, re-PUTs the signed v2 state, and the v3 contract accepts
+it; the delegate seed/counters migrate through `LEGACY_DELEGATES`. A v1 board
+remains unmigratable. The VPS test seed from #12 remains; the isolated test
 nodes were wiped. The only open backlog item is #15 (Atlas), blocked externally.
 
 Handoff notes:

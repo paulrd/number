@@ -4,14 +4,16 @@ import {
   entryFromInputs,
   type BoardBackend,
   type BoardCallbacks,
+  type BoardSnapshot,
   type BoardStatus,
 } from "./board";
 import { createContactsDialog } from "./contacts-dialog";
-import { DelegateError } from "./delegate";
+import { DelegateError, type DelegateIdentity } from "./delegate";
 import { createDelegateDialog } from "./delegate-dialog";
-import { ContractBuildError } from "./freenet";
+import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
+import { createParentDialog, type ParentDialog } from "./parent-dialog";
 import {
   formatCents,
   parseCents,
@@ -20,10 +22,17 @@ import {
   validateEntry,
   type Contact,
   type Entry,
-  type StateV2,
+  type StateV3,
 } from "./state";
-import { errorMessage, shorten } from "./util";
-import type { DelegateIdentity } from "./delegate";
+import {
+  BoardCache,
+  buildTrail,
+  childLink,
+  parentLink,
+  type LinkState,
+  type TrailStep,
+} from "./tree-view";
+import { errorMessage, hexToBytes, shorten } from "./util";
 
 const isOffline = __OFFLINE_MODE__;
 
@@ -48,8 +57,19 @@ const statusDetail = byId<HTMLParagraphElement>("status-detail");
 const identityShort = byId<HTMLElement>("identity-short");
 const identityCopy = byId<HTMLButtonElement>("identity-copy");
 const identityBackup = byId<HTMLButtonElement>("identity-backup");
+const boardOwner = byId<HTMLElement>("board-owner");
+const boardCopy = byId<HTMLButtonElement>("board-copy");
+const boardHome = byId<HTMLButtonElement>("board-home");
+const readOnlyBadge = byId<HTMLElement>("read-only-badge");
+const legacyBadge = byId<HTMLElement>("legacy-badge");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
+const parentName = byId<HTMLElement>("parent-name");
+const parentStatus = byId<HTMLSpanElement>("parent-status");
+const parentNote = byId<HTMLParagraphElement>("parent-note");
+const parentOpen = byId<HTMLButtonElement>("parent-open");
+const parentEdit = byId<HTMLButtonElement>("parent-edit");
+const parentClear = byId<HTMLButtonElement>("parent-clear");
 const contactsOpen = byId<HTMLButtonElement>("contacts-open");
 const contactsCount = byId<HTMLElement>("contacts-count");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
@@ -62,7 +82,13 @@ const noticeDismiss = byId<HTMLButtonElement>("notice-dismiss");
 
 const warningsBox = byId<HTMLDivElement>("warnings");
 const warningList = byId<HTMLUListElement>("warning-list");
+const breadcrumbs = byId<HTMLElement>("breadcrumbs");
+const breadcrumbList = byId<HTMLOListElement>("breadcrumb-list");
+const breadcrumbWarning = byId<HTMLParagraphElement>("breadcrumb-warning");
+const boardTitle = byId<HTMLHeadingElement>("board-title");
+const boardMode = byId<HTMLParagraphElement>("board-mode");
 const boardElement = byId<HTMLDivElement>("board");
+const boardHint = byId<HTMLParagraphElement>("board-hint");
 
 const editor = byId<HTMLDialogElement>("editor");
 const editorForm = byId<HTMLFormElement>("editor-form");
@@ -77,6 +103,10 @@ const contactAdd = byId<HTMLButtonElement>("contact-add");
 const contactHint = byId<HTMLParagraphElement>("contact-hint");
 const unitInput = byId<HTMLInputElement>("unit-input");
 const noteInput = byId<HTMLTextAreaElement>("note-input");
+const childLinkBox = byId<HTMLElement>("child-link");
+const childLinkStatus = byId<HTMLSpanElement>("child-link-status");
+const childLinkDetail = byId<HTMLParagraphElement>("child-link-detail");
+const childOpen = byId<HTMLButtonElement>("child-open");
 const editorError = byId<HTMLParagraphElement>("editor-error");
 const clearButton = byId<HTMLButtonElement>("clear-button");
 const cancelButton = byId<HTMLButtonElement>("cancel-button");
@@ -93,15 +123,69 @@ interface SlotView {
   action: HTMLSpanElement;
 }
 
+interface ViewedBoard {
+  ownerId: string;
+  state: StateV3;
+  codeHash: string;
+  legacy: boolean;
+  isOwn: boolean;
+}
+
 const slotViews: SlotView[] = [];
 
-let boardState: StateV2 | null = null;
-let identity: DelegateIdentity | null = null;
+/** The viewer's own board, kept live even while another board is on screen. */
+let ownState: StateV3 | null = null;
+let ownIdentity: DelegateIdentity | null = null;
+/** The board currently on screen: own, or another owner's read-only board. */
+let view: ViewedBoard | null = null;
+
 let contractKeyFull: string | null = null;
 let boardStatus: BoardStatus = "starting";
 let busy = false;
+let navigating = false;
 let currentSlot = 0;
+let currentChildId: string | null = null;
+let childLinkOpenable = false;
+let editorRequest = 0;
+let parentStatusRequest = 0;
+let trailRequest = 0;
 let noticeRetry: (() => void | Promise<void>) | null = null;
+/** True while the address book was opened from the parent dialog. */
+let addingForParent = false;
+
+const OWN_BOARD_HINT =
+  "Select a slot to set its value, contact, unit, or note. Values show two " +
+  "decimal places, and a blank value saves as 0.00. Slots keep the contact's " +
+  "key, so renaming a label keeps the link. Every change is signed by the owner " +
+  "key and merged by the contract. Clearing a slot records that it was cleared, " +
+  "so an older copy cannot bring it back.";
+
+const REMOTE_BOARD_HINT =
+  "You are viewing another owner's board. It is read-only here, and only the " +
+  "owner can change its values. Select a filled slot to open that child board, " +
+  "or use Home to return to your own board.";
+
+const LINK_LABELS: Record<LinkState, string> = {
+  root: "Root",
+  linked: "Linked",
+  pending: "Pending",
+  "not-created": "Not created yet",
+  error: "Could not check",
+};
+
+const LINK_TITLES: Record<LinkState, string> = {
+  root: "This board has no parent.",
+  linked: "Both boards point at each other.",
+  pending: "Only one side points at the other yet.",
+  "not-created": "No board exists for this owner yet.",
+  error: "This board could not be read.",
+};
+
+const LEGACY_BOARD_TITLE =
+  "This board is on the previous version. Its owner must open the new app to set a parent.";
+const LEGACY_PARENT_NOTE = "Parent board is on the previous version.";
+const LEGACY_PARENT_TITLE =
+  "The parent cannot set its own parent until its owner opens the new app, but this edge is still valid.";
 
 function createElement<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -118,11 +202,72 @@ function shortUserId(userId: string): string {
   return userId.slice(0, 8);
 }
 
-function findContact(userId: string): Contact | null {
-  return (
-    boardState?.contacts.entries.find((contact) => contact.userId === userId) ??
-    null
-  );
+function ownContacts(): Contact[] {
+  return ownState?.contacts.entries ?? [];
+}
+
+/** Resolve a board owner to a contact label, preferring the given books. */
+function labelForOwner(ownerId: string, ...sources: Contact[][]): string {
+  if (ownIdentity && ownerId === ownIdentity.pubkey) return "Your board";
+  for (const entries of sources) {
+    const contact = entries.find((entry) => entry.userId === ownerId);
+    if (contact) return contact.label;
+  }
+  return `Unknown · ${shortUserId(ownerId)}`;
+}
+
+function findContact(state: StateV3, userId: string): Contact | null {
+  return state.contacts.entries.find((contact) => contact.userId === userId) ?? null;
+}
+
+function ownSnapshot(): BoardSnapshot | null {
+  if (!ownState || !ownIdentity) return null;
+  return {
+    ownerId: ownIdentity.pubkey,
+    state: ownState,
+    codeHash: BOARD_CONFIG.contractCodeHash,
+    legacy: false,
+  };
+}
+
+function toView(snapshot: BoardSnapshot): ViewedBoard {
+  return {
+    ownerId: snapshot.ownerId,
+    state: snapshot.state,
+    codeHash: snapshot.codeHash,
+    legacy: snapshot.legacy,
+    isOwn: ownIdentity !== null && snapshot.ownerId === ownIdentity.pubkey,
+  };
+}
+
+const boardCache = new BoardCache((ownerId) => backend.readBoard(ownerId));
+
+/** Remote boards are cached; the own board always comes from live state. */
+async function readBoardForView(ownerId: string): Promise<BoardSnapshot | null> {
+  if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSnapshot();
+  return boardCache.get(ownerId);
+}
+
+const linkDeps = {
+  readBoard: readBoardForView,
+};
+
+/** Contract key shown in the header: the viewed board's instance id. */
+function currentContractKey(): string | null {
+  if (!view) return null;
+  if (view.isOwn) return contractKeyFull;
+  try {
+    return deriveInstanceId(view.codeHash, hexToBytes(view.ownerId)).base58;
+  } catch {
+    return null;
+  }
+}
+
+function paintBadge(element: HTMLElement, state: LinkState): void {
+  element.dataset.state = state;
+  element.textContent = LINK_LABELS[state];
+  element.title = LINK_TITLES[state];
+  element.hidden = false;
 }
 
 function buildSlots(): void {
@@ -132,7 +277,7 @@ function buildSlots(): void {
     button.disabled = true;
     button.setAttribute("aria-haspopup", "dialog");
     button.setAttribute("aria-controls", "editor");
-    button.addEventListener("click", () => openEditor(index));
+    button.addEventListener("click", () => handleSlotClick(index));
 
     const top = createElement("span", "slot-top");
     const indexLabel = createElement(
@@ -161,91 +306,136 @@ function buildSlots(): void {
   }
 }
 
+function handleSlotClick(index: number): void {
+  if (!view || busy || navigating) return;
+  if (view.isOwn) {
+    openEditor(index);
+    return;
+  }
+
+  const entry = view.state.slots[index].entry;
+  if (entry === null) {
+    showNotice(
+      "info",
+      "Empty slot",
+      "This slot is empty. The board belongs to another owner and is read-only.",
+    );
+    return;
+  }
+  void openBoard(entry.contact);
+}
+
 function renderBoard(): void {
+  const current = view;
   const loading =
-    !boardState &&
+    current === null &&
     (boardStatus === "starting" ||
       boardStatus === "connecting" ||
       boardStatus === "identity");
   boardElement.classList.toggle("is-loading", loading);
 
-  if (!boardState) {
-    for (const view of slotViews) {
-      view.button.disabled = true;
-      view.value.textContent = "—";
-      view.value.classList.remove("is-long", "is-xlong");
-      view.unit.textContent = "";
-      view.label.textContent = "Waiting…";
-      view.label.classList.remove("is-unknown");
-      view.label.title = "";
-      view.note.hidden = true;
-      view.seq.textContent = "seq 0";
-      view.action.textContent = "Waiting for the board.";
+  if (current === null) {
+    for (const slotView of slotViews) {
+      slotView.button.disabled = true;
+      slotView.value.textContent = "—";
+      slotView.value.classList.remove("is-long", "is-xlong");
+      slotView.unit.textContent = "";
+      slotView.label.textContent = "Waiting…";
+      slotView.label.classList.remove("is-unknown");
+      slotView.label.title = "";
+      slotView.note.hidden = true;
+      slotView.seq.textContent = "seq 0";
+      slotView.action.textContent = "Waiting for the board.";
     }
     return;
   }
 
-  const state = boardState;
-  const editable = boardStatus === "ready" || boardStatus === "offline";
+  const state = current.state;
+  const ready = boardStatus === "ready" || boardStatus === "offline";
+  const canEdit = current.isOwn && ready && !busy && !navigating;
+
   state.slots.forEach((slot, index) => {
-    const view = slotViews[index];
+    const slotView = slotViews[index];
     const entry = slot.entry;
-    view.button.disabled = busy || !editable;
-    view.button.className = "slot";
-    if (entry) view.button.classList.add("is-filled");
-    else if (slot.seq > 0) view.button.classList.add("is-tombstone");
-    else view.button.classList.add("is-empty");
+    const canOpen = !current.isOwn && entry !== null && !navigating;
+
+    slotView.button.disabled = !canEdit && !canOpen;
+    slotView.button.className = "slot";
+    if (entry) slotView.button.classList.add("is-filled");
+    else if (slot.seq > 0) slotView.button.classList.add("is-tombstone");
+    else slotView.button.classList.add("is-empty");
+
+    if (current.isOwn) {
+      slotView.button.setAttribute("aria-haspopup", "dialog");
+      slotView.button.setAttribute("aria-controls", "editor");
+    } else {
+      slotView.button.removeAttribute("aria-haspopup");
+      slotView.button.removeAttribute("aria-controls");
+    }
 
     const valueText = entry
       ? formatCents(entry.value)
       : slot.seq > 0
         ? "∅"
         : "+";
-    view.value.textContent = valueText;
-    view.value.classList.toggle(
+    slotView.value.textContent = valueText;
+    slotView.value.classList.toggle(
       "is-long",
       Boolean(entry) && valueText.length > 9 && valueText.length <= 14,
     );
-    view.value.classList.toggle("is-xlong", Boolean(entry) && valueText.length > 14);
-    view.unit.textContent = entry?.unit ?? "";
+    slotView.value.classList.toggle(
+      "is-xlong",
+      Boolean(entry) && valueText.length > 14,
+    );
+    slotView.unit.textContent = entry?.unit ?? "";
 
-    const contact = entry ? findContact(entry.contact) : null;
-    view.label.textContent = entry
-      ? contact
-        ? contact.label
-        : `Unknown · ${shortUserId(entry.contact)}`
+    const contact = entry ? findContact(state, entry.contact) : null;
+    const isOwnContact =
+      entry !== null && ownIdentity !== null && entry.contact === ownIdentity.pubkey;
+    slotView.label.textContent = entry
+      ? isOwnContact
+        ? "Your board"
+        : contact
+          ? contact.label
+          : `Unknown · ${shortUserId(entry.contact)}`
       : slot.seq > 0
         ? "Cleared"
         : "Empty";
-    view.label.classList.toggle("is-placeholder", !entry);
-    view.label.classList.toggle("is-unknown", Boolean(entry) && !contact);
+    slotView.label.classList.toggle("is-placeholder", !entry);
+    slotView.label.classList.toggle(
+      "is-unknown",
+      Boolean(entry) && !contact && !isOwnContact,
+    );
     // The full key survives a removed contact; keep it available on hover.
-    view.label.title = entry && !contact ? entry.contact : "";
+    slotView.label.title = entry && !contact ? entry.contact : "";
 
-    view.note.textContent = entry?.note ?? "";
-    view.note.hidden = !entry?.note;
-    view.seq.textContent = `seq ${slot.seq}`;
-    view.button.title = entry?.note ?? "";
+    slotView.note.textContent = entry?.note ?? "";
+    slotView.note.hidden = !entry?.note;
+    slotView.seq.textContent = `seq ${slot.seq}`;
+    slotView.button.title = entry?.note ?? "";
 
-    const canEdit = editable && !busy;
-    view.action.textContent = canEdit
+    slotView.action.textContent = canEdit
       ? entry
         ? "Edit slot."
         : slot.seq > 0
           ? "Edit or set a new value."
           : "Add a value."
-      : "Read-only.";
+      : canOpen
+        ? "Open child board."
+        : current.isOwn
+          ? "Read-only."
+          : "Read-only slot.";
   });
 }
 
 function renderWarnings(): void {
-  if (!boardState) {
+  if (!view) {
     warningsBox.hidden = true;
     warningList.replaceChildren();
     return;
   }
 
-  const items = stateWarnings(boardState).map((message) => {
+  const items = stateWarnings(view.state).map((message) => {
     const li = document.createElement("li");
     li.textContent = message;
     return li;
@@ -255,42 +445,250 @@ function renderWarnings(): void {
 }
 
 function renderIdentity(): void {
-  identityBackup.hidden = isOffline || identity === null;
-  identityBackup.disabled = identity === null;
+  identityBackup.hidden = isOffline || ownIdentity === null;
+  identityBackup.disabled = ownIdentity === null;
 
-  if (!identity) {
+  if (!ownIdentity) {
     identityShort.textContent = "Not available";
     identityCopy.disabled = true;
     identityCopy.removeAttribute("title");
     return;
   }
-  const short = shorten(identity.pubkey);
+  const short = shorten(ownIdentity.pubkey);
   identityShort.textContent = short;
-  identityShort.title = identity.pubkey;
+  identityShort.title = ownIdentity.pubkey;
   identityCopy.disabled = false;
-  identityCopy.title = identity.pubkey;
+  identityCopy.title = ownIdentity.pubkey;
   identityCopy.setAttribute("aria-label", `Copy owner public key ${short}`);
 }
 
 function renderContractKey(): void {
-  if (!contractKeyFull) {
+  const key = currentContractKey();
+  if (!key) {
     contractShort.textContent = "Not derived";
     contractCopy.disabled = true;
     contractCopy.removeAttribute("title");
     return;
   }
-  const short = shorten(contractKeyFull);
+  const short = shorten(key);
   contractShort.textContent = short;
-  contractShort.title = contractKeyFull;
+  contractShort.title = key;
   contractCopy.disabled = false;
-  contractCopy.title = contractKeyFull;
+  contractCopy.title = key;
   contractCopy.setAttribute("aria-label", `Copy contract key ${short}`);
 }
 
+function renderBoardHeader(): void {
+  const current = view;
+
+  if (!current) {
+    boardOwner.textContent = "Loading…";
+    boardOwner.removeAttribute("title");
+    boardCopy.disabled = true;
+    boardCopy.removeAttribute("title");
+    boardHome.hidden = true;
+    readOnlyBadge.hidden = true;
+    legacyBadge.hidden = true;
+    boardMode.textContent = "Signed · two decimals";
+    boardHint.textContent = OWN_BOARD_HINT;
+    return;
+  }
+
+  const label = current.isOwn
+    ? "Your board"
+    : labelForOwner(
+        current.ownerId,
+        ownContacts(),
+        current.state.contacts.entries,
+      );
+  boardOwner.textContent = current.isOwn
+    ? label
+    : `${label} · ${shortUserId(current.ownerId)}`;
+  boardOwner.title = current.ownerId;
+  boardCopy.disabled = false;
+  boardCopy.title = current.ownerId;
+  boardCopy.setAttribute(
+    "aria-label",
+    `Copy board owner ${boardOwner.textContent ?? label}`,
+  );
+
+  boardHome.hidden = current.isOwn;
+  boardHome.disabled = busy || navigating;
+  readOnlyBadge.hidden = current.isOwn;
+  legacyBadge.hidden = !current.legacy;
+  legacyBadge.title = LEGACY_BOARD_TITLE;
+  boardMode.textContent = current.isOwn
+    ? "Signed · two decimals"
+    : `Read-only · ${shortUserId(current.ownerId)}`;
+  boardHint.textContent = current.isOwn ? OWN_BOARD_HINT : REMOTE_BOARD_HINT;
+}
+
+function renderParentRow(): void {
+  const request = ++parentStatusRequest;
+  const current = view;
+
+  if (!current) {
+    parentName.textContent = "—";
+    parentName.removeAttribute("title");
+    parentName.classList.remove("is-root");
+    parentStatus.hidden = true;
+    parentNote.hidden = true;
+    parentOpen.hidden = true;
+    parentEdit.hidden = true;
+    parentClear.hidden = true;
+    return;
+  }
+
+  const isOwn = current.isOwn;
+  const parentId = current.state.parent.userId;
+  parentEdit.hidden = !isOwn;
+  parentEdit.disabled = busy;
+  parentEdit.textContent = parentId === null ? "Set parent…" : "Change";
+  parentClear.hidden = !isOwn || parentId === null;
+  parentClear.disabled = busy;
+
+  if (parentId === null) {
+    parentName.textContent = "Root";
+    parentName.title = "This board has no parent.";
+    parentName.classList.add("is-root");
+    parentStatus.hidden = true;
+    parentNote.hidden = true;
+    parentOpen.hidden = true;
+    return;
+  }
+
+  parentName.textContent = labelForOwner(
+    parentId,
+    current.state.contacts.entries,
+    ownContacts(),
+  );
+  parentName.title = parentId;
+  parentName.classList.remove("is-root");
+  parentStatus.hidden = false;
+  parentStatus.dataset.state = "checking";
+  parentStatus.textContent = "Checking…";
+  parentStatus.title = "Checking the parent board.";
+  parentNote.hidden = true;
+  parentOpen.hidden = true;
+
+  const board = isOwn ? (ownSnapshot() ?? current) : current;
+
+  void parentLink(board, linkDeps).then((info) => {
+    if (request !== parentStatusRequest || view !== current) return;
+    paintBadge(parentStatus, info.state);
+    const legacyParent = info.snapshot?.legacy === true;
+    parentNote.hidden = !legacyParent;
+    parentNote.title = LEGACY_PARENT_TITLE;
+    if (legacyParent) parentNote.textContent = LEGACY_PARENT_NOTE;
+    // Own boards may visit a pending parent to see its side. Another owner's
+    // parent is only followed when the edge is mutual. A legacy parent can
+    // still be a mutual parent because its slots are signed and readable.
+    const canOpen =
+      info.state === "linked" || (isOwn && info.state === "pending");
+    parentOpen.hidden = !canOpen;
+    parentOpen.disabled = !canOpen;
+  });
+}
+
+function legacyTrailBadge(step: TrailStep): HTMLElement | null {
+  // A pending parent can be legacy too, but "Pending" already explains the
+  // missing side; only mark steps that actually make up the mutual path.
+  if (!step.legacy || (step.kind !== "current" && step.kind !== "ancestor")) {
+    return null;
+  }
+  const badge = createElement("span", "state-badge breadcrumb-badge");
+  badge.dataset.state = "legacy";
+  badge.textContent = "Previous version";
+  badge.title =
+    step.kind === "current"
+      ? LEGACY_BOARD_TITLE
+      : "This board is on the previous version. Its slots can still be the parent side of a link.";
+  return badge;
+}
+
+function renderTrailItem(step: TrailStep, current: ViewedBoard): HTMLLIElement {
+  const li = document.createElement("li");
+  li.className = "breadcrumb-item";
+  const label = labelForOwner(
+    step.ownerId,
+    step.contacts,
+    current.state.contacts.entries,
+    ownContacts(),
+  );
+  const legacy = legacyTrailBadge(step);
+
+  if (step.kind === "current") {
+    li.classList.add("is-current");
+    li.setAttribute("aria-current", "page");
+    const span = createElement("span", "breadcrumb-current", label);
+    span.title = step.ownerId;
+    li.append(span);
+    if (legacy) li.append(legacy);
+    return li;
+  }
+
+  if (step.kind === "ancestor") {
+    const button = createElement("button", "breadcrumb-link", label);
+    button.type = "button";
+    button.title = step.ownerId;
+    button.addEventListener("click", () => {
+      void openBoard(step.ownerId);
+    });
+    li.append(button);
+    if (legacy) li.append(legacy);
+    return li;
+  }
+
+  li.classList.add("is-pending");
+  const span = createElement("span", "breadcrumb-pending", label);
+  span.title = step.ownerId;
+  const badge = createElement("span", "state-badge breadcrumb-badge");
+  if (step.kind === "pending") {
+    badge.dataset.state = "pending";
+    badge.textContent = "Pending";
+    badge.title = "This board points at a parent that has not added it yet.";
+  } else if (step.kind === "not-created") {
+    badge.dataset.state = "not-created";
+    badge.textContent = "Not created yet";
+    badge.title = "No board exists for this owner yet.";
+  } else {
+    badge.dataset.state = "error";
+    badge.textContent = "Unavailable";
+    badge.title = "This board could not be read.";
+  }
+  span.append(" ", badge);
+  if (legacy) span.append(" ", legacy);
+  li.append(span);
+  return li;
+}
+
+async function renderTrail(): Promise<void> {
+  const request = ++trailRequest;
+  const current = view;
+
+  if (!current) {
+    breadcrumbs.hidden = true;
+    breadcrumbList.replaceChildren();
+    breadcrumbWarning.hidden = true;
+    return;
+  }
+
+  breadcrumbs.hidden = false;
+  const trail = await buildTrail(current, linkDeps);
+  if (request !== trailRequest || view !== current) return;
+
+  breadcrumbList.replaceChildren(
+    ...trail.steps.map((step) => renderTrailItem(step, current)),
+  );
+  breadcrumbWarning.textContent = trail.warning ?? "";
+  breadcrumbWarning.hidden = trail.warning === null;
+}
+
 function renderContactCount(): void {
-  const count = boardState?.contacts.entries.length ?? 0;
+  const count = ownState?.contacts.entries.length ?? 0;
   contactsCount.textContent = String(count);
-  contactsOpen.disabled = boardState === null;
+  contactsOpen.disabled =
+    ownState === null || view === null || !view.isOwn || busy || navigating;
   contactsOpen.setAttribute(
     "aria-label",
     `Address book, ${count} ${count === 1 ? "contact" : "contacts"}`,
@@ -304,6 +702,21 @@ function renderControls(): void {
     boardStatus === "identity";
   reconnectButton.hidden = isOffline;
   reconnectButton.disabled = isOffline || busy || settling;
+  boardHome.disabled = busy || navigating;
+  parentEdit.disabled = busy || !view?.isOwn;
+  parentClear.disabled = busy;
+}
+
+function renderAll(): void {
+  renderIdentity();
+  renderContractKey();
+  renderBoard();
+  renderWarnings();
+  renderContactCount();
+  renderBoardHeader();
+  renderControls();
+  renderParentRow();
+  void renderTrail();
 }
 
 const STATUS_LABELS: Record<BoardStatus, string> = {
@@ -469,14 +882,16 @@ function setEditorBusy(value: boolean): void {
   noteInput.disabled = value;
   cancelButton.disabled = value;
   editorClose.disabled = value;
+  childOpen.disabled = value || !childLinkOpenable;
   clearButton.disabled =
-    value || !boardState || boardState.slots[currentSlot].entry === null;
+    value || !ownState || ownState.slots[currentSlot].entry === null;
   saveButton.textContent = value ? "Saving…" : "Save";
   editorForm.setAttribute("aria-busy", String(value));
   saveButton.setAttribute("aria-busy", String(value));
   updateContactState();
   renderBoard();
   renderControls();
+  renderContactCount();
 
   // Saving closes the dialog while the grid is still disabled. Restore focus
   // once the slot can accept it again; native dialog focus return is too early.
@@ -500,7 +915,7 @@ function populateContactOptions(
   selectedUserId: string,
   extra?: Contact,
 ): void {
-  const entries = boardState?.contacts.entries ?? [];
+  const entries = ownContacts();
   const known = new Set<string>();
   const options: HTMLOptionElement[] = [];
 
@@ -533,13 +948,29 @@ function populateContactOptions(
   updateContactState();
 }
 
+/** Guidance for a child id that cannot be written into this slot. */
+function childProblem(contact: string): string | null {
+  if (ownIdentity && contact === ownIdentity.pubkey) {
+    return "A slot's child must be a different board. Choose another contact.";
+  }
+  const otherIndex =
+    ownState?.slots.findIndex(
+      (slot, index) => index !== currentSlot && slot.entry?.contact === contact,
+    ) ?? -1;
+  if (otherIndex !== -1) {
+    return `That board is already in slot ${otherIndex + 1}. Each child can use only one slot.`;
+  }
+  return null;
+}
+
 function updateContactState(): void {
-  const entries = boardState?.contacts.entries ?? [];
+  const entries = ownContacts();
   const selected = contactSelect.value;
   const known =
     selected !== "" && entries.some((contact) => contact.userId === selected);
 
   let hint = "";
+  let invalid = false;
   if (entries.length === 0) {
     hint = "No contacts yet. Add one to save a slot.";
   } else if (selected === "") {
@@ -547,18 +978,92 @@ function updateContactState(): void {
   } else if (!known) {
     hint =
       "This slot's contact is no longer in the address book. Choose a contact to save changes.";
+  } else {
+    const problem = childProblem(selected);
+    if (problem !== null) {
+      hint = problem;
+      invalid = true;
+    }
   }
+
   contactHint.textContent = hint;
   contactHint.hidden = hint === "";
+  contactHint.classList.toggle("is-warning", invalid);
 
-  saveButton.disabled = busy || !known;
+  saveButton.disabled = busy || !known || invalid;
+}
+
+function setChildLink(contactId: string | null): void {
+  editorRequest += 1;
+  childLinkOpenable = false;
+  currentChildId = contactId;
+
+  if (contactId === null) {
+    childLinkBox.hidden = true;
+    childLinkDetail.hidden = true;
+    childLinkDetail.textContent = "";
+    childOpen.hidden = true;
+    childOpen.disabled = true;
+    return;
+  }
+
+  childLinkBox.hidden = false;
+  childLinkStatus.hidden = false;
+  childLinkStatus.dataset.state = "checking";
+  childLinkStatus.textContent = "Checking…";
+  childLinkStatus.title = "Checking the child board.";
+  childLinkDetail.textContent = "";
+  childLinkDetail.hidden = true;
+  childOpen.hidden = false;
+  childOpen.disabled = true;
+  childOpen.title = "Checking the child board.";
+  void refreshChildLink(contactId, editorRequest);
+}
+
+async function refreshChildLink(
+  contactId: string,
+  generation: number,
+): Promise<void> {
+  const info = await childLink(ownIdentity?.pubkey ?? "", contactId, linkDeps);
+  if (generation !== editorRequest || !editor.open) return;
+
+  const label = labelForOwner(contactId, ownContacts());
+  const legacyChild = info.snapshot?.legacy === true;
+  childLinkStatus.dataset.state = info.state;
+  childLinkStatus.textContent = LINK_LABELS[info.state];
+  childLinkStatus.title = legacyChild
+    ? "This child is on the previous version and has no parent record yet."
+    : LINK_TITLES[info.state];
+
+  let detail = "";
+  if (info.state === "linked") {
+    detail = `${label} lists this board as its parent.`;
+  } else if (legacyChild) {
+    detail =
+      `${label} is on the previous version. Child owner must open the v3 app ` +
+      "to link back.";
+  } else if (info.state === "pending") {
+    detail = `${label} has not set this board as its parent yet.`;
+  } else if (info.state === "not-created") {
+    detail = `${label} has not opened number yet.`;
+  } else if (info.state === "error") {
+    detail = `Could not check this board: ${info.error ?? "the read failed"}.`;
+  }
+
+  childLinkDetail.textContent = detail;
+  childLinkDetail.hidden = detail === "";
+  childLinkOpenable = info.state !== "not-created";
+  childOpen.disabled = busy || !childLinkOpenable;
+  childOpen.title = childLinkOpenable
+    ? `Open the child board for ${label}.`
+    : `${label} has not created a board yet.`;
 }
 
 function openEditor(index: number): void {
-  if (!boardState || busy) return;
+  if (!ownState || !ownIdentity || busy || !view?.isOwn) return;
 
   currentSlot = index;
-  const slot = boardState.slots[index];
+  const slot = ownState.slots[index];
   const entry = slot.entry;
 
   editorSlot.textContent = String(index + 1).padStart(2, "0");
@@ -569,13 +1074,14 @@ function openEditor(index: number): void {
   unitInput.value = entry?.unit ?? "";
   noteInput.value = entry?.note ?? "";
   clearButton.disabled = entry === null;
-  clearButton.textContent = entry === null ? "Clear slot" : "Clear slot";
+  clearButton.textContent = "Clear slot";
 
   editorError.hidden = true;
   editorError.textContent = "";
   valueInput.removeAttribute("aria-invalid");
   populateContactOptions(entry?.contact ?? "");
   updateValueWarning();
+  setChildLink(entry?.contact ?? null);
 
   if (!editor.open) editor.showModal();
   valueInput.focus();
@@ -636,11 +1142,17 @@ function showEditorError(message: string, focus: HTMLElement | null): void {
 
 async function handleSave(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  if (busy || !boardState) return;
+  if (busy || !ownState || !view?.isOwn) return;
 
   const contact = contactSelect.value;
   if (contact === "") {
     showEditorError("Choose a contact before saving.", contactSelect);
+    return;
+  }
+
+  const problem = childProblem(contact);
+  if (problem !== null) {
+    showEditorError(problem, contactSelect);
     return;
   }
 
@@ -683,8 +1195,8 @@ async function handleSave(event: SubmitEvent): Promise<void> {
 }
 
 async function handleClear(): Promise<void> {
-  if (busy || !boardState) return;
-  const slot = boardState.slots[currentSlot];
+  if (busy || !ownState || !view?.isOwn) return;
+  const slot = ownState.slots[currentSlot];
   if (slot.entry === null) return;
 
   editorError.hidden = true;
@@ -744,10 +1256,130 @@ async function reconnect(): Promise<void> {
   if (isOffline || busy) return;
   hideNotice();
   if (editor.open) closeEditor();
+  boardCache.clear();
   try {
     await backend.retry();
   } catch (error) {
     showFatal(error);
+  }
+}
+
+function goHome(): void {
+  if (!view || view.isOwn) return;
+  const snapshot = ownSnapshot();
+  if (snapshot === null) return;
+
+  view = toView(snapshot);
+  hideErrorNotice();
+  renderAll();
+  announce("Back on your board.");
+  boardTitle.focus({ preventScroll: true });
+}
+
+async function openBoard(ownerId: string): Promise<void> {
+  if (!ownIdentity || navigating) return;
+  if (ownerId === ownIdentity.pubkey) {
+    goHome();
+    return;
+  }
+  if (view !== null && !view.isOwn && view.ownerId === ownerId) return;
+
+  navigating = true;
+  renderBoardHeader();
+  renderBoard();
+  renderControls();
+  renderContactCount();
+
+  try {
+    const snapshot = await readBoardForView(ownerId);
+    if (snapshot === null) {
+      const label = labelForOwner(
+        ownerId,
+        ownContacts(),
+        view?.state.contacts.entries ?? [],
+      );
+      showNotice(
+        "info",
+        "Board not created yet",
+        `${label} has not opened number yet, so there is no board to show.`,
+      );
+      announce("That board has not been created yet.");
+      return;
+    }
+
+    view = toView(snapshot);
+    hideErrorNotice();
+    renderAll();
+    const label = labelForOwner(
+      ownerId,
+      ownContacts(),
+      view.state.contacts.entries,
+    );
+    announce(`Viewing ${label}.`);
+    boardTitle.focus({ preventScroll: true });
+  } catch (error) {
+    showNotice("error", "Could not open that board", humanError(error));
+    announce("Could not open that board.");
+  } finally {
+    navigating = false;
+    renderBoardHeader();
+    renderBoard();
+    renderControls();
+    renderContactCount();
+  }
+}
+
+async function clearParent(): Promise<void> {
+  if (busy || !view?.isOwn || !ownState?.parent.userId) return;
+
+  busy = true;
+  renderBoard();
+  renderControls();
+  renderContactCount();
+  renderParentRow();
+  try {
+    await backend.saveParent(null);
+    hideErrorNotice();
+    announce("Parent cleared. This board is a root.");
+  } catch (error) {
+    showNotice("error", "Parent not cleared", humanError(error));
+    announce("Parent not cleared.");
+  } finally {
+    busy = false;
+    renderBoard();
+    renderControls();
+    renderContactCount();
+    renderParentRow();
+  }
+}
+
+async function handleParentSaved(): Promise<void> {
+  const parentId = ownState?.parent.userId ?? null;
+  renderAll();
+
+  if (parentId === null) {
+    announce("Parent cleared. This board is a root.");
+    return;
+  }
+
+  const snapshot = ownSnapshot();
+  if (snapshot === null) return;
+  const info = await parentLink(snapshot, linkDeps);
+  const label = labelForOwner(parentId, ownContacts());
+  const legacyNote = info.snapshot?.legacy
+    ? " The parent board is on the previous version."
+    : "";
+
+  if (info.state === "linked") {
+    announce(`Parent saved. Linked to ${label}.${legacyNote}`);
+  } else if (info.state === "pending") {
+    announce(
+      `Parent saved. Pending until ${label} adds this board.${legacyNote}`,
+    );
+  } else if (info.state === "not-created") {
+    announce(`Parent saved. ${label} has not created a board yet.`);
+  } else {
+    announce("Parent saved. The link could not be checked.");
   }
 }
 
@@ -760,18 +1392,28 @@ function startBoard(): void {
 const callbacks: BoardCallbacks = {
   onStatus: (status, detail) => setStatus(status, detail),
   onState: (state) => {
-    boardState = state;
-    renderBoard();
-    renderWarnings();
-    renderContactCount();
+    ownState = state;
+    if (ownIdentity && (view === null || view.isOwn)) {
+      const snapshot = ownSnapshot();
+      if (snapshot) view = toView(snapshot);
+    }
+    renderAll();
     contactsDialog.refresh();
+    parentDialog?.refresh();
     // A contacts write can land while the editor is open (the address book is
     // reachable from it). Keep the options honest without losing the selection.
-    if (editor.open) populateContactOptions(contactSelect.value);
+    if (editor.open) {
+      populateContactOptions(contactSelect.value);
+      updateContactState();
+    }
   },
   onIdentity: (next) => {
-    identity = next;
-    renderIdentity();
+    ownIdentity = next;
+    if (view === null || view.isOwn) {
+      const snapshot = ownSnapshot();
+      if (snapshot) view = toView(snapshot);
+    }
+    renderAll();
   },
   onContractKey: (key) => {
     contractKeyFull = key;
@@ -790,20 +1432,66 @@ const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
 
+let parentDialog: ParentDialog | null = null;
+
 const contactsDialog = createContactsDialog({
-  getContacts: () => boardState?.contacts.entries ?? [],
-  getUsedContactCount: (userId) =>
-    boardState
-      ? boardState.slots.filter((slot) => slot.entry?.contact === userId).length
-      : 0,
+  getContacts: ownContacts,
+  getUsedContactCount: (userId) => {
+    if (!ownState) return 0;
+    const slotUses = ownState.slots.filter(
+      (slot) => slot.entry?.contact === userId,
+    ).length;
+    const parentUse = ownState.parent.userId === userId ? 1 : 0;
+    return slotUses + parentUse;
+  },
   saveContacts: (entries) => backend.saveContacts(entries),
   announce,
   onAdded: (contact) => {
+    if (addingForParent) {
+      addingForParent = false;
+      parentDialog?.selectContact(contact.userId);
+      return;
+    }
+    if (!editor.open) return;
     populateContactOptions(contact.userId, contact);
     editorError.hidden = true;
     editorError.textContent = "";
     updateContactState();
+    setChildLink(contact.userId);
     contactSelect.focus({ preventScroll: true });
+  },
+});
+
+parentDialog = createParentDialog({
+  getContacts: ownContacts,
+  getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
+  getParent: () => ownState?.parent.userId ?? null,
+  readBoard: readBoardForView,
+  saveParent: async (userId) => {
+    if (!view?.isOwn) {
+      throw new Error("Open your own board before changing its parent.");
+    }
+    busy = true;
+    renderBoard();
+    renderControls();
+    renderContactCount();
+    try {
+      await backend.saveParent(userId);
+    } finally {
+      busy = false;
+      renderBoard();
+      renderControls();
+      renderContactCount();
+    }
+  },
+  openContacts: () => {
+    addingForParent = true;
+    contactsDialog.open({ selectOnAdd: true });
+  },
+  announce,
+  onSaved: () => {
+    hideErrorNotice();
+    void handleParentSaved();
   },
 });
 
@@ -815,10 +1503,10 @@ const delegateDialog = createDelegateDialog({
 
 const identityDialogs = createIdentityDialogs({
   offline: isOffline,
-  getIdentity: () => identity,
+  getIdentity: () => ownIdentity,
   exportIdentity: () => backend.exportIdentity(),
-  importIdentity: (seed, nextSeq, contactsNextSeq) =>
-    backend.importIdentity(seed, nextSeq, contactsNextSeq),
+  importIdentity: (seed, nextSeq, contactsNextSeq, parentNextSeq) =>
+    backend.importIdentity(seed, nextSeq, contactsNextSeq, parentNextSeq),
   announce,
   copy: copyToClipboard,
   onRestored: () => {
@@ -843,11 +1531,7 @@ if (!isOffline) {
 }
 
 buildSlots();
-renderBoard();
-renderWarnings();
-renderIdentity();
-renderContractKey();
-renderContactCount();
+renderAll();
 renderStatus();
 reconnectButton.hidden = isOffline;
 
@@ -860,11 +1544,16 @@ editorForm.addEventListener("submit", (event) => {
   void handleSave(event);
 });
 valueInput.addEventListener("input", updateValueWarning);
-contactSelect.addEventListener("change", updateContactState);
+contactSelect.addEventListener("change", () => {
+  updateContactState();
+  setChildLink(contactSelect.value === "" ? null : contactSelect.value);
+});
 contactAdd.addEventListener("click", () => {
+  addingForParent = false;
   contactsDialog.open({ selectOnAdd: true });
 });
 contactsOpen.addEventListener("click", () => {
+  addingForParent = false;
   contactsDialog.open();
 });
 
@@ -875,15 +1564,42 @@ editor.addEventListener("click", (event) => {
   if (event.target === editor && !busy) closeEditor();
 });
 
+childOpen.addEventListener("click", () => {
+  const id = currentChildId;
+  if (!id || busy) return;
+  closeEditor();
+  void openBoard(id);
+});
+
+boardHome.addEventListener("click", goHome);
+boardCopy.addEventListener("click", () => {
+  if (view) {
+    void copyToClipboard(view.ownerId, "Board owner", boardCopy);
+  }
+});
+parentEdit.addEventListener("click", () => {
+  if (view?.isOwn) parentDialog?.open();
+});
+parentClear.addEventListener("click", () => {
+  void clearParent();
+});
+parentOpen.addEventListener("click", () => {
+  const id = view?.state.parent.userId ?? null;
+  if (id !== null) void openBoard(id);
+});
+
 identityCopy.addEventListener("click", () => {
-  if (identity) void copyToClipboard(identity.pubkey, "Owner public key", identityCopy);
+  if (ownIdentity) {
+    void copyToClipboard(ownIdentity.pubkey, "Owner public key", identityCopy);
+  }
 });
 identityBackup.addEventListener("click", () => {
   identityDialogs.openManagement();
 });
 contractCopy.addEventListener("click", () => {
-  if (contractKeyFull) {
-    void copyToClipboard(contractKeyFull, "Contract key", contractCopy);
+  const key = currentContractKey();
+  if (key) {
+    void copyToClipboard(key, "Contract key", contractCopy);
   }
 });
 

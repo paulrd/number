@@ -37,6 +37,11 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    key: "BN6Egqx27gcue4VNyDs4Qqt8uzYwVZsphfS62RKKcNef",
+    codeHash: "CmXAPVyVH7MmEp3apB89sCkQsgqje5cZXxzuQHCmeVNj",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     key: "3ViRVk2ScELVVmk4bjJVWS33dD6SiSmTbSQ1b8yDHVdZ",
     codeHash: "7SMgeUTjfdkYtay446EVLruxSwukeYKTozHiPSxUeKDY",
     webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
@@ -63,11 +68,16 @@ export const LEGACY_DELEGATES: LegacyDelegate[] = [
  * Only add a hash when the new contract accepts the old state (same schema and
  * signing bytes). Append newest-first.
  *
- * v2 (address book + hundredths) is an incompatible schema/signature change, so
- * no v1 board can be re-PUT into it. Do not add v1 hashes here; list them in
- * `UNMIGRATABLE_CONTRACT_CODE_HASHES` instead.
+ * v3 (tree parent link) keeps the v2 slot and contacts signing bytes, so a v2
+ * state is upgraded by the client (add an empty parent, set `v: 3`) and re-PUT
+ * into v3. The v2 generation is therefore migratable. v1 boards changed the
+ * slot schema/signing bytes and remain unmigratable.
  */
-export const LEGACY_CONTRACT_CODE_HASHES: string[] = [];
+export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
+  // v2 (address book + hundredths). v3 adds an empty parent; slot/contacts
+  // signatures remain valid.
+  "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
+];
 
 /**
  * Superseded contract generations whose state the current contract cannot

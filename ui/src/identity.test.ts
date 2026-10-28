@@ -26,7 +26,12 @@ function backup(overrides: Record<string, unknown> = {}): string {
 describe("identity backup codec", () => {
   it("round-trips seed, counters and public key", () => {
     const text = encodeIdentityBackup(
-      { seed: SEED.toUpperCase(), nextSeq: NEXT_SEQ, contactsNextSeq: 3 },
+      {
+        seed: SEED.toUpperCase(),
+        nextSeq: NEXT_SEQ,
+        contactsNextSeq: 3,
+        parentNextSeq: 4,
+      },
       PUBKEY,
       new Date("2026-10-27T12:00:00.000Z"),
     );
@@ -34,17 +39,24 @@ describe("identity backup codec", () => {
       seed: SEED,
       nextSeq: NEXT_SEQ,
       contactsNextSeq: 3,
+      parentNextSeq: 4,
       pubkey: PUBKEY,
     });
     const parsed = JSON.parse(text);
     expect(parsed.contactsNextSeq).toBe(3);
+    expect(parsed.parentNextSeq).toBe(4);
     expect(parsed.createdAt).toBe("2026-10-27T12:00:00.000Z");
   });
 
   it("accepts a code without the informational fields", () => {
     expect(
       decodeIdentityBackup(backup({ pubkey: undefined, createdAt: undefined })),
-    ).toEqual({ seed: SEED, nextSeq: NEXT_SEQ, contactsNextSeq: 2 });
+    ).toEqual({
+      seed: SEED,
+      nextSeq: NEXT_SEQ,
+      contactsNextSeq: 2,
+      parentNextSeq: 1,
+    });
   });
 
   it("accepts a v1 backup with no contacts counter and defaults it to 1", () => {
@@ -54,6 +66,7 @@ describe("identity backup codec", () => {
       seed: SEED,
       nextSeq: NEXT_SEQ,
       contactsNextSeq: 1,
+      parentNextSeq: 1,
       pubkey: PUBKEY,
     });
   });
@@ -101,6 +114,25 @@ describe("identity backup codec", () => {
     for (const contactsNextSeq of [0, -1, 1.5, "2", true]) {
       expect(() => decodeIdentityBackup(backup({ contactsNextSeq }))).toThrow(
         /contacts sequence must be a positive integer/,
+      );
+    }
+  });
+
+  it("defaults a missing parent counter to 1 (pre-tree backup)", () => {
+    const legacy = backup({ parentNextSeq: undefined });
+    expect(legacy).not.toContain("parentNextSeq");
+    expect(decodeIdentityBackup(legacy).parentNextSeq).toBe(1);
+  });
+
+  it("round-trips an explicit parent counter", () => {
+    const text = backup({ parentNextSeq: 9 });
+    expect(decodeIdentityBackup(text).parentNextSeq).toBe(9);
+  });
+
+  it("rejects a malformed parent counter", () => {
+    for (const parentNextSeq of [0, -1, 1.5, "2", true, null]) {
+      expect(() => decodeIdentityBackup(backup({ parentNextSeq }))).toThrow(
+        /parent sequence must be a positive integer/,
       );
     }
   });

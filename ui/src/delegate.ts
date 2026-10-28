@@ -72,6 +72,8 @@ export interface DelegateIdentity {
   nextSeq: number[];
   /** Next sequence value for the signed contacts record, >= 1. */
   contactsNextSeq: number;
+  /** Next sequence value for the signed parent record, >= 1. */
+  parentNextSeq: number;
 }
 
 export interface DelegateStatus {
@@ -86,6 +88,8 @@ export interface ExportedSecrets {
   nextSeq: number[];
   /** Next sequence value for the signed contacts record, >= 1. */
   contactsNextSeq: number;
+  /** Next sequence value for the signed parent record, >= 1. */
+  parentNextSeq: number;
 }
 
 type ResponseRecord = Record<string, unknown>;
@@ -281,6 +285,7 @@ export class DelegateClient {
     seed: string,
     nextSeq: number[],
     contactsNextSeq = 1,
+    parentNextSeq = 1,
     timeoutMs = 5_000,
   ): Promise<void> {
     if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
@@ -291,6 +296,7 @@ export class DelegateClient {
     }
     this.validateNextSeq(nextSeq);
     const validatedContactsNextSeq = this.validateContactsNextSeq(contactsNextSeq);
+    const validatedParentNextSeq = this.validateParentNextSeq(parentNextSeq);
     await this.request(
       "import",
       {
@@ -298,6 +304,7 @@ export class DelegateClient {
         seed: seed.toLowerCase(),
         nextSeq,
         contactsNextSeq: validatedContactsNextSeq,
+        parentNextSeq: validatedParentNextSeq,
       },
       timeoutMs,
     );
@@ -370,6 +377,48 @@ export class DelegateClient {
         typeof payload.error === "string"
           ? payload.error
           : "signContacts was rejected",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed signature (expected 128 lowercase hex characters).",
+      );
+    }
+    return sig;
+  }
+
+  /**
+   * Sign the signed parent link. `userId` is the parent board owner, or null to
+   * clear the parent (a tombstone at a higher seq). Reuses the `"sign"` pending
+   * kind because the delegate answers `{ok, sig}`.
+   */
+  async signParent(
+    seq: number,
+    userId: string | null,
+    timeoutMs = 15_000,
+  ): Promise<string> {
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
+    }
+    if (userId !== null && !isLowerHex(userId, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "userId must be null or 64 lowercase hex characters.",
+      );
+    }
+
+    const payload = await this.request(
+      "sign",
+      { cmd: "signParent", seq, userId },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signParent was rejected",
       );
     }
     const sig = payload.sig;
@@ -542,6 +591,7 @@ export class DelegateClient {
       pubkey: pubkey.toLowerCase(),
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
+      parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
     };
   }
 
@@ -583,6 +633,7 @@ export class DelegateClient {
       seed: seed.toLowerCase(),
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
+      parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
     };
   }
 
@@ -623,6 +674,29 @@ export class DelegateClient {
       throw new DelegateError(
         "Protocol",
         "contactsNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
+  }
+
+  /**
+   * A v4 predecessor export has no parent counter; default it to 1 so the
+   * migrated identity can still sign its first parent record.
+   */
+  private parseParentNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validateParentNextSeq(value);
+  }
+
+  private validateParentNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "parentNextSeq must be a positive safe integer.",
       );
     }
     return value;

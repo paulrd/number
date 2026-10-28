@@ -2,8 +2,9 @@
 //! signing for the number app.
 //!
 //! The delegate owns a single Ed25519 key pair. The 32-byte seed, a per-slot
-//! monotonic sequence counter and a contacts sequence counter live in the
-//! delegate's secret store; the matching public key is the owner key the
+//! monotonic sequence counter, a contacts sequence counter and a parent
+//! sequence counter live in the delegate's secret store; the matching public
+//! key is the owner key the
 //! `number-contract` instance is parameterised by. The delegate itself is
 //! parameterised by the web container contract id it serves, and refuses every
 //! other caller.
@@ -37,7 +38,7 @@ pub const USER_ID_HEX_LEN: usize = 64;
 pub const WEBAPP_ID_LEN: usize = 32;
 
 /// Bumped when the delegate protocol changes; reported by `status`/`export`.
-pub const DELEGATE_VERSION: u32 = 4;
+pub const DELEGATE_VERSION: u32 = 5;
 
 /// Secret-store key holding the raw 32-byte Ed25519 seed.
 pub const SECRET_SEED: &[u8] = b"number.v1.seed";
@@ -48,11 +49,19 @@ pub const NEXTSEQ_PREFIX: &str = "number.v1.nextseq.";
 /// Secret-store key holding the contacts `u64` little-endian next-sequence.
 pub const CONTACTS_NEXTSEQ_KEY: &[u8] = b"number.v2.nextseq.contacts";
 
+/// Secret-store key holding the parent `u64` little-endian next-sequence.
+pub const PARENT_NEXTSEQ_KEY: &[u8] = b"number.v3.nextseq.parent";
+
 /// Domain separator for the canonical slot signing bytes (`DESIGN.md` §2).
+/// Unchanged from v2 so v2 signatures keep validating.
 const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
 
 /// Domain separator for the canonical contacts signing bytes (`DESIGN.md` §2).
+/// Unchanged from v2.
 const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
+
+/// Domain separator for the canonical parent signing bytes (`DESIGN.md` §2).
+const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
 
 /// Persistent secret storage, abstracted from the host.
 ///
@@ -177,6 +186,13 @@ enum Request {
         seq: u64,
         entries: Vec<Contact>,
     },
+    /// Sign the parent record at `seq`; `userId` null clears the parent.
+    #[serde(rename = "signParent")]
+    SignParent {
+        seq: u64,
+        #[serde(rename = "userId")]
+        user_id: Option<String>,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
@@ -191,6 +207,8 @@ enum Request {
         next_seq: Vec<u64>,
         #[serde(rename = "contactsNextSeq", default = "default_contacts_next_seq")]
         contacts_next_seq: u64,
+        #[serde(rename = "parentNextSeq", default = "default_parent_next_seq")]
+        parent_next_seq: u64,
     },
 }
 
@@ -198,7 +216,11 @@ fn default_contacts_next_seq() -> u64 {
     1
 }
 
-/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
+fn default_parent_next_seq() -> u64 {
+    1
+}
+
+/// `{"ok":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityResponse {
     pub ok: bool,
@@ -207,6 +229,8 @@ pub struct IdentityResponse {
     pub next_seq: [u64; SLOT_COUNT],
     #[serde(rename = "contactsNextSeq")]
     pub contacts_next_seq: u64,
+    #[serde(rename = "parentNextSeq")]
+    pub parent_next_seq: u64,
 }
 
 /// `{"ok":true,"sig":"<128 hex>"}`.
@@ -217,7 +241,7 @@ pub struct SignResponse {
 }
 
 /// `{"ok":true,"hasSeed":false}` before first use, or
-/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
+/// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub ok: bool,
@@ -230,9 +254,11 @@ pub struct StatusResponse {
     pub next_seq: Option<[u64; SLOT_COUNT]>,
     #[serde(rename = "contactsNextSeq", skip_serializing_if = "Option::is_none")]
     pub contacts_next_seq: Option<u64>,
+    #[serde(rename = "parentNextSeq", skip_serializing_if = "Option::is_none")]
+    pub parent_next_seq: Option<u64>,
 }
 
-/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...],"contactsNextSeq":1}`.
+/// `{"ok":true,"seed":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportResponse {
     pub ok: bool,
@@ -242,6 +268,8 @@ pub struct ExportResponse {
     pub next_seq: [u64; SLOT_COUNT],
     #[serde(rename = "contactsNextSeq")]
     pub contacts_next_seq: u64,
+    #[serde(rename = "parentNextSeq")]
+    pub parent_next_seq: u64,
 }
 
 /// `{"ok":true}`.
@@ -385,12 +413,15 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
 
     match request {
         Request::Identity => match identity_with(store) {
-            Ok((pubkey, next_seq, contacts_next_seq)) => Response::Identity(IdentityResponse {
-                ok: true,
-                pubkey,
-                next_seq,
-                contacts_next_seq,
-            }),
+            Ok((pubkey, next_seq, contacts_next_seq, parent_next_seq)) => {
+                Response::Identity(IdentityResponse {
+                    ok: true,
+                    pubkey,
+                    next_seq,
+                    contacts_next_seq,
+                    parent_next_seq,
+                })
+            }
             Err(error) => Response::error(error),
         },
         Request::Sign { slot, seq, entry } => match sign_with(store, slot, seq, entry.as_ref()) {
@@ -401,36 +432,46 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
             Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
             Err(error) => Response::error(error),
         },
+        Request::SignParent { seq, user_id } => {
+            match sign_parent_with(store, seq, user_id.as_deref()) {
+                Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+                Err(error) => Response::error(error),
+            }
+        }
         Request::Status => match status_with(store) {
             Ok(response) => Response::Status(response),
             Err(error) => Response::error(error),
         },
         Request::Export => match export_with(store) {
-            Ok((seed, next_seq, contacts_next_seq)) => Response::Export(ExportResponse {
-                ok: true,
-                version: DELEGATE_VERSION,
-                seed,
-                next_seq,
-                contacts_next_seq,
-            }),
+            Ok((seed, next_seq, contacts_next_seq, parent_next_seq)) => {
+                Response::Export(ExportResponse {
+                    ok: true,
+                    version: DELEGATE_VERSION,
+                    seed,
+                    next_seq,
+                    contacts_next_seq,
+                    parent_next_seq,
+                })
+            }
             Err(error) => Response::error(error),
         },
         Request::Import {
             seed,
             next_seq,
             contacts_next_seq,
-        } => match import_with(store, &seed, &next_seq, contacts_next_seq) {
+            parent_next_seq,
+        } => match import_with(store, &seed, &next_seq, contacts_next_seq, parent_next_seq) {
             Ok(()) => Response::Import(ImportResponse { ok: true }),
             Err(error) => Response::error(error),
         },
     }
 }
 
-/// Return `(hex public key, nextSeq[0..8], contactsNextSeq)`, creating the seed
-/// on first use.
+/// Return `(hex public key, nextSeq[0..8], contactsNextSeq, parentNextSeq)`,
+/// creating the seed on first use.
 pub fn identity_with(
     store: &mut impl SecretStore,
-) -> Result<(String, [u64; SLOT_COUNT], u64), String> {
+) -> Result<(String, [u64; SLOT_COUNT], u64, u64), String> {
     let seed = load_or_create_seed(store)?;
     let signing_key = SigningKey::from_bytes(&seed);
     let pubkey = hex::encode(signing_key.verifying_key().to_bytes());
@@ -440,8 +481,9 @@ pub fn identity_with(
         *value = read_next_seq(store, slot as u8)?;
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
+    let parent_next_seq = read_parent_next_seq(store)?;
 
-    Ok((pubkey, next_seq, contacts_next_seq))
+    Ok((pubkey, next_seq, contacts_next_seq, parent_next_seq))
 }
 
 /// Report whether a seed exists, without creating one.
@@ -458,6 +500,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
             pubkey: None,
             next_seq: None,
             contacts_next_seq: None,
+            parent_next_seq: None,
         });
     };
     let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
@@ -474,6 +517,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
         *value = read_next_seq(store, slot as u8)?;
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
+    let parent_next_seq = read_parent_next_seq(store)?;
 
     Ok(StatusResponse {
         ok: true,
@@ -482,6 +526,7 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
         pubkey: Some(pubkey),
         next_seq: Some(next_seq),
         contacts_next_seq: Some(contacts_next_seq),
+        parent_next_seq: Some(parent_next_seq),
     })
 }
 
@@ -490,7 +535,9 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
 /// Authorization is the same pinned-webapp gate as every other request. This
 /// is the forward-only migration path: a successor can only recover from a
 /// predecessor whose already-published WASM answers this command.
-pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT], u64), String> {
+pub fn export_with(
+    store: &impl SecretStore,
+) -> Result<(String, [u64; SLOT_COUNT], u64, u64), String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Err("refused export: this delegate has no seed yet".into());
     };
@@ -506,8 +553,14 @@ pub fn export_with(store: &impl SecretStore) -> Result<(String, [u64; SLOT_COUNT
         *value = read_next_seq(store, slot as u8)?;
     }
     let contacts_next_seq = read_contacts_next_seq(store)?;
+    let parent_next_seq = read_parent_next_seq(store)?;
 
-    Ok((hex::encode(seed), next_seq, contacts_next_seq))
+    Ok((
+        hex::encode(seed),
+        next_seq,
+        contacts_next_seq,
+        parent_next_seq,
+    ))
 }
 
 /// Restore an exported seed into a fresh delegate.
@@ -520,6 +573,7 @@ pub fn import_with(
     seed_hex: &str,
     next_seq: &[u64],
     contacts_next_seq: u64,
+    parent_next_seq: u64,
 ) -> Result<(), String> {
     if store.get_secret(SECRET_SEED).is_some() {
         return Err("refused import: this delegate already has a seed".into());
@@ -536,6 +590,9 @@ pub fn import_with(
     if contacts_next_seq == 0 {
         return Err("contactsNextSeq must be greater than 0".into());
     }
+    if parent_next_seq == 0 {
+        return Err("parentNextSeq must be greater than 0".into());
+    }
 
     let seed_bytes =
         hex::decode(seed_hex).map_err(|error| format!("seed is not valid hex: {error}"))?;
@@ -551,6 +608,9 @@ pub fn import_with(
     }
     if !store.set_secret(CONTACTS_NEXTSEQ_KEY, &contacts_next_seq.to_le_bytes()) {
         return Err("failed to persist contactsNextSeq".into());
+    }
+    if !store.set_secret(PARENT_NEXTSEQ_KEY, &parent_next_seq.to_le_bytes()) {
+        return Err("failed to persist parentNextSeq".into());
     }
     if !store.set_secret(SECRET_SEED, &seed) {
         return Err("failed to persist imported seed".into());
@@ -639,6 +699,45 @@ pub fn sign_contacts_with(
     Ok(hex::encode(signature.to_bytes()))
 }
 
+/// Validate, sign, then advance the parent sequence counter.
+pub fn sign_parent_with(
+    store: &mut impl SecretStore,
+    seq: u64,
+    user_id: Option<&str>,
+) -> Result<String, String> {
+    if seq == 0 {
+        return Err("seq must be greater than 0".into());
+    }
+    let next_seq = read_parent_next_seq(store)?;
+    if seq < next_seq {
+        return Err(format!(
+            "stale seq {seq} for parent; need at least {next_seq}"
+        ));
+    }
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
+    if user_id.is_some_and(|value| !is_user_id(value)) {
+        return Err(format!(
+            "parent userId must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+        ));
+    }
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let owner = hex::encode(signing_key.verifying_key().to_bytes());
+    if user_id.is_some_and(|value| value == owner.as_str()) {
+        return Err("refused self-parent: userId is the delegate's own pubkey".into());
+    }
+    let signature = signing_key.sign(&parent_signing_bytes(seq, user_id));
+
+    if !store.set_secret(PARENT_NEXTSEQ_KEY, &following.to_le_bytes()) {
+        return Err("failed to persist parentNextSeq".into());
+    }
+
+    Ok(hex::encode(signature.to_bytes()))
+}
+
 /// Build the canonical slot signing bytes from `DESIGN.md` §2.
 ///
 /// This is the single implementation of the format inside this crate; the
@@ -678,6 +777,27 @@ pub fn contacts_signing_bytes(seq: u64, entries: &[Contact]) -> Vec<u8> {
         bytes.extend_from_slice(&label_len.to_le_bytes());
         bytes.extend_from_slice(label);
         bytes.extend_from_slice(&contact_raw(&contact.user_id));
+    }
+    bytes
+}
+
+/// Build the canonical parent signing bytes from `DESIGN.md` §2.
+///
+/// ```text
+/// b"number:v3:parent" || seq u64 LE || tag u8
+/// // only when tag == 1:
+/// || userId 32 raw bytes
+/// ```
+pub fn parent_signing_bytes(seq: u64, user_id: Option<&str>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    bytes.extend_from_slice(SIGNING_DOMAIN_PARENT);
+    bytes.extend_from_slice(&seq.to_le_bytes());
+    match user_id {
+        None => bytes.push(0),
+        Some(user_id) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&contact_raw(user_id));
+        }
     }
     bytes
 }
@@ -733,6 +853,21 @@ fn read_contacts_next_seq(store: &impl SecretStore) -> Result<u64, String> {
     }
 }
 
+fn read_parent_next_seq(store: &impl SecretStore) -> Result<u64, String> {
+    match store.get_secret(PARENT_NEXTSEQ_KEY) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored parentNextSeq has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
+}
+
 fn load_or_create_seed(store: &mut impl SecretStore) -> Result<[u8; 32], String> {
     if let Some(bytes) = store.get_secret(SECRET_SEED) {
         return bytes.as_slice().try_into().map_err(|_| {
@@ -772,6 +907,8 @@ mod tests {
     const GOLDEN_SLOT_SIGNATURE: &str = "f666bc2cac7ec8a21df38dfde44d09d80a8318400850c9e6bd72173eafbc9d68106ddce7a122f85bbb9253d13d95b9accad3e4bad3a0ee24fcf424fe17088201";
     /// Golden contacts vector: seq 1, `[{ label: "Alice", userId: 0x11 × 32 }]`.
     const GOLDEN_CONTACTS_SIGNATURE: &str = "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906";
+    /// Golden parent vector: seq 1, `userId: 0x11 × 32`.
+    const GOLDEN_PARENT_SIGNATURE: &str = "83620d873b5179b726f2aab882083d4d74fa6eee90726ada5b44b74d1d3f48e2e6b31dac5b31142febeb1d6505e426d659c0907adf3110cdddb3984b0bc80400";
 
     const CONTACT_11: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CONTACT_22: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -843,6 +980,7 @@ mod tests {
         assert_eq!(first["pubkey"], second["pubkey"]);
         assert_eq!(first["nextSeq"], json!([1, 1, 1, 1, 1, 1, 1, 1]));
         assert_eq!(first["contactsNextSeq"], 1);
+        assert_eq!(first["parentNextSeq"], 1);
         assert_eq!(
             store.secrets.get(SECRET_SEED).map(Vec::len),
             Some(32),
@@ -878,19 +1016,23 @@ mod tests {
         let mut old = store_with_seed([7u8; 32]);
         assert!(old.set_secret(&next_seq_key(3), &9u64.to_le_bytes()));
         assert!(old.set_secret(CONTACTS_NEXTSEQ_KEY, &7u64.to_le_bytes()));
+        assert!(old.set_secret(PARENT_NEXTSEQ_KEY, &5u64.to_le_bytes()));
 
         let exported = call(&mut old, br#"{"cmd":"export"}"#);
         assert!(is_ok(&exported), "unexpected export: {exported}");
+        assert_eq!(exported["version"], DELEGATE_VERSION);
         assert_eq!(exported["seed"], "07".repeat(32));
         assert_eq!(exported["nextSeq"][3], 9);
         assert_eq!(exported["contactsNextSeq"], 7);
+        assert_eq!(exported["parentNextSeq"], 5);
 
         let mut new = MemoryStore::default();
         let payload = format!(
-            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{}}}"#,
+            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{},"parentNextSeq":{}}}"#,
             exported["seed"].as_str().unwrap(),
             exported["nextSeq"],
-            exported["contactsNextSeq"]
+            exported["contactsNextSeq"],
+            exported["parentNextSeq"]
         );
         let imported = call(&mut new, payload.as_bytes());
         assert!(is_ok(&imported), "unexpected import: {imported}");
@@ -899,10 +1041,11 @@ mod tests {
         assert_eq!(identity["pubkey"], GOLDEN_PUBKEY);
         assert_eq!(identity["nextSeq"][3], 9);
         assert_eq!(identity["contactsNextSeq"], 7);
+        assert_eq!(identity["parentNextSeq"], 5);
     }
 
     #[test]
-    fn import_defaults_contacts_next_seq_for_v1_predecessors() {
+    fn import_defaults_counters_for_v1_v4_predecessors() {
         let mut new = MemoryStore::default();
         let payload = format!(
             r#"{{"cmd":"import","seed":"{}","nextSeq":[1,1,1,1,1,1,1,1]}}"#,
@@ -913,6 +1056,19 @@ mod tests {
 
         let identity = call(&mut new, br#"{"cmd":"identity"}"#);
         assert_eq!(identity["contactsNextSeq"], 1);
+        assert_eq!(identity["parentNextSeq"], 1);
+
+        // A v4-style export has contactsNextSeq but no parentNextSeq.
+        let mut v4 = MemoryStore::default();
+        let payload = format!(
+            r#"{{"cmd":"import","seed":"{}","nextSeq":[1,1,1,1,1,1,1,1],"contactsNextSeq":4}}"#,
+            "07".repeat(32)
+        );
+        let imported = call(&mut v4, payload.as_bytes());
+        assert!(is_ok(&imported), "unexpected import: {imported}");
+        let identity = call(&mut v4, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["contactsNextSeq"], 4);
+        assert_eq!(identity["parentNextSeq"], 1);
     }
 
     #[test]
@@ -952,6 +1108,10 @@ mod tests {
             ),
             (
                 r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"contactsNextSeq":0}"#,
+                "greater than 0",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"parentNextSeq":0}"#,
                 "greater than 0",
             ),
         ];
@@ -1038,6 +1198,114 @@ mod tests {
         verifying_key
             .verify_strict(&contacts_signing_bytes(1, &entries), &signature)
             .expect("golden contacts signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn golden_parent_signing_vector() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let response = call(
+            &mut store,
+            br#"{"cmd":"signParent","seq":1,"userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+
+        // Cross-crate pin: `contract/src/lib.rs` asserts this same hex/digest.
+        assert_eq!(
+            hex::encode(parent_signing_bytes(1, Some(CONTACT_11))),
+            "6e756d6265723a76333a706172656e740100000000000000011111111111111111111111111111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            hex::encode(parent_signing_bytes(1, None)),
+            "6e756d6265723a76333a706172656e74010000000000000000"
+        );
+        assert_eq!(response["sig"], GOLDEN_PARENT_SIGNATURE);
+
+        let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let signature: [u8; 64] = hex::decode(GOLDEN_PARENT_SIGNATURE)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        verifying_key
+            .verify_strict(&parent_signing_bytes(1, Some(CONTACT_11)), &signature)
+            .expect("golden parent signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn sign_parent_advances_the_counter_and_rejects_stale_seqs() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let accepted = call(
+            &mut store,
+            br#"{"cmd":"signParent","seq":1,"userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+        );
+        assert!(is_ok(&accepted), "unexpected response: {accepted}");
+        assert_eq!(
+            store.secrets.get(PARENT_NEXTSEQ_KEY).cloned(),
+            Some(2u64.to_le_bytes().to_vec())
+        );
+
+        let replay = call(&mut store, br#"{"cmd":"signParent","seq":1,"userId":null}"#);
+        assert!(!is_ok(&replay));
+        assert!(error_text(&replay).contains("stale"));
+
+        let zero = call(&mut store, br#"{"cmd":"signParent","seq":0,"userId":null}"#);
+        assert!(!is_ok(&zero));
+        assert!(error_text(&zero).contains("greater than 0"));
+
+        let max = call(
+            &mut store,
+            br#"{"cmd":"signParent","seq":18446744073709551615,"userId":null}"#,
+        );
+        assert!(!is_ok(&max));
+        assert!(error_text(&max).contains("too large"));
+
+        let cleared = call(&mut store, br#"{"cmd":"signParent","seq":2,"userId":null}"#);
+        assert!(is_ok(&cleared), "unexpected response: {cleared}");
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["parentNextSeq"], 3);
+    }
+
+    #[test]
+    fn sign_parent_rejects_self_parent_and_malformed_user_ids() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let self_parent = format!(r#"{{"cmd":"signParent","seq":1,"userId":"{GOLDEN_PUBKEY}"}}"#);
+        let response = call(&mut store, self_parent.as_bytes());
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("self-parent"));
+        assert_eq!(
+            store.secrets.get(PARENT_NEXTSEQ_KEY),
+            None,
+            "a rejected self-parent must not advance the counter"
+        );
+
+        for bad in [
+            String::new(),
+            "11".to_string(),
+            "11".repeat(31),
+            "11".repeat(33),
+        ] {
+            let payload = serde_json::json!({
+                "cmd": "signParent",
+                "seq": 1,
+                "userId": bad,
+            })
+            .to_string();
+            let response = call(&mut store, payload.as_bytes());
+            assert!(!is_ok(&response), "userId {bad:?} must be rejected");
+            assert!(error_text(&response).contains("userId"));
+        }
+
+        let uppercase = format!(
+            r#"{{"cmd":"signParent","seq":1,"userId":"{}"}}"#,
+            "aa".repeat(32).to_uppercase()
+        );
+        let response = call(&mut store, uppercase.as_bytes());
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("userId"));
     }
 
     #[test]
@@ -1338,6 +1606,12 @@ mod tests {
         let mut contacts_store = store_with_seed([7u8; 32]);
         assert!(contacts_store.set_secret(CONTACTS_NEXTSEQ_KEY, &[1, 2, 3]));
         let identity = call(&mut contacts_store, br#"{"cmd":"identity"}"#);
+        assert!(!is_ok(&identity));
+        assert!(error_text(&identity).contains("invalid length"));
+
+        let mut parent_store = store_with_seed([7u8; 32]);
+        assert!(parent_store.set_secret(PARENT_NEXTSEQ_KEY, &[1, 2, 3]));
+        let identity = call(&mut parent_store, br#"{"cmd":"identity"}"#);
         assert!(!is_ok(&identity));
         assert!(error_text(&identity).contains("invalid length"));
     }

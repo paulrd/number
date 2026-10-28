@@ -46,7 +46,7 @@ import {
   encodeDelta,
   encodeState,
   type Delta,
-  type StateV2,
+  type StateV3,
 } from "./state";
 import { errorMessage, withTimeout } from "./util";
 
@@ -186,7 +186,7 @@ export type ContractUpdate =
   | { kind: "state-and-delta"; state: Uint8Array; delta: Uint8Array };
 
 export interface NumberContractCallbacks {
-  onState?: (state: StateV2) => void;
+  onState?: (state: StateV3) => void;
   onStatus?: (status: ConnectionStatus, detail?: string) => void;
   onError?: (message: string, cause?: unknown) => void;
   onNotFound?: () => void;
@@ -448,14 +448,32 @@ export class NumberContract {
     }
   }
 
-  async getState(timeoutMs: number = GET_TIMEOUT_MS): Promise<StateV2> {
+  async getState(timeoutMs: number = GET_TIMEOUT_MS): Promise<StateV3> {
     return this.getStateForKey(this.requireKey(), timeoutMs);
+  }
+
+  /**
+   * Read-only fetch for a viewer: derive the instance key for these parameters
+   * and GET. Unlike `ensureState` this never PUTs or subscribes, so a missing
+   * board is simply an error the caller can treat as "no instance".
+   */
+  async readState(
+    parameters: Uint8Array,
+    timeoutMs: number = GET_TIMEOUT_MS,
+  ): Promise<StateV3> {
+    if (parameters.length !== 32) {
+      throw new Error(
+        `contract parameters must be 32 bytes, got ${parameters.length}`,
+      );
+    }
+    this.key = deriveContractKey(this.codeHashBase58, parameters);
+    return this.getState(timeoutMs);
   }
 
   private async getStateForKey(
     key: ContractKey,
     timeoutMs: number,
-  ): Promise<StateV2> {
+  ): Promise<StateV3> {
     const api = this.requireApi();
     let signalMissing!: () => void;
     const missing = new Promise<never>((_, reject) => {
@@ -487,13 +505,13 @@ export class NumberContract {
   async ensureState(
     parameters: Uint8Array,
     legacyContractCodeHashes: readonly string[] = [],
-  ): Promise<StateV2> {
+  ): Promise<StateV3> {
     if (parameters.length !== 32) {
       throw new Error(`contract parameters must be 32 bytes, got ${parameters.length}`);
     }
     this.key = deriveContractKey(this.codeHashBase58, parameters);
 
-    let state: StateV2 | null = null;
+    let state: StateV3 | null = null;
     try {
       state = await this.getState(PROBE_TIMEOUT_MS);
     } catch {
@@ -531,7 +549,7 @@ export class NumberContract {
   }
 
   /** Read back after a PUT, tolerating the node's short propagation delay. */
-  private async readAfterPut(): Promise<StateV2> {
+  private async readAfterPut(): Promise<StateV3> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -550,7 +568,7 @@ export class NumberContract {
   private async findLegacyState(
     parameters: Uint8Array,
     legacyContractCodeHashes: readonly string[],
-  ): Promise<StateV2 | null> {
+  ): Promise<StateV3 | null> {
     for (const codeHash of legacyContractCodeHashes) {
       try {
         const legacyKey = deriveContractKey(codeHash, parameters);
@@ -565,7 +583,7 @@ export class NumberContract {
 
   private async putState(
     parameters: Uint8Array,
-    state: StateV2,
+    state: StateV3,
   ): Promise<void> {
     const api = this.requireApi();
     let wasm: Uint8Array;
