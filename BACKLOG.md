@@ -475,6 +475,11 @@ frame.
   specific `pending`/`not-created`/`legacy` board and detail, and adds
   **Withdraw offer** for a source offer with no signed leg. Redeployed to all
   four nodes (`7509`, `7511`, `7512`, `7513`); gateway smoke passed.
+- "Check for payments" is now always enabled while the panel is visible: it is a
+  read-only cache refresh, so it must not be locked behind an in-flight write or
+  navigation. The first live payment completed after the owner signed: `1.00`
+  from Bob `03` to Tim `5` (Alice slot for Bob `87.80`; Dad slot for Alice
+  `11.00`; Dad slot for Tim `45.40`).
 
 
 ## Remaining

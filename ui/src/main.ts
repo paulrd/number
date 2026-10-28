@@ -1299,7 +1299,10 @@ async function renderPayments(): Promise<void> {
     : isRoot
       ? "A root has no parent edge to debit, so it cannot send a payment."
       : "Send a payment along the board tree.";
-  paymentCheck.disabled = busy || navigating;
+  // Refreshing the inbox is read-only; never lock it behind an in-flight
+  // write or navigation. Clicking it clears the cache and repaints.
+  paymentCheck.disabled = false;
+  paymentCheck.title = "Refresh the payment status and inbox.";
 
   if (display === null) paymentStatus.hidden = true;
   else paintPaymentStatus(display);
