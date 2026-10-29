@@ -38,9 +38,9 @@ peer; the live test identity opens the v3 contract as a root board.
 local SSH forwards. A `:7511` root, owner `ea14…`; B `:7512` child at `0`,
 owner `4e7a…`; C `:7513` child at `03`, owner `06e6…`; D `:7509` was child at
 `01` for the smoke, now a root again, owner `3f84…`. B's slots hold C `90.00`
-(slot 3) and D `110.00` (slot 1) after the payment. A and B both hold the
-Background grant and scan (A was re-granted on 2026-10-29); D's number app has
-no grant and never scans, which is fine because D only receives.
+(slot 3) and D `110.00` (slot 1) after the payment. All four nodes hold the
+number app's Background grant and scan: A was re-granted first, then D
+(`pass 4`); `node ui/e2e/readiness.mjs` reports all four READY.
 
 
 Website signing key: backed up in KeePass, synced across four devices. The
@@ -531,10 +531,13 @@ the Atlas operator to crawl it.
 - **App-side resolved 2026-10-29.** `UnregisterDelegate` + reinstall from the
   app triggers the prompt; the delegate's secrets survive (on-disk key is
   `BLAKE3(code_hash || params)`). Answering `/permission/pending` nonce with
-  `index: 0` at `/permission/{nonce}/respond` granted A without changing its
-  owner or board. A now reports `pass 4` and subscribes to 2 boards.
-  `live-smoke-b.mjs` answers the prompt during install, and the UI shows
-  "No scans" / "Configured, no scans" when `lastScan` is 0 (190 UI tests).
+  `index: 0` at `/permission/{nonce}/respond` granted A and D without changing
+  their owners or boards. All four nodes now report a grant and scan.
+  `live-smoke-b.mjs` answers the prompt during install, the UI shows
+  "No scans" / "Configured, no scans" when `lastScan` is 0 (190 UI tests), and
+  `node ui/e2e/readiness.mjs` checks every node's grant, address, scan,
+  subscriptions and last error (all READY on 2026-10-29: A pass 20, B pass 66,
+  C pass 55, D pass 4).
 - **Upstream remains:** a node whose shell lacks the permission overlay gives
   the user an install that waits on an unrendered prompt. The node should
   render it (the app correctly cannot self-grant; the prompt is node-authored).
@@ -565,6 +568,21 @@ the Atlas operator to crawl it.
   pass it holds 90.00/110.00. Rerunning needs a reset (issue/burn back) or a
   documented precondition/skip flag. The harness now clears a stuck B record
   before offering.
+
+### #26 — Warn when a non-leaf board cannot auto-advance
+
+- #22's "No scans" badge is per board. A board with live children (or a root
+  with two child subtrees) can be an intermediate on a payment path; if its
+  node lacks the Background grant or has never scanned, payments through it
+  stall silently. "Live" means the child's own parent link points back, not
+  just that a slot labels it.
+- Next: detect that condition with the address walk and show "This board can
+  carry payments but won't auto-advance on this node", with the reinstall /
+  allow guidance from #22.
+- Optional tree-wide view: for a planned route, check every intermediate node's
+  `/permission/grants` + `lastScan > 0`. That check is operator-side (loopback
+  only); the app's sandboxed iframe cannot read another node's grants endpoint.
+  `ui/e2e/readiness.mjs` is the current per-node version.
 
 ## Generation history
 
@@ -640,6 +658,8 @@ make check-artifacts
 make e2e-offline
 FREENET_BASE_URL=http://127.0.0.1:7510/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/ make e2e-gateway
 make verify-merge
+# live nodes (through the SSH forwards): grants, addresses, scans, subscriptions
+node ui/e2e/readiness.mjs
 ```
 
 ## Working tree
@@ -657,10 +677,10 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 
 `published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
 `4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
-described above. A and B are armed and scan; D's number app has no grant (it
-only receives). Open items: #22 (upstream shell prompt), #23–#25; #15 is blocked
-externally. The working tree is clean; the ad-hoc probes were deleted after the
-smoke.
+described above. All four nodes hold the Background grant and scan; `node
+ui/e2e/readiness.mjs` reports all READY. Open items: #22 (upstream shell
+prompt), #23–#26; #15 is blocked externally. The working tree is clean; the
+ad-hoc probes were deleted after the smoke.
 
 Earlier history: the v3 tree change is `a95ca9e`, the header merge `88e7602`,
 the current-generation tree-read timeout `e0a64b5`, and the board-name/header UI
