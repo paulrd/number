@@ -20,19 +20,27 @@ peer; the live test identity opens the v3 contract as a root board.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1` (v4, recorded; v3 and first-v4 predecessors registered) |
-| Current delegate code hash | `48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw` |
-| Current contract code hash | `C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT` (v4) |
+| Current delegate key | `FwgfvB6XMAhJovYa2buSTKNs11PSPunH27NAteN96Vyu` (v8, current; `5C2sivo…` is the registered legacy generation) |
+| Current delegate code hash | `4emsCtMXXjXZ6GKTcawb41Z49ricZVPVmvP6iMaxAYRZ` |
+| Current contract code hash | `5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg` (v5) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
 | Live v4 test board | `EFegBMVna68Rn7VhXxYeRavJBCXLWJqqsXpKeA5Q7wKo` (live test identity `3f84…`; root “Dad”; slot 1 “Alice” = `12.00`) |
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v4 cooperative payments deployed (2026-10-28); gateway smoke passed on `:7512` and `:7509` |
+| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-CSNbBDyW.js` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
-| VPS peer | v3 delegate + website and the UI-only board-name update published through the `:7509` SSH forward |
+| VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
+
+**Four-node live test bed (2026-10-29).** VPS `unstate.ca`; APIs reached through
+local SSH forwards. A `:7511` root, owner `ea14…`; B `:7512` child at `0`,
+owner `4e7a…`; C `:7513` child at `03`, owner `06e6…`; D `:7509` was child at
+`01` for the smoke, now a root again, owner `3f84…`. B's slots hold C `90.00`
+(slot 3) and D `110.00` (slot 1) after the payment. Only B's delegate is armed;
+A has no Background grant (#22).
+
 
 Website signing key: backed up in KeePass, synced across four devices. The
 remaining accepted risks are a single logical KeePass database and a
@@ -481,6 +489,24 @@ frame.
   from Bob `03` to Tim `5` (Alice slot for Bob `87.80`; Dad slot for Alice
   `11.00`; Dad slot for Tim `45.40`).
 
+### #21 — v4.1/v5: background auto-advance and issue/burn
+
+- Delegate v8 declares `lifecycle=[node_started]`,
+  `capabilities=[background]`, `wakeups=[inbox=300]`; it stores the configure
+  payload, resolves/subscribes to the boards on its routes, scans them, enforces
+  checks (a)–(g), dedups, and keeps a bounded audit. The LCA debit+credit is one
+  signed delta. `signAdjustment` is carried but dormant.
+- Contract v5 adds the signed `adjustments` record; the UI exposes Issue/Burn
+  per slot and keeps the parent-value band in sync.
+- `resolve_owner` prefers the node's committed local state over the lossy
+  `ContractNotification` cache, with a regression test.
+- Artifacts: contract `5YKH…` (unchanged), delegate `Fwgf…` / code `4ems…`;
+  `5C2s…` is the registered legacy generation, so seeds and counters migrate.
+- Verification: contract 116, delegate 51, UI 189, 321 merge cases,
+  `make check-artifacts` OK, 9 offline e2e. Live smoke 2026-10-29 with B as the
+  LCA: C `90.00`, D `110.00`, B audit `leg 2, slots 3, 1, lca`, C payment
+  `Complete 10.00 along 03 → 01`; D restored to root afterwards.
+
 
 ## Remaining
 
@@ -491,6 +517,43 @@ control; its README says publisher self-submission is still taking shape. The
 site is live and now usable by a fresh node, but not listed (searching "number"
 or the contract id returns 0). Revisit when Atlas ships self-submission, or ask
 the Atlas operator to crawl it.
+
+### #22 — Background grant is not requested on a fresh node
+
+- A (`:7511`, node2) never scans: `lastScan=0`, no subscriptions, even after a
+  node restart. B (`:7512`, node3) scans every ~5 minutes. The node gates
+  lifecycle events and wake-ups on the Background capability grant; the install
+  flow has no handler for the node-authored prompt, so a fresh install can end
+  up "Configured" and permanently inert. The status UI says "Configured" even
+  when no scan has ever run.
+- Next: surface/answer the grant request (or use a supported node API), and
+  show "Background not granted" / "No scans yet" instead of "Configured" when
+  `lastScan` is 0.
+
+### #23 — A stale committed copy still beats the network
+
+- `resolve_owner` now prefers `host.local_state`, but B's smoke showed the
+  node's committed copy itself can be the stale forward payment; the delegate
+  then never issues a GET. Clearing B's record at the source unstuck it.
+  Preferring local state is necessary but not sufficient.
+- Next: compare the local `payments.seq` with the latest subscription/notification
+  state, or schedule a GET when a non-terminal record is older than the last
+  update for that instance.
+
+### #24 — "Complete" progress can hide a blocked raw record
+
+- `paymentProgress` follows `next` to a terminal copy on another board, so the
+  card showed "Complete 1.00…" while B's own record was still forward and
+  `plan_leg` returned `Busy`. The Clear action existed but was easy to miss.
+- Next: show the raw record's state (stuck) and keep Clear visible whenever the
+  raw entry is non-terminal, independent of the progressed display.
+
+### #25 — Live smoke preconditions are stateful
+
+- `ui/e2e/live-smoke-b.mjs` expects B to hold 100.00 against C and D; after a
+  pass it holds 90.00/110.00. Rerunning needs a reset (issue/burn back) or a
+  documented precondition/skip flag. The harness now clears a stuck B record
+  before offering.
 
 ## Generation history
 
@@ -570,40 +633,40 @@ make verify-merge
 
 ## Working tree
 
-Clean apart from the untracked empty `book.md`. The v3 tree change is committed
-as `a95ca9e`, the header merge as `88e7602`, the current-generation tree-read
-timeout as `e0a64b5`, and the board-name/header UI as `5ddf3b7`; all are pushed
-to `origin/main`. The v2 address-book change is `e1301f5`. #13's report is
-committed and filed as freenet-stdlib#140; #14 is in
-`1da4fa3`, #12 in `0658c1c`, #11 in `cce462a`, #10 in `9eb7a35`, #9 in
-`2f6ee8c`, #8 in `5c9a84e`, #7 in `72672f6`, #3 in `8bba3e2`, #1/#2/#4/#5/#6 in
-`ba81747`.
+The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 
-`published/` records the v3 generation; `make check-artifacts` proves the bytes.
-The v3 delegate and website were published to the live VPS `:7509`; the website
-id did not move. The live site also carries the UI-only board-name/header update;
-gateway smoke passed (14.0 s). The live test identity (`3f841147…`) is on v3
-contract `BtZs…`, root, with slot 6 “Tim” = `44.40`; the local child is
-`a0cbac79…` / contract `SBnq…` with parent `3f841147…`. The local child node is
-currently stopped; when started, update its stored site with
-`fdev --port 7510 website update --key number-local ui/dist`. The local child
-node is ring-isolated on the phone hotspot (`zero ring connections` /
-`RING_TRANSPORT_DESYNC`), so the parent’s child side remains “Not created” and
-the child’s parent side reads a stale cached parent; this is environment/
-connectivity-limited, not a data mismatch. The owner's v2 board `Ge6f…` migrates
-into `9x5e…` when opened with the owner seed. A v1 board remains unmigratable.
-The VPS test seed from #12 remains; the isolated test nodes were wiped. The only
-open backlog item is #15 (Atlas), blocked externally.
+- `9460c91` delegate v8 background auto-advance
+- `e1b5b6e` contract v5 issue/burn adjustments, UI and docs
+- `cfd6388` `resolve_owner` prefers the committed local state; new `Fwgf…`
+  delegate generation
+- `3a214f2` owner **Clear stuck payment**
+- `f4ebadc` live-node smoke harnesses
+
+`published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
+`4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
+described above. Only B's delegate is armed; A needs the Background grant
+(#22). Open items: #22–#25; #15 is blocked externally. The only uncommitted,
+local-only files are the ad-hoc probes `ui/e2e/debug-b.mjs`,
+`ui/e2e/debug-b2.mjs`, `ui/e2e/probe-unstick.mjs` and `ui/e2e/put-state.mjs`
+(the last two mutate).
+
+Earlier history: the v3 tree change is `a95ca9e`, the header merge `88e7602`,
+the current-generation tree-read timeout `e0a64b5`, and the board-name/header UI
+`5ddf3b7`; the v2 address-book change is `e1301f5`. #13's report is
+freenet-stdlib#140; #14 is `1da4fa3`, #12 `0658c1c`, #11 `cce462a`, #10
+`9eb7a35`, #9 `2f6ee8c`, #8 `5c9a84e`, #7 `72672f6`, #3 `8bba3e2`, and
+#1/#2/#4/#5/#6 `ba81747`. The local `:7510` child remains stopped and
+ring-isolated on the phone hotspot (`zero ring connections` /
+`RING_TRANSPORT_DESYNC`), so its parent’s child side stays “Not created”; this
+is connectivity-limited, not a data mismatch.
 
 Handoff notes:
-- The local node was restarted on 0.2.151 with the same data/config dirs.
-  Pre-update backups (ephemeral, in `/tmp/opencode`):
+- The VPS nodes run 0.2.151. Pre-update backups (ephemeral, in `/tmp/opencode`):
   `number-node-backup-0.2.150/` and `freenet-0.2.150/{freenet,fdev}`.
 - The upstream issue is <https://github.com/freenet/freenet-stdlib/issues/140>;
   the UI workaround (subscribe timeout = unconfirmed, probe-then-PUT) remains
   until it is fixed.
-- The VPS runs the live site. Updating it is a manual step because this
-  environment has no SSH: use the release installer only if it is a supervised
-  default install, otherwise `FREENET_NO_SERVICE=1` and restart the existing
-  unit/command (see the conversation/handoff notes).
+- Site and delegate updates on the VPS are manual (`fdev --port <port> website
+  update --key number-local ui/dist`, `make publish-delegate`); the four-node
+  API is reached through SSH forwards from the development machine.
 
