@@ -37,6 +37,14 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v8 stale-cache fix: local committed state beats the notification cache.
+    // Superseded by the fresher-of-local-and-cache build, which also re-gets
+    // the own board when a plan is Busy. Its seed and counters carry forward.
+    key: "FwgfvB6XMAhJovYa2buSTKNs11PSPunH27NAteN96Vyu",
+    codeHash: "4emsCtMXXjXZ6GKTcawb41Z49ricZVPVmvP6iMaxAYRZ",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v8 first build: background auto-advance, superseded by the stale-cache
     // fix (the scan must read the node's committed local state, not only the
     // lossy notification cache). Its seed and all counters carry forward.

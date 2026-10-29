@@ -20,8 +20,8 @@ peer; the live test identity opens the v3 contract as a root board.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `FwgfvB6XMAhJovYa2buSTKNs11PSPunH27NAteN96Vyu` (v8, current; `5C2sivo…` is the registered legacy generation) |
-| Current delegate code hash | `4emsCtMXXjXZ6GKTcawb41Z49ricZVPVmvP6iMaxAYRZ` |
+| Current delegate key | `8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg` (v8, current; `Fwgf…`, `5C2sivo…` and earlier are registered legacy generations) |
+| Current delegate code hash | `3PoWyq37qCRhFNzjhYzedtyqxHA6saaj3NBJyj993Jrb` |
 | Current contract code hash | `5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg` (v5) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
@@ -29,7 +29,7 @@ peer; the live test identity opens the v3 contract as a root board.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-bmuisITe.js` |
+| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-rK-NuId8.js` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -503,7 +503,7 @@ frame.
   `ContractNotification` cache, with a regression test.
 - Artifacts: contract `5YKH…` (unchanged), delegate `Fwgf…` / code `4ems…`;
   `5C2s…` is the registered legacy generation, so seeds and counters migrate.
-- Verification: contract 116, delegate 51, UI 189, 321 merge cases,
+- Verification: contract 116, delegate 53, UI 190, 321 merge cases,
   `make check-artifacts` OK, 9 offline e2e. Live smoke 2026-10-29 with B as the
   LCA: C `90.00`, D `110.00`, B audit `leg 2, slots 3, 1, lca`, C payment
   `Complete 10.00 along 03 → 01`; D restored to root afterwards.
@@ -543,17 +543,31 @@ the Atlas operator to crawl it.
   render it (the app correctly cannot self-grant; the prompt is node-authored).
   Evidence and repro: `reports/upstream-background-grant-prompt.md`.
 - Deployed 2026-10-29: all four nodes serve
-  `index-bmuisITe.js` (the detection UI).
+  `index-rK-NuId8.js` (the detection UI and the #23 delegate key).
 
 ### #23 — A stale committed copy still beats the network
 
-- `resolve_owner` now prefers `host.local_state`, but B's smoke showed the
-  node's committed copy itself can be the stale forward payment; the delegate
-  then never issues a GET. Clearing B's record at the source unstuck it.
-  Preferring local state is necessary but not sufficient.
-- Next: compare the local `payments.seq` with the latest subscription/notification
-  state, or schedule a GET when a non-terminal record is older than the last
-  update for that instance.
+- Reproduced in the 2026-10-29 smoke: B's committed copy still carried the old
+  forward payment while a GET saw the terminal record, so `plan_leg` returned
+  `Busy` and the delegate never re-GETted.
+- Fixed in delegate `8G5M9…` / code `3PoWy…`:
+  - `resolve_owner` chooses the fresher of the committed local state and the
+    notification cache by `(payments.seq, max slot seq)` instead of always
+    trusting local; the cache is refreshed from the winning copy.
+  - A `Busy` plan issues one GET for the own board and stops planning that run;
+    the response lands in the cache and the next scan re-plans from the newer
+    record.
+  - Tests: fresher cache wins, and Busy requests the own GET (53 delegate
+    tests).
+- Re-keyed all four nodes from `Fwgf…` to `8G5M9…`: added `Fwgf…` to
+  `LEGACY_DELEGATES`, ran `make record-artifacts`, published the packaged
+  delegate, deployed the new site, and opened each board so the seed migrated
+  from `Fwgf…`. Owners and boards are unchanged; the old delegate was then
+  unregistered on each node so only one actor remains. `fdev publish` alone does
+  not arm wake-ups (no app origin); the app-origin reinstall in each board did.
+- Verified: a 1.00 payment C→D through B completed with the new delegate (C
+  89.00, D 111.00), then restored to 90.00/110.00 with v5 issue/burn and D was
+  cleared to root. `readiness.mjs` is READY on all four nodes after the re-key.
 
 ### #24 — "Complete" progress can hide a blocked raw record
 

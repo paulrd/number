@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod advance;
 
-use advance::{BoardState, LegPlan, OwnBoard, audit_slots};
+use advance::{AdvanceError, BoardState, LegPlan, OwnBoard, audit_slots};
 
 /// Number of slots on a board.
 pub const SLOT_COUNT: usize = 8;
@@ -2110,6 +2110,38 @@ fn request_get(inbox: &mut InboxState, id: [u8; 32], out: &mut Vec<OutboundDeleg
     ));
 }
 
+/// A `Busy` plan is the one failure that says "this board's own record may be
+/// behind." The intent names us as the next actor but our copy still carries a
+/// different non-terminal payment (the live smoke's B case). Ask for the own
+/// board's committed state; the response lands in the cache and the next scan
+/// compares it against the local copy.
+///
+/// Returns true when a refresh was requested (or was already in flight), so the
+/// caller can stop planning this run instead of signing from a suspect copy.
+fn request_own_refresh_on_busy(
+    inbox: &mut InboxState,
+    own_instance: [u8; 32],
+    error: AdvanceError,
+    out: &mut Vec<OutboundDelegateMsg>,
+) -> bool {
+    if error != AdvanceError::Busy {
+        return false;
+    }
+    request_get(inbox, own_instance, out);
+    true
+}
+
+/// Order two copies of a board by the records that decide a payment leg.
+///
+/// `payments.seq` is the discriminator for the stale-record bug: the node's
+/// committed state and the notification cache can disagree, and the newer
+/// payment record must win. Slot seqs break ties because a payment delta also
+/// writes slots. Higher is fresher.
+fn state_order(state: &BoardState) -> (u64, u64) {
+    let slot_max = state.slots.iter().map(|slot| slot.seq).max().unwrap_or(0);
+    (state.payments.seq, slot_max)
+}
+
 fn resolve_owner(
     host: &mut impl ContractHost,
     hashes: &[[u8; 32]],
@@ -2120,39 +2152,55 @@ fn resolve_owner(
     let candidates = instance_candidates(hashes, owner)?;
     for (index, _hash, id) in &candidates {
         let key = hex::encode(id);
-        // The node's local store is authoritative. `inbox.instances` is a
-        // notification fast path and can be older than the committed state
-        // when a ContractNotification was dropped (the host delivers those on
-        // a bounded, lossy channel). Prefer the local state and refresh the
-        // cache from it; only fall back to the cached copy when this node does
-        // not hold the instance.
-        if let Some(bytes) = host.local_state(id) {
-            if let Ok(state) = BoardState::decode(&bytes, owner) {
-                let record = InstanceRecord {
-                    state: "known".to_owned(),
-                    seq: state.payments.seq,
-                    owner: Some(owner.to_owned()),
-                    data: Some(hex::encode(&bytes)),
-                    retry_next_wake: false,
-                };
-                inbox.instances.insert(key, record);
-                return Ok(ResolvedOwner {
-                    owner: owner.to_owned(),
-                    index: *index,
-                    instance: *id,
-                    state: Some(state),
-                });
+        // Both copies can be stale: the committed local state can lag the
+        // network (a dropped update), and the notification cache can lag the
+        // committed state. Take whichever has the newer payment/slot records,
+        // and refresh the cache from the committed state when that wins.
+        let local = host.local_state(id).and_then(|bytes| {
+            BoardState::decode(&bytes, owner)
+                .ok()
+                .map(|state| (bytes, state))
+        });
+        let cached = inbox
+            .instances
+            .get(&key)
+            .and_then(|record| board_from_record(record, owner));
+        let chosen = match (local, cached) {
+            (Some((bytes, local_state)), Some(cached_state)) => {
+                if state_order(&cached_state) > state_order(&local_state) {
+                    Some((None, cached_state))
+                } else {
+                    Some((Some(bytes), local_state))
+                }
             }
-        }
-        if let Some(record) = inbox.instances.get(&key) {
-            if let Some(state) = board_from_record(record, owner) {
-                return Ok(ResolvedOwner {
-                    owner: owner.to_owned(),
-                    index: *index,
-                    instance: *id,
-                    state: Some(state),
-                });
+            (Some((bytes, local_state)), None) => Some((Some(bytes), local_state)),
+            (None, Some(cached_state)) => Some((None, cached_state)),
+            (None, None) => None,
+        };
+        if let Some((bytes, state)) = chosen {
+            match bytes {
+                Some(bytes) => {
+                    let record = InstanceRecord {
+                        state: "known".to_owned(),
+                        seq: state.payments.seq,
+                        owner: Some(owner.to_owned()),
+                        data: Some(hex::encode(&bytes)),
+                        retry_next_wake: false,
+                    };
+                    inbox.instances.insert(key, record);
+                }
+                None => {
+                    if let Some(record) = inbox.instances.get_mut(&key) {
+                        record.seq = state.payments.seq;
+                    }
+                }
             }
+            return Ok(ResolvedOwner {
+                owner: owner.to_owned(),
+                index: *index,
+                instance: *id,
+                state: Some(state),
+            });
         }
     }
 
@@ -2593,6 +2641,10 @@ fn scan(host: &mut impl ContractHost, force_subscribe: bool, out: &mut Vec<Outbo
             }
             Err(error) => {
                 inbox.last_error = Some(error.code().to_owned());
+                if request_own_refresh_on_busy(&mut inbox, own.instance, error, out) {
+                    // Do not sign another leg from a copy suspected stale.
+                    break;
+                }
             }
         }
     }
@@ -3987,6 +4039,88 @@ mod tests {
         );
         assert!(out.is_empty(), "a local hit must not issue a network GET");
         assert_eq!(inbox.instances[&hex::encode(instance)].seq, 2);
+    }
+
+    #[test]
+    fn resolve_owner_prefers_a_fresher_notification_cache() {
+        let seed = [7u8; 32];
+        let mut host = store_with_seed(seed);
+        let owner_bytes = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let owner = hex::encode(owner_bytes);
+        let hash = [0xAAu8; 32];
+        let instance = derive_instance_id(&hash, &owner_bytes);
+
+        // The committed copy is behind: a GET/notification already saw the
+        // newer payment record. The cache must win.
+        let stale = state_with_payments_seq(5, 1);
+        let current = state_with_payments_seq(5, 2);
+        host.contracts.insert(instance.to_vec(), stale);
+
+        let mut inbox = InboxState::default();
+        inbox.instances.insert(
+            hex::encode(instance),
+            InstanceRecord {
+                state: "known".to_owned(),
+                seq: 1,
+                owner: Some(owner.clone()),
+                data: Some(hex::encode(&current)),
+                retry_next_wake: false,
+            },
+        );
+
+        let mut out = Vec::new();
+        let resolved = resolve_owner(&mut host, &[hash], &owner, &mut inbox, &mut out)
+            .expect("cached state resolves");
+        assert_eq!(
+            resolved.state.expect("state is present").payments.seq,
+            2,
+            "the newer payment record must win even when it is in the cache"
+        );
+        assert!(out.is_empty(), "a resolved hit must not issue a network GET");
+        assert_eq!(inbox.instances[&hex::encode(instance)].seq, 2);
+    }
+
+    #[test]
+    fn a_busy_plan_requests_a_get_for_the_own_board() {
+        let own = [0xAB; 32];
+        let mut inbox = InboxState {
+            budget: MAX_NETWORK_OPS,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+
+        assert!(!request_own_refresh_on_busy(
+            &mut inbox,
+            own,
+            AdvanceError::Negative,
+            &mut out
+        ));
+        assert!(out.is_empty(), "only Busy is a refresh signal");
+
+        assert!(request_own_refresh_on_busy(
+            &mut inbox,
+            own,
+            AdvanceError::Busy,
+            &mut out
+        ));
+        assert_eq!(out.len(), 1, "Busy must request the own board");
+        match &out[0] {
+            OutboundDelegateMsg::GetContractRequest(request) => {
+                assert_eq!(request.contract_id.as_bytes(), &own);
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+        assert_eq!(inbox.instances[&hex::encode(own)].state, "requested");
+
+        // The request is already in flight; do not issue a second one.
+        let mut out = Vec::new();
+        assert!(request_own_refresh_on_busy(
+            &mut inbox,
+            own,
+            AdvanceError::Busy,
+            &mut out
+        ));
+        assert!(out.is_empty());
     }
 
     #[test]
