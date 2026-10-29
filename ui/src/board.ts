@@ -164,6 +164,11 @@ export interface BoardBackend {
     slots: PaymentSlotWrite[],
   ): Promise<PaymentEntry | null>;
   /**
+   * Clear a stuck non-terminal payment on the owner's own board by signing a
+   * payments tombstone at the next seq. Does not move value.
+   */
+  clearStuckPayment?(): Promise<void>;
+  /**
    * Sign an issue (positive delta) or burn (negative delta) to one slot's
    * liability: an ordinary slot write plus one signed v5 adjustment record in a
    * single delta. Deltas are hundredths; burn clamps at 0. Optional for
@@ -802,6 +807,59 @@ export class OnlineBoard implements BoardBackend {
       this.currentState = previous;
       this.callbacks.onState(previous);
       if (updateStarted) void this.refresh();
+      throw error;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /**
+   * Clear a stuck non-terminal payment on the owner's own board by signing a
+   * payments tombstone at the next seq. The stale id joins `settled`; the
+   * entry becomes null. This only clears the board's own record; it does not
+   * move value and does not touch any other board.
+   */
+  async clearStuckPayment(): Promise<void> {
+    if (!this.started || !this.currentState || !this.identity || !this.contract) {
+      throw new Error("The board is not connected yet");
+    }
+    const payments = this.currentState.payments;
+    if (payments.entry === null) return;
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    this.mutating = true;
+    const previous = this.currentState;
+    try {
+      const seq = Math.max(payments.seq + 1, this.identity.paymentsNextSeq ?? 1);
+      const settled = nextSettled(payments, null);
+      const sig = await this.delegate.signPayments(seq, null, settled);
+      const delta: Delta = {
+        v: 5,
+        parent: null,
+        contacts: null,
+        payments: { seq, settled, entry: null, sig },
+        adjustments: null,
+        slots: [],
+      };
+      const optimistic = mergeDelta(previous, delta);
+      this.currentState = optimistic;
+      this.callbacks.onState(optimistic);
+      this.identity = { ...this.identity, paymentsNextSeq: seq + 1 };
+      this.callbacks.onIdentity(this.identity);
+
+      await this.contract.updateDelta(delta);
+      try {
+        const fresh = await this.contract.getState();
+        this.currentState = fresh;
+        this.callbacks.onState(fresh);
+      } catch (error) {
+        this.callbacks.onWarning?.(
+          `Cleared the stuck payment, but could not refresh the board: ${errorMessage(error)}`,
+        );
+      }
+    } catch (error) {
+      this.currentState = previous;
+      this.callbacks.onState(previous);
       throw error;
     } finally {
       this.mutating = false;

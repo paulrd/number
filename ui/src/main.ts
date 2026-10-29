@@ -207,6 +207,7 @@ const paymentStatusTitle = byId<HTMLElement>("payment-status-title");
 const paymentStatusDetail = byId<HTMLElement>("payment-status-detail");
 const paymentStatusRoute = byId<HTMLElement>("payment-status-route");
 const paymentWithdraw = byId<HTMLButtonElement>("payment-withdraw");
+const paymentClear = byId<HTMLButtonElement>("payment-clear");
 const paymentInbox = byId<HTMLElement>("payment-inbox");
 const paymentInboxList = byId<HTMLUListElement>("payment-inbox-list");
 const paymentEmpty = byId<HTMLElement>("payment-empty");
@@ -1514,6 +1515,7 @@ async function renderPayments(): Promise<void> {
     paymentInbox.hidden = true;
     paymentEmpty.hidden = true;
     paymentWithdraw.hidden = true;
+    paymentClear.hidden = true;
     paymentInboxList.replaceChildren();
     return;
   }
@@ -1546,6 +1548,12 @@ async function renderPayments(): Promise<void> {
     display.cursor === 0;
   paymentWithdraw.hidden = !canWithdraw;
   paymentWithdraw.disabled = busy || navigating;
+  const canClear =
+    entry !== null &&
+    entry.phase !== "terminal" &&
+    typeof backend.clearStuckPayment === "function";
+  paymentClear.hidden = !canClear;
+  paymentClear.disabled = busy || navigating;
   paymentOpen.disabled = busy || navigating || active || isRoot;
   paymentOpen.title = active
     ? "This board already has a payment in progress."
@@ -3423,6 +3431,31 @@ paymentWithdraw.addEventListener("click", () => {
     } catch (error) {
       showNotice("error", "Could not withdraw the offer", errorMessage(error));
       paymentWithdraw.disabled = false;
+    }
+  })();
+});
+paymentClear.addEventListener("click", () => {
+  void (async () => {
+    const clear = backend.clearStuckPayment;
+    if (typeof clear !== "function") return;
+    paymentClear.disabled = true;
+    try {
+      await clear.call(backend);
+      boardCache.clear();
+      showNotice(
+        "info",
+        "Stuck payment cleared",
+        "The board's payments record is now a tombstone; it can take a new payment.",
+      );
+      announce("Stuck payment cleared.");
+      renderAll();
+    } catch (error) {
+      showNotice(
+        "error",
+        "Could not clear the stuck payment",
+        errorMessage(error),
+      );
+      paymentClear.disabled = false;
     }
   })();
 });
