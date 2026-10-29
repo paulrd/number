@@ -652,7 +652,7 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
   delegate generation
 - `3a214f2` owner **Clear stuck payment**
 - `f4ebadc` live-node smoke harnesses
-- `ba1e33f` warn when auto-advance never scans (#22)
+- `5f42976` warn when auto-advance never scans (#22)
 
 `published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
 `4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
