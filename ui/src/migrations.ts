@@ -37,6 +37,14 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v8 first build: background auto-advance, superseded by the stale-cache
+    // fix (the scan must read the node's committed local state, not only the
+    // lossy notification cache). Its seed and all counters carry forward.
+    key: "5C2sivoLcUaGzf2QaWpoRoHc4YdVCwaZ8qSebbQhN7Zu",
+    codeHash: "EAE71KLCaCN8PZaJqJab7NihZgj9EoLYxRiotNTNgum6",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v7: the payments/parent delegate superseded by v8 auto-advance. Verified
     // against published/manifest.json (recorded generation) and
     // DELEGATE_VERSION = 7 in delegate/src/lib.rs. Its seed and all counters

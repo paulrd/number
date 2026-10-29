@@ -21,11 +21,16 @@
     ]
   },
   "delegate": {
-    "codeHash": "EAE71KLCaCN8PZaJqJab7NihZgj9EoLYxRiotNTNgum6",
-    "key": "5C2sivoLcUaGzf2QaWpoRoHc4YdVCwaZ8qSebbQhN7Zu",
+    "codeHash": "4emsCtMXXjXZ6GKTcawb41Z49ricZVPVmvP6iMaxAYRZ",
+    "key": "FwgfvB6XMAhJovYa2buSTKNs11PSPunH27NAteN96Vyu",
     "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
     "file": "published/delegate/number_delegate.wasm",
     "generations": [
+      {
+        "key": "FwgfvB6XMAhJovYa2buSTKNs11PSPunH27NAteN96Vyu",
+        "codeHash": "4emsCtMXXjXZ6GKTcawb41Z49ricZVPVmvP6iMaxAYRZ",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
       {
         "key": "5C2sivoLcUaGzf2QaWpoRoHc4YdVCwaZ8qSebbQhN7Zu",
         "codeHash": "EAE71KLCaCN8PZaJqJab7NihZgj9EoLYxRiotNTNgum6",

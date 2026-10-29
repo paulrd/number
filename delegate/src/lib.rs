@@ -2120,16 +2120,12 @@ fn resolve_owner(
     let candidates = instance_candidates(hashes, owner)?;
     for (index, _hash, id) in &candidates {
         let key = hex::encode(id);
-        if let Some(record) = inbox.instances.get(&key) {
-            if let Some(state) = board_from_record(record, owner) {
-                return Ok(ResolvedOwner {
-                    owner: owner.to_owned(),
-                    index: *index,
-                    instance: *id,
-                    state: Some(state),
-                });
-            }
-        }
+        // The node's local store is authoritative. `inbox.instances` is a
+        // notification fast path and can be older than the committed state
+        // when a ContractNotification was dropped (the host delivers those on
+        // a bounded, lossy channel). Prefer the local state and refresh the
+        // cache from it; only fall back to the cached copy when this node does
+        // not hold the instance.
         if let Some(bytes) = host.local_state(id) {
             if let Ok(state) = BoardState::decode(&bytes, owner) {
                 let record = InstanceRecord {
@@ -2140,6 +2136,16 @@ fn resolve_owner(
                     retry_next_wake: false,
                 };
                 inbox.instances.insert(key, record);
+                return Ok(ResolvedOwner {
+                    owner: owner.to_owned(),
+                    index: *index,
+                    instance: *id,
+                    state: Some(state),
+                });
+            }
+        }
+        if let Some(record) = inbox.instances.get(&key) {
+            if let Some(state) = board_from_record(record, owner) {
                 return Ok(ResolvedOwner {
                     owner: owner.to_owned(),
                     index: *index,
@@ -3938,6 +3944,49 @@ mod tests {
             "slots": slots,
         }))
         .expect("state serializes")
+    }
+
+    fn state_with_payments_seq(v: u8, seq: u64) -> Vec<u8> {
+        let mut value: Value = serde_json::from_slice(&empty_state_bytes(v)).expect("state parses");
+        value["payments"]["seq"] = seq.into();
+        serde_json::to_vec(&value).expect("state serializes")
+    }
+
+    #[test]
+    fn resolve_owner_prefers_local_state_over_a_stale_notification_cache() {
+        let seed = [7u8; 32];
+        let mut host = store_with_seed(seed);
+        let owner_bytes = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let owner = hex::encode(owner_bytes);
+        let hash = [0xAAu8; 32];
+        let instance = derive_instance_id(&hash, &owner_bytes);
+
+        let stale = state_with_payments_seq(5, 1);
+        let current = state_with_payments_seq(5, 2);
+        host.contracts.insert(instance.to_vec(), current);
+
+        let mut inbox = InboxState::default();
+        inbox.instances.insert(
+            hex::encode(instance),
+            InstanceRecord {
+                state: "known".to_owned(),
+                seq: 1,
+                owner: Some(owner.clone()),
+                data: Some(hex::encode(&stale)),
+                retry_next_wake: false,
+            },
+        );
+
+        let mut out = Vec::new();
+        let resolved = resolve_owner(&mut host, &[hash], &owner, &mut inbox, &mut out)
+            .expect("local state resolves");
+        assert_eq!(
+            resolved.state.expect("state is present").payments.seq,
+            2,
+            "the committed local state must beat a stale notification cache"
+        );
+        assert!(out.is_empty(), "a local hit must not issue a network GET");
+        assert_eq!(inbox.instances[&hex::encode(instance)].seq, 2);
     }
 
     #[test]
