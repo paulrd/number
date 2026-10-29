@@ -15,6 +15,7 @@ import {
 import { OutboundDelegateMsgType } from "@freenetorg/freenet-stdlib/host-response";
 import { stringify as stringifyJsonLossless } from "lossless-json";
 import { blake3 } from "@noble/hashes/blake3";
+import bs58 from "bs58";
 import { ApplicationMessageT } from "@freenetorg/freenet-stdlib/common";
 import {
   ApplicationMessagesT,
@@ -84,10 +85,61 @@ export interface DelegateIdentity {
   paymentsNextSeq?: number;
 }
 
+/** Default per-payment cap in hundredths (10,000.00); 0 disables the cap. */
+export const DEFAULT_MAX_AMOUNT = 1_000_000;
+
+export interface DelegateAuditEntry {
+  /** Payment id the delegate acted on. */
+  id: string;
+  /** Cursor of the payment record it advanced. */
+  cursor: number;
+  /** Slot indices it signed in that step. */
+  slots: number[];
+  /** Actor role, e.g. "debit" or "credit". */
+  role: string;
+}
+
 export interface DelegateStatus {
   hasSeed: boolean;
   /** Present only when `hasSeed` is true. */
   identity: DelegateIdentity | null;
+  /**
+   * v8 auto-advance fields (DESIGN-v4.1-v5 "Configuration"). A predecessor
+   * delegate that predates v8 omits them, so they are normalized to inert
+   * defaults rather than rejected.
+   */
+  configured: boolean;
+  /** Base58 contract code hashes the delegate was configured with, newest first. */
+  codeHashes: string[];
+  /** The hash that resolved the owner's own board; null before configuration. */
+  matchedCodeHash: string | null;
+  /** Octal owner address the delegate was configured with; null before configuration. */
+  address: string | null;
+  autoAdvance: boolean;
+  maxAmount: number;
+  /** Hex instance ids the delegate currently subscribes to. */
+  subscriptions: string[];
+  /** Timestamp/counter of the delegate's last scan; 0 before the first scan. */
+  lastScan: number;
+  lastError: string | null;
+  /** Bounded audit of recent auto-advance steps (at most 32). */
+  audit: DelegateAuditEntry[];
+}
+
+/**
+ * The delegate is stale when it was configured for a different active contract
+ * hash. A stale hash resolves every neighbour to a different instance and
+ * silently returns nothing, which is the main operational failure mode.
+ *
+ * An unconfigured delegate is not stale: there is nothing to compare yet (the
+ * UI should show "not configured" instead).
+ */
+export function isDelegateStatusStale(
+  status: Pick<DelegateStatus, "configured" | "matchedCodeHash">,
+  activeCodeHash: string,
+): boolean {
+  if (!status.configured) return false;
+  return status.matchedCodeHash !== activeCodeHash;
 }
 
 export interface ExportedSecrets {
@@ -169,7 +221,14 @@ function classifyDelegateFailure(message: string): DelegateError {
 }
 
 interface PendingRequest {
-  kind: "identity" | "sign" | "status" | "export" | "import";
+  kind:
+    | "identity"
+    | "sign"
+    | "status"
+    | "export"
+    | "import"
+    | "configure"
+    | "setAutoAdvance";
   resolve: (payload: ResponseRecord) => void;
   reject: (error: DelegateError) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -218,6 +277,69 @@ export class DelegateClient {
   status(timeoutMs = 5_000): Promise<DelegateStatus> {
     return this.request("status", { cmd: "status" }, timeoutMs).then((payload) =>
       this.parseStatus(payload),
+    );
+  }
+
+  /**
+   * Configure v8 auto-advance. `codeHashes` are base58 code hashes, newest
+   * first (the active contract hash, then the legacy generations). `address`
+   * is the owner's octal address from the UI and may be "" for a root board.
+   *
+   * DESIGN's request example lists only `codeHashes` and `address`, while the
+   * stored configuration and the pass-1 task list also carry `autoAdvance` and
+   * `maxAmount`; both are sent so the delegate can persist the full policy in
+   * one request (see DESIGN-v4.1-v5 "Configuration"/"Policy").
+   */
+  async configure(
+    codeHashes: string[],
+    address: string,
+    autoAdvance = true,
+    maxAmount = DEFAULT_MAX_AMOUNT,
+    timeoutMs = 5_000,
+  ): Promise<void> {
+    const validatedHashes = this.validateCodeHashes(codeHashes);
+    if (validatedHashes.length === 0) {
+      throw new DelegateError("Protocol", "codeHashes must not be empty.");
+    }
+    if (!/^[0-7]*$/.test(address)) {
+      throw new DelegateError(
+        "Protocol",
+        "address must be an octal string (digits 0-7), including \"\" for a root.",
+      );
+    }
+    if (typeof autoAdvance !== "boolean") {
+      throw new DelegateError("Protocol", "autoAdvance must be a boolean.");
+    }
+    const validatedMaxAmount = this.validateMaxAmount(maxAmount);
+
+    await this.request(
+      "configure",
+      {
+        cmd: "configure",
+        codeHashes: validatedHashes,
+        address,
+        autoAdvance,
+        maxAmount: validatedMaxAmount,
+      },
+      timeoutMs,
+    );
+  }
+
+  /** Enable or disable auto-advance and (optionally) change its per-payment cap. */
+  async setAutoAdvance(
+    enabled: boolean,
+    maxAmount = DEFAULT_MAX_AMOUNT,
+    timeoutMs = 5_000,
+  ): Promise<void> {
+    if (typeof enabled !== "boolean") {
+      throw new DelegateError("Protocol", "enabled must be a boolean.");
+    }
+    const validatedMaxAmount = this.validateMaxAmount(maxAmount);
+
+    await this.request(
+      "setAutoAdvance",
+      { cmd: "setAutoAdvance", enabled, maxAmount: validatedMaxAmount },
+      timeoutMs,
     );
   }
 
@@ -528,9 +650,35 @@ export class DelegateClient {
         index = this.pending.findIndex((pending) => pending.kind === "identity");
       } else if (typeof payload.sig === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "sign");
+      } else if (
+        typeof payload.configured === "boolean" ||
+        typeof payload.matchedCodeHash === "string"
+      ) {
+        index = this.pending.findIndex((pending) => pending.kind === "configure");
+      } else if (typeof payload.autoAdvance === "boolean") {
+        index = this.pending.findIndex(
+          (pending) => pending.kind === "setAutoAdvance",
+        );
       } else if (payload.ok === true) {
-        index = this.pending.findIndex((pending) => pending.kind === "import");
+        // A bare ok is the v8 acknowledgement shape for configure/setAutoAdvance
+        // and the v7 shape for import. Prefer the automation requests that are
+        // actually in flight, then fall back to import.
+        for (const kind of ["configure", "setAutoAdvance", "import"] as const) {
+          index = this.pending.findIndex((pending) => pending.kind === kind);
+          if (index !== -1) break;
+        }
       }
+
+      // The delegate may acknowledge a configure/setAutoAdvance with a status
+      // shape (hasSeed plus the automation fields). If no status request is
+      // waiting, resolve the automation request instead of dropping it.
+      if (index === -1 && payload.ok !== false) {
+        for (const kind of ["configure", "setAutoAdvance"] as const) {
+          index = this.pending.findIndex((pending) => pending.kind === kind);
+          if (index !== -1) break;
+        }
+      }
+
       if (index === -1 && isRecord(payload) && typeof payload.error === "string") {
         index = 0;
       }
@@ -676,12 +824,239 @@ export class DelegateClient {
         "Delegate status response is missing a boolean hasSeed.",
       );
     }
-    if (!payload.hasSeed) return { hasSeed: false, identity: null };
 
     return {
-      hasSeed: true,
-      identity: this.parseIdentity(payload),
+      hasSeed: payload.hasSeed,
+      identity: payload.hasSeed ? this.parseIdentity(payload) : null,
+      ...this.parseAutomationStatus(payload),
     };
+  }
+
+  /**
+   * Parse the v8 status fields. A predecessor (v7) omits all of them; normalize
+   * those to inert defaults so the migration path can still read `status`.
+   */
+  private parseAutomationStatus(
+    payload: ResponseRecord,
+  ): Omit<DelegateStatus, "hasSeed" | "identity"> {
+    return {
+      configured: this.parseOptionalBoolean(payload.configured, "configured"),
+      codeHashes:
+        payload.codeHashes === undefined
+          ? []
+          : this.validateCodeHashes(payload.codeHashes),
+      matchedCodeHash: this.parseOptionalCodeHash(
+        payload.matchedCodeHash,
+        "matchedCodeHash",
+      ),
+      address: this.parseOptionalAddress(payload.address),
+      autoAdvance: this.parseOptionalBoolean(payload.autoAdvance, "autoAdvance"),
+      maxAmount:
+        payload.maxAmount === undefined
+          ? DEFAULT_MAX_AMOUNT
+          : this.validateMaxAmount(payload.maxAmount),
+      subscriptions: this.parseSubscriptions(payload.subscriptions),
+      lastScan: this.parseOptionalNonNegativeInteger(payload.lastScan, "lastScan"),
+      lastError: this.parseOptionalError(payload.lastError),
+      audit: this.parseAudit(payload.audit),
+    };
+  }
+
+  private validateCodeHashes(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      throw new DelegateError(
+        "Protocol",
+        "codeHashes must be an array of base58 code hashes.",
+      );
+    }
+    const seen = new Set<string>();
+    return value.map((entry) => {
+      if (typeof entry !== "string") {
+        throw new DelegateError("Protocol", "codeHashes entries must be strings.");
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = bs58.decode(entry);
+      } catch {
+        throw new DelegateError(
+          "Protocol",
+          `codeHashes entry is not valid base58: ${entry}`,
+        );
+      }
+      if (bytes.length !== 32) {
+        throw new DelegateError(
+          "Protocol",
+          `codeHashes entry must decode to 32 bytes, got ${bytes.length}: ${entry}`,
+        );
+      }
+      if (seen.has(entry)) {
+        throw new DelegateError(
+          "Protocol",
+          `codeHashes contains a duplicate entry: ${entry}`,
+        );
+      }
+      seen.add(entry);
+      return entry;
+    });
+  }
+
+  private validateMaxAmount(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 0
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "maxAmount must be a non-negative safe integer (0 disables the cap).",
+      );
+    }
+    return value;
+  }
+
+  private parseOptionalBoolean(value: unknown, field: string): boolean {
+    if (value === undefined) return false;
+    if (typeof value !== "boolean") {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate status response has a malformed ${field} (expected a boolean).`,
+      );
+    }
+    return value;
+  }
+
+  private parseOptionalCodeHash(value: unknown, field: string): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string") {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate status response has a malformed ${field} (expected base58).`,
+      );
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = bs58.decode(value);
+    } catch {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate status response has a malformed ${field} (not base58).`,
+      );
+    }
+    if (bytes.length !== 32) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate status response has a malformed ${field} (expected 32 bytes).`,
+      );
+    }
+    return value;
+  }
+
+  private parseOptionalAddress(value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string" || !/^[0-7]*$/.test(value)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate status response has a malformed address (expected octal digits).",
+      );
+    }
+    return value;
+  }
+
+  private parseSubscriptions(value: unknown): string[] {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate status response has malformed subscriptions (expected an array).",
+      );
+    }
+    return value.map((entry) => {
+      if (typeof entry !== "string" || !isLowerHex(entry, 64)) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has a malformed subscription id (expected 64 lowercase hex characters).",
+        );
+      }
+      return entry;
+    });
+  }
+
+  private parseOptionalNonNegativeInteger(value: unknown, field: string): number {
+    if (value === undefined) return 0;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate status response has a malformed ${field} (expected a non-negative integer).`,
+      );
+    }
+    return value;
+  }
+
+  private parseOptionalError(value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string") {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate status response has a malformed lastError (expected string or null).",
+      );
+    }
+    return value;
+  }
+
+  private parseAudit(value: unknown): DelegateAuditEntry[] {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate status response has a malformed audit (expected an array).",
+      );
+    }
+    return value.map((entry) => {
+      if (!isRecord(entry)) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has a malformed audit entry.",
+        );
+      }
+      const id = entry.id;
+      const cursor = entry.cursor;
+      const slots = entry.slots;
+      const role = entry.role;
+      if (typeof id !== "string" || id.length === 0) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has a malformed audit id.",
+        );
+      }
+      if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 0) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has a malformed audit cursor.",
+        );
+      }
+      if (
+        !Array.isArray(slots) ||
+        slots.some(
+          (slot) =>
+            typeof slot !== "number" ||
+            !Number.isInteger(slot) ||
+            slot < 0 ||
+            slot > 7,
+        )
+      ) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has malformed audit slots.",
+        );
+      }
+      if (typeof role !== "string" || role.length === 0) {
+        throw new DelegateError(
+          "Protocol",
+          "Delegate status response has a malformed audit role.",
+        );
+      }
+      return { id, cursor, slots: [...(slots as number[])], role };
+    });
   }
 
   private parseExport(payload: ResponseRecord): ExportedSecrets {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApplicationMessageT } from "@freenetorg/freenet-stdlib/common";
 import {
   DelegateResponseT,
@@ -8,13 +8,68 @@ import {
 import type { ClientRequestT } from "@freenetorg/freenet-stdlib/client-request";
 import type { DelegateResponse } from "@freenetorg/freenet-stdlib";
 import {
+  DEFAULT_MAX_AMOUNT,
   DelegateClient,
   DelegateError,
+  isDelegateStatusStale,
   isMissingDelegateError,
   parseDelegatePayloads,
 } from "./delegate";
 import { MAX_CONTACTS, type Contact, type Entry } from "./state";
 import type { PaymentEntry } from "./payments";
+import { LEGACY_CONTRACT_CODE_HASHES } from "./migrations";
+
+// Board-level configure-on-connect is tested here with a fake transport: no
+// WebSocket or real node is involved.
+const fakeTransport = vi.hoisted(() => ({
+  handler: null as
+    | null
+    | ((
+        request: unknown,
+        callbacks: Record<string, (...args: never[]) => unknown>,
+      ) => void),
+}));
+
+vi.mock("./freenet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./freenet")>();
+  const { emptyState } = await import("./state");
+
+  class FakeNumberContract {
+    static instances: FakeNumberContract[] = [];
+    readonly callbacks: Record<string, (...args: never[]) => unknown>;
+    state = emptyState();
+    contractKeyBase58 = "fake-contract-key";
+    readonly codeHashBase58: string;
+    readonly wasmUrl: string;
+
+    constructor(
+      codeHashBase58: string,
+      wasmUrl: string,
+      callbacks: Record<string, (...args: never[]) => unknown> = {},
+    ) {
+      this.codeHashBase58 = codeHashBase58;
+      this.wasmUrl = wasmUrl;
+      this.callbacks = callbacks;
+      FakeNumberContract.instances.push(this);
+    }
+
+    async connect(): Promise<void> {}
+    async ensureState(): Promise<ReturnType<typeof emptyState>> {
+      return this.state;
+    }
+    async getState(): Promise<ReturnType<typeof emptyState>> {
+      return this.state;
+    }
+    async subscribe(): Promise<void> {}
+    async updateDelta(): Promise<void> {}
+    sendClientRequest(request: ClientRequestT): void {
+      fakeTransport.handler?.(request, this.callbacks);
+    }
+    close(): void {}
+  }
+
+  return { ...actual, NumberContract: FakeNumberContract };
+});
 
 const KEY_BYTES = Array.from({ length: 32 }, () => 1);
 const CODE_HASH_BYTES = Array.from({ length: 32 }, () => 2);
@@ -393,10 +448,24 @@ describe("delegate transport", () => {
       PARAMS_BYTES,
     );
 
+    const automationDefaults = {
+      configured: false,
+      codeHashes: [],
+      matchedCodeHash: null,
+      address: null,
+      autoAdvance: false,
+      maxAmount: DEFAULT_MAX_AMOUNT,
+      subscriptions: [],
+      lastScan: 0,
+      lastError: null,
+      audit: [],
+    };
+
     reply = { ok: true, hasSeed: false };
     await expect(client.status()).resolves.toEqual({
       hasSeed: false,
       identity: null,
+      ...automationDefaults,
     });
 
     reply = {
@@ -417,6 +486,7 @@ describe("delegate transport", () => {
         parentNextSeq: 7,
         paymentsNextSeq: 6,
       },
+      ...automationDefaults,
     });
 
     reply = {
@@ -472,6 +542,300 @@ describe("delegate transport", () => {
       client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1], 1, 1, 0),
     ).rejects.toMatchObject({ code: "Protocol" });
     expect(sent).toHaveLength(0);
+  });
+
+  it("parses the extended v8 auto-advance status", async () => {
+    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+    const legacy = LEGACY_CONTRACT_CODE_HASHES[0];
+    let reply: object = {};
+    let client!: DelegateClient;
+    client = new DelegateClient(
+      () => client.handleResponse(response(reply)),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    reply = {
+      ok: true,
+      hasSeed: true,
+      pubkey: "ab".repeat(32),
+      nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+      contactsNextSeq: 1,
+      parentNextSeq: 1,
+      paymentsNextSeq: 1,
+      configured: true,
+      codeHashes: [active, legacy],
+      matchedCodeHash: active,
+      address: "52",
+      autoAdvance: true,
+      maxAmount: 2_500_000,
+      subscriptions: ["11".repeat(32)],
+      lastScan: 1_760_000_000_000,
+      lastError: null,
+      audit: [
+        { id: "cd".repeat(16), cursor: 1, slots: [2, 3], role: "debit" },
+      ],
+    };
+
+    await expect(client.status()).resolves.toMatchObject({
+      configured: true,
+      codeHashes: [active, legacy],
+      matchedCodeHash: active,
+      address: "52",
+      autoAdvance: true,
+      maxAmount: 2_500_000,
+      subscriptions: ["11".repeat(32)],
+      lastScan: 1_760_000_000_000,
+      lastError: null,
+      audit: [
+        { id: "cd".repeat(16), cursor: 1, slots: [2, 3], role: "debit" },
+      ],
+    });
+  });
+
+  it("rejects malformed v8 status fields", async () => {
+    for (const field of [
+      { codeHashes: ["not base58 !!!"] },
+      { codeHashes: ["11".repeat(32)] },
+      { matchedCodeHash: "not base58 !!!" },
+      { address: "58" },
+      { autoAdvance: "yes" },
+      { maxAmount: -1 },
+      { maxAmount: 1.5 },
+      { subscriptions: ["ab"] },
+      { lastScan: -1 },
+      { lastError: 7 },
+      { audit: [{ id: "", cursor: 0, slots: [], role: "debit" }] },
+      { audit: [{ id: "aa", cursor: 0, slots: [8], role: "debit" }] },
+    ]) {
+      let reply: object = {};
+      let client!: DelegateClient;
+      client = new DelegateClient(
+        () => client.handleResponse(response(reply)),
+        KEY_BYTES,
+        CODE_HASH_BYTES,
+        PARAMS_BYTES,
+      );
+      reply = {
+        ok: true,
+        hasSeed: true,
+        pubkey: "ab".repeat(32),
+        nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+        ...field,
+      };
+      await expect(client.status()).rejects.toMatchObject({ code: "Protocol" });
+    }
+  });
+
+  it("sends configure and setAutoAdvance with the specified wire shape", async () => {
+    let reply: object = {};
+    let client!: DelegateClient;
+    const sent: ClientRequestT[] = [];
+    client = new DelegateClient(
+      (request) => {
+        sent.push(request);
+        client.handleResponse(response(reply));
+      },
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+    const legacy = LEGACY_CONTRACT_CODE_HASHES[0];
+    // v8 may acknowledge configuration with the full status shape; the client
+    // must bind that to the configure/setAutoAdvance request, not to a status
+    // request that is not in flight.
+    reply = {
+      ok: true,
+      hasSeed: true,
+      pubkey: "ab".repeat(32),
+      nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+      configured: true,
+      matchedCodeHash: active,
+      autoAdvance: true,
+      maxAmount: 1_000_000,
+    };
+    await expect(
+      client.configure([active, legacy], "52", true, 1_000_000),
+    ).resolves.toBeUndefined();
+    expect(sentPayload(sent)).toEqual({
+      cmd: "configure",
+      codeHashes: [active, legacy],
+      address: "52",
+      autoAdvance: true,
+      maxAmount: 1_000_000,
+    });
+
+    await expect(client.setAutoAdvance(false, 0)).resolves.toBeUndefined();
+    expect(sentPayload(sent)).toEqual({
+      cmd: "setAutoAdvance",
+      enabled: false,
+      maxAmount: 0,
+    });
+  });
+
+  it("rejects malformed configure/setAutoAdvance arguments before sending", async () => {
+    const sent: ClientRequestT[] = [];
+    const client = new DelegateClient(
+      (request) => sent.push(request),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+
+    await expect(client.configure([], "")).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(
+      client.configure(["not base58 !!!"], ""),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(
+      client.configure([active, active], ""),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(client.configure([active], "58")).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(
+      client.configure([active], "", true, -1),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(
+      client.configure([active], "", "yes" as unknown as boolean),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(
+      client.setAutoAdvance(true, 1.5),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(
+      client.setAutoAdvance("yes" as unknown as boolean),
+    ).rejects.toMatchObject({ code: "Protocol" });
+
+    expect(sent).toHaveLength(0);
+  });
+
+  it("detects a stale configured hash but not an unconfigured delegate", () => {
+    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+    expect(
+      isDelegateStatusStale(
+        { configured: false, matchedCodeHash: null },
+        active,
+      ),
+    ).toBe(false);
+    expect(
+      isDelegateStatusStale(
+        { configured: true, matchedCodeHash: active },
+        active,
+      ),
+    ).toBe(false);
+    expect(
+      isDelegateStatusStale(
+        { configured: true, matchedCodeHash: LEGACY_CONTRACT_CODE_HASHES[0] },
+        active,
+      ),
+    ).toBe(true);
+  });
+
+  it("configures the delegate on connect, after identity, with the active hash first", async () => {
+    const { OnlineBoard } = await import("./board");
+    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+    const pubkey = "ab".repeat(32);
+    const sent: Record<string, unknown>[] = [];
+
+    const status = {
+      ok: true,
+      hasSeed: true,
+      pubkey,
+      nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+      contactsNextSeq: 1,
+      parentNextSeq: 1,
+      paymentsNextSeq: 1,
+      configured: false,
+      codeHashes: [],
+      matchedCodeHash: null,
+      address: null,
+      autoAdvance: false,
+      maxAmount: DEFAULT_MAX_AMOUNT,
+      subscriptions: [],
+      lastScan: 0,
+      lastError: null,
+      audit: [],
+    };
+
+    const board = new OnlineBoard(
+      {
+        contractCodeHash: active,
+        contractWasmUrl: "/number_contract.wasm",
+        delegateWasmUrl: "/number_delegate.wasm",
+        delegateKeyBytes: KEY_BYTES,
+        delegateCodeHashBytes: CODE_HASH_BYTES,
+        delegateParamsBytes: PARAMS_BYTES,
+      },
+      {
+        onStatus: () => {},
+        onState: () => {},
+        onIdentity: () => {},
+        onContractKey: () => {},
+        onError: () => {},
+      },
+    );
+
+    fakeTransport.handler = (request, callbacks) => {
+      const payload = sentPayload([request as ClientRequestT]);
+      sent.push(payload);
+      let reply: object;
+      if (payload.cmd === "status") {
+        reply = status;
+      } else if (payload.cmd === "identity") {
+        reply = {
+          ok: true,
+          pubkey,
+          nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+          contactsNextSeq: 1,
+          parentNextSeq: 1,
+          paymentsNextSeq: 1,
+        };
+      } else if (payload.cmd === "configure") {
+        reply = {
+          ok: true,
+          configured: true,
+          matchedCodeHash: active,
+        };
+      } else {
+        reply = { ok: true };
+      }
+      (callbacks.onDelegateResponse as
+        | ((value: DelegateResponse) => void)
+        | undefined)?.(response(reply));
+    };
+
+    try {
+      await board.start();
+      // `start()` configures the delegate after the board is usable (the
+      // address walk must not delay first render), so wait for that request
+      // before tearing the fake transport down.
+      await vi.waitFor(() => {
+        expect(sent.some((payload) => payload.cmd === "configure")).toBe(true);
+      });
+    } finally {
+      fakeTransport.handler = null;
+    }
+
+    const commands = sent.map((payload) => payload.cmd);
+    const configure = sent.find((payload) => payload.cmd === "configure");
+    expect(configure).toEqual({
+      cmd: "configure",
+      codeHashes: [active, ...LEGACY_CONTRACT_CODE_HASHES],
+      address: "",
+      autoAdvance: true,
+      maxAmount: DEFAULT_MAX_AMOUNT,
+    });
+    expect(commands.indexOf("identity")).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf("identity")).toBeLessThan(
+      commands.indexOf("configure"),
+    );
+
+    board.close();
   });
 
   it("signs contacts with the signContacts command", async () => {

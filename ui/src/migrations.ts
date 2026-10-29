@@ -37,6 +37,16 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v7: the payments/parent delegate superseded by v8 auto-advance. Verified
+    // against published/manifest.json (recorded generation) and
+    // DELEGATE_VERSION = 7 in delegate/src/lib.rs. Its seed and all counters
+    // (including paymentsNextSeq) carry forward; register it before the v8 key
+    // changes so the migration path exists before configure runs.
+    key: "6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1",
+    codeHash: "48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // The first v4 build (payments without the settled-id list). It was
     // recorded locally but never deployed; its board schema is not migratable
     // to the settled v4. Its seed/counters still carry forward.

@@ -16,11 +16,14 @@ import {
   LEGACY_DELEGATES,
 } from "./migrations";
 import {
+  DEFAULT_MAX_AMOUNT,
   DelegateClient,
   DelegateError,
   type DelegateIdentity,
+  type DelegateStatus,
   type ExportedSecrets,
 } from "./delegate";
+import { octalAddress } from "./tree-view";
 import {
   MAX_PAYMENT_SETTLED,
   decodeDelta,
@@ -67,6 +70,8 @@ export interface BoardCallbacks {
   onContractKey: (keyBase58: string) => void;
   onError: (error: Error) => void;
   onWarning?: (message: string) => void;
+  /** Latest delegate auto-advance status; null before the delegate answers. */
+  onDelegateStatus?: (status: DelegateStatus | null) => void;
   /**
    * Called when the node does not have the number-delegate installed. The UI
    * asks the user to install the bundled delegate and resolves after
@@ -135,6 +140,8 @@ export interface BoardBackend {
   readonly identity: DelegateIdentity | null;
   readonly contractKeyBase58: string | null;
   readonly currentState: StateV3 | null;
+  /** Latest delegate auto-advance status (online backend only). */
+  readonly delegateStatus?: DelegateStatus | null;
   start(): Promise<StateV3>;
   save(slotIndex: number, entry: Entry): Promise<void>;
   clear(slotIndex: number): Promise<void>;
@@ -165,6 +172,10 @@ export interface BoardBackend {
   ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
+  /** Read the delegate's auto-advance status without changing anything. */
+  refreshDelegateStatus?(): Promise<DelegateStatus | null>;
+  /** Enable/disable delegate auto-advance and optionally change its cap. */
+  setAutoAdvance?(enabled: boolean, maxAmount?: number): Promise<void>;
   close(): void;
 }
 
@@ -174,6 +185,7 @@ export class OnlineBoard implements BoardBackend {
   identity: DelegateIdentity | null = null;
   contractKeyBase58: string | null = null;
   currentState: StateV3 | null = null;
+  delegateStatus: DelegateStatus | null = null;
 
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
@@ -184,6 +196,9 @@ export class OnlineBoard implements BoardBackend {
   private started = false;
   private startPromise: Promise<StateV3> | null = null;
   private mutating = false;
+  /** Coalesces configure calls triggered by state/parent changes. */
+  private configuring: Promise<void> | null = null;
+  private configurationDirty = false;
 
   constructor(
     private readonly config: BoardConfig,
@@ -290,6 +305,7 @@ export class OnlineBoard implements BoardBackend {
             exported.nextSeq,
             exported.contactsNextSeq,
             exported.parentNextSeq,
+            exported.paymentsNextSeq ?? 1,
           );
           this.callbacks.onWarning?.(
             "Recovered the owner identity from the previous delegate.",
@@ -411,6 +427,12 @@ export class OnlineBoard implements BoardBackend {
       this.started = true;
       this.callbacks.onState(state);
       this.callbacks.onStatus("ready");
+      // Configure after the board is usable: the delegate must already own the
+      // migrated/created seed, and the address walk may need to read a parent
+      // board. It must not delay the first render; a failure is non-fatal
+      // (auto-advance stays inert) and is reported as a warning.
+      this.delegateStatus = null;
+      void this.reconfigureDelegate();
       return state;
     } catch (error) {
       this.started = false;
@@ -446,6 +468,7 @@ export class OnlineBoard implements BoardBackend {
         const next = mergeDelta(this.currentState, decodeDelta(update.delta));
         this.currentState = next;
         this.callbacks.onState(next);
+        void this.reconfigureDelegate();
         return;
       }
 
@@ -453,6 +476,7 @@ export class OnlineBoard implements BoardBackend {
         const next = decodeState(update.state);
         this.currentState = next;
         this.callbacks.onState(next);
+        void this.reconfigureDelegate();
         return;
       }
 
@@ -460,6 +484,7 @@ export class OnlineBoard implements BoardBackend {
       const next = mergeDelta(base, decodeDelta(update.delta));
       this.currentState = next;
       this.callbacks.onState(next);
+      void this.reconfigureDelegate();
     } catch (error) {
       this.callbacks.onError(
         new Error(`Rejected a live update from the node: ${errorMessage(error)}`),
@@ -601,6 +626,9 @@ export class OnlineBoard implements BoardBackend {
           `Saved the parent link, but could not refresh the board: ${errorMessage(error)}`,
         );
       }
+
+      // The parent link determines the octal address the delegate validates.
+      await this.reconfigureDelegate();
     } catch (error) {
       this.currentState = previous;
       this.callbacks.onState(previous);
@@ -886,6 +914,127 @@ export class OnlineBoard implements BoardBackend {
     await this.delegate.register(code);
   }
 
+  /**
+   * Read the delegate's current auto-advance status. This is advisory UI state:
+   * a transient failure leaves the previous value in place rather than failing
+   * the board.
+   */
+  async refreshDelegateStatus(): Promise<DelegateStatus | null> {
+    if (!this.contract) return this.delegateStatus;
+    try {
+      const status = await this.delegate.status();
+      this.delegateStatus = status;
+      this.callbacks.onDelegateStatus?.(status);
+      return status;
+    } catch (error) {
+      console.warn(
+        "[delegate] could not read auto-advance status:",
+        errorMessage(error),
+      );
+      return this.delegateStatus;
+    }
+  }
+
+  /**
+   * Enable or disable auto-advance, optionally changing the per-payment cap.
+   * The delegate must already be configured (the board configures it on
+   * connect after the seed and address are known).
+   */
+  async setAutoAdvance(
+    enabled: boolean,
+    maxAmount?: number,
+  ): Promise<void> {
+    if (!this.contract) throw new Error("The board is not connected yet");
+    // Preserve the configured cap when the caller only flips the toggle.
+    const cap = maxAmount ?? this.delegateStatus?.maxAmount ?? DEFAULT_MAX_AMOUNT;
+    await this.delegate.setAutoAdvance(enabled, cap);
+    await this.refreshDelegateStatus();
+  }
+
+  /**
+   * Coalesce configure refreshes: a state notification that lands while an
+   * address walk is still running queues exactly one follow-up.
+   */
+  private reconfigureDelegate(): Promise<void> {
+    if (this.configuring) {
+      this.configurationDirty = true;
+      return this.configuring;
+    }
+    this.configuring = this.configureDelegate().finally(() => {
+      this.configuring = null;
+      if (this.configurationDirty) {
+        this.configurationDirty = false;
+        void this.reconfigureDelegate();
+      }
+    });
+    return this.configuring;
+  }
+
+  /**
+   * Recompute the owner's octal address and send `configure` with the active
+   * contract hash first and every migratable legacy hash after it.
+   *
+   * This must never run before the delegate has a seed: the first-run and
+   * predecessor-migration paths own seed creation, and configuring a fresh
+   * delegate would make it look migrated. The board calls this only after
+   * `identity()` (which follows migration) or after a successful import.
+   */
+  private async configureDelegate(): Promise<void> {
+    if (!this.started || !this.identity || !this.currentState || !this.contract) {
+      return;
+    }
+
+    const status =
+      this.delegateStatus ?? (await this.refreshDelegateStatus());
+    if (!status?.hasSeed) return; // first-run/migration owns the seed creation
+
+    let address: string | null;
+    try {
+      address = await this.ownOctalAddress();
+    } catch (error) {
+      this.callbacks.onWarning?.(
+        `Could not determine this board's address for auto-advance: ${errorMessage(error)}`,
+      );
+      return;
+    }
+    if (address === null) return; // pending/unreadable parent: retry on next change
+
+    const codeHashes = [
+      this.config.contractCodeHash,
+      ...LEGACY_CONTRACT_CODE_HASHES,
+    ];
+
+    // Reconfiguring must not reset a user's policy back to the defaults: a
+    // status notification can arrive at any time and calls this again. An
+    // unconfigured v8 delegate starts on (the documented default).
+    const autoAdvance = status.configured ? status.autoAdvance : true;
+    const maxAmount = status.configured ? status.maxAmount : DEFAULT_MAX_AMOUNT;
+
+    try {
+      await this.delegate.configure(codeHashes, address, autoAdvance, maxAmount);
+      await this.refreshDelegateStatus();
+    } catch (error) {
+      this.callbacks.onWarning?.(
+        `Could not configure delegate auto-advance: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /** Octal address of this board, derived from the signed parent chain. */
+  private async ownOctalAddress(): Promise<string | null> {
+    if (!this.identity || !this.currentState) return null;
+    const info = await octalAddress(
+      {
+        ownerId: this.identity.pubkey,
+        state: this.currentState,
+        codeHash: this.config.contractCodeHash,
+        legacy: false,
+      },
+      { readBoard: (ownerId) => this.readBoard(ownerId) },
+    );
+    return info.address;
+  }
+
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
       throw new Error("The board is not connected yet");
@@ -973,6 +1122,11 @@ export class OnlineBoard implements BoardBackend {
 
   close(): void {
     this.started = false;
+    this.configurationDirty = false;
+    if (this.delegateStatus !== null) {
+      this.delegateStatus = null;
+      this.callbacks.onDelegateStatus?.(null);
+    }
     this.delegate.failAll();
     for (const viewer of this.viewers.values()) viewer.close();
     this.viewers.clear();

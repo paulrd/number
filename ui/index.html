@@ -165,7 +165,15 @@
           </dl>
 
           <details id="details" class="meta-details">
-            <summary id="details-summary">Details</summary>
+            <summary id="details-summary">
+              Details
+              <span
+                id="details-attention"
+                class="details-attention"
+                aria-hidden="true"
+                hidden
+              ></span>
+            </summary>
             <dl class="meta-list meta-list--details">
               <div class="meta-row">
                 <dt>Contract</dt>
@@ -176,6 +184,150 @@
                 </dd>
               </div>
             </dl>
+
+            <section
+              id="auto-advance"
+              class="auto-advance"
+              aria-labelledby="auto-advance-title"
+              aria-describedby="auto-advance-copy"
+            >
+              <div class="auto-advance-head">
+                <h2 id="auto-advance-title" class="auto-advance-title">
+                  Background payments
+                </h2>
+                <span
+                  id="auto-advance-badge"
+                  class="state-badge"
+                  data-state="checking"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Checking…
+                </span>
+              </div>
+
+              <p id="auto-advance-copy" class="auto-advance-copy">
+                While this node is running, its local component can sign the next
+                leg of a payment that names you as next. It may take minutes.
+                Notifications can be lost and are not retried, so this is not a
+                guarantee that a payment arrives.
+              </p>
+
+              <form id="auto-advance-form" class="auto-advance-form" novalidate>
+                <label class="auto-advance-switch">
+                  <input
+                    id="auto-advance-toggle"
+                    type="checkbox"
+                    checked
+                    aria-labelledby="auto-advance-switch-title"
+                    aria-describedby="auto-advance-switch-hint auto-advance-copy auto-advance-reason"
+                  />
+                  <span class="auto-advance-track" aria-hidden="true"></span>
+                  <span class="auto-advance-switch-copy">
+                    <span id="auto-advance-switch-title" class="auto-advance-switch-title">
+                      Auto-advance
+                    </span>
+                    <span id="auto-advance-switch-hint" class="auto-advance-switch-hint">
+                      Let this node sign the next leg for your board when it
+                      notices one.
+                    </span>
+                  </span>
+                </label>
+
+                <div class="auto-advance-amount-row">
+                  <label class="field" for="auto-advance-max">
+                    <span>Max per payment</span>
+                    <input
+                      id="auto-advance-max"
+                      name="auto-advance-max"
+                      type="text"
+                      inputmode="decimal"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="10000.00"
+                      aria-describedby="auto-advance-max-hint auto-advance-max-warning auto-advance-reason"
+                    />
+                  </label>
+                  <button
+                    id="auto-advance-save"
+                    class="button button--small"
+                    type="submit"
+                  >
+                    Save
+                  </button>
+                </div>
+                <p id="auto-advance-max-hint" class="field-hint">
+                  Two decimals. <code>0</code> removes the cap.
+                </p>
+                <p
+                  id="auto-advance-max-warning"
+                  class="field-warning"
+                  role="status"
+                  hidden
+                ></p>
+                <p id="auto-advance-reason" class="auto-advance-reason" role="status" hidden></p>
+                <p
+                  id="auto-advance-error"
+                  class="form-error auto-advance-error"
+                  role="alert"
+                  hidden
+                ></p>
+              </form>
+
+              <dl class="auto-advance-facts">
+                <div>
+                  <dt>State</dt>
+                  <dd id="auto-advance-state">Not reported</dd>
+                </div>
+                <div>
+                  <dt>Contract hash</dt>
+                  <dd><code id="auto-advance-hash">—</code></dd>
+                </div>
+                <div>
+                  <dt>Address</dt>
+                  <dd><code id="auto-advance-address">—</code></dd>
+                </div>
+                <div>
+                  <dt>Last scan</dt>
+                  <dd id="auto-advance-scan">—</dd>
+                </div>
+                <div>
+                  <dt>Subscriptions</dt>
+                  <dd id="auto-advance-subs">—</dd>
+                </div>
+              </dl>
+
+              <p id="auto-advance-stale" class="auto-advance-alert" role="status" hidden></p>
+              <p
+                id="auto-advance-last-error"
+                class="auto-advance-alert auto-advance-alert--danger"
+                role="status"
+                hidden
+              ></p>
+
+              <div class="auto-advance-audit-block">
+                <div class="auto-advance-audit-head">
+                  <h3 id="auto-advance-audit-title" class="auto-advance-audit-title">
+                    Recent activity
+                  </h3>
+                  <button
+                    id="auto-advance-refresh"
+                    class="auto-advance-refresh"
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <ul
+                  id="auto-advance-audit"
+                  class="auto-advance-audit"
+                  aria-labelledby="auto-advance-audit-title"
+                ></ul>
+                <p id="auto-advance-audit-empty" class="auto-advance-empty">
+                  No advances yet.
+                </p>
+              </div>
+            </section>
           </details>
         </div>
       </header>

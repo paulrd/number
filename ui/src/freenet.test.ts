@@ -12,6 +12,7 @@ import {
   encodeBase58,
 } from "./freenet";
 import { emptyState, encodeState } from "./state";
+import { LEGACY_CONTRACT_CODE_HASHES } from "./migrations";
 import { bytesToHex } from "./util";
 
 // Fixed 32-byte inputs. The instance-id formula is pinned twice: a hard-coded
@@ -78,6 +79,15 @@ describe("contract key derivation", () => {
       const offset = request.pack(builder);
       builder.finish(offset);
     }).not.toThrow();
+  });
+
+  it("resolves a stale code hash to a different instance id", () => {
+    // A delegate configured with an old hash looks at a different instance for
+    // the same owner, which is why a stale hash silently finds no neighbours.
+    const active = deriveInstanceId(CODE_HASH_BASE58, PARAMETERS);
+    const stale = deriveInstanceId(LEGACY_CONTRACT_CODE_HASHES[0], PARAMETERS);
+    expect(stale.base58).not.toBe(active.base58);
+    expect(stale.bytes).not.toEqual(active.bytes);
   });
 
   it("rejects code hashes that are not 32 bytes", () => {

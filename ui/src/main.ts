@@ -9,7 +9,7 @@ import {
 } from "./board";
 import { createContactsDialog } from "./contacts-dialog";
 import { createBoardNameDialog } from "./board-name-dialog";
-import { DelegateError, type DelegateIdentity } from "./delegate";
+import { DelegateError, isDelegateStatusStale, type DelegateIdentity, type DelegateStatus } from "./delegate";
 import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
@@ -91,6 +91,27 @@ const readOnlyBadge = byId<HTMLElement>("read-only-badge");
 const legacyBadge = byId<HTMLElement>("legacy-badge");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
+const detailsBox = byId<HTMLDetailsElement>("details");
+const detailsSummary = byId<HTMLElement>("details-summary");
+const detailsAttention = byId<HTMLElement>("details-attention");
+const autoAdvanceBadge = byId<HTMLElement>("auto-advance-badge");
+const autoAdvanceForm = byId<HTMLFormElement>("auto-advance-form");
+const autoAdvanceToggle = byId<HTMLInputElement>("auto-advance-toggle");
+const autoAdvanceMax = byId<HTMLInputElement>("auto-advance-max");
+const autoAdvanceSave = byId<HTMLButtonElement>("auto-advance-save");
+const autoAdvanceMaxWarning = byId<HTMLParagraphElement>("auto-advance-max-warning");
+const autoAdvanceReason = byId<HTMLParagraphElement>("auto-advance-reason");
+const autoAdvanceError = byId<HTMLParagraphElement>("auto-advance-error");
+const autoAdvanceState = byId<HTMLElement>("auto-advance-state");
+const autoAdvanceHash = byId<HTMLElement>("auto-advance-hash");
+const autoAdvanceAddress = byId<HTMLElement>("auto-advance-address");
+const autoAdvanceScan = byId<HTMLElement>("auto-advance-scan");
+const autoAdvanceSubs = byId<HTMLElement>("auto-advance-subs");
+const autoAdvanceStale = byId<HTMLParagraphElement>("auto-advance-stale");
+const autoAdvanceLastError = byId<HTMLParagraphElement>("auto-advance-last-error");
+const autoAdvanceAudit = byId<HTMLUListElement>("auto-advance-audit");
+const autoAdvanceAuditEmpty = byId<HTMLParagraphElement>("auto-advance-audit-empty");
+const autoAdvanceRefresh = byId<HTMLButtonElement>("auto-advance-refresh");
 const parentName = byId<HTMLElement>("parent-name");
 const parentStatus = byId<HTMLSpanElement>("parent-status");
 const parentNote = byId<HTMLParagraphElement>("parent-note");
@@ -216,6 +237,19 @@ let paymentsRequest = 0;
 let noticeRetry: (() => void | Promise<void>) | null = null;
 /** True while the address book was opened from the parent dialog. */
 let addingForParent = false;
+
+/** The last auto-advance status the local component reported. */
+let autoAdvanceStatus: DelegateStatus | null = null;
+/** True once a status read has completed, even when it returned nothing. */
+let autoAdvanceStatusReceived = false;
+/** Status delivered by the backend callback, used when the property lags. */
+let delegateStatusFromCallback: DelegateStatus | null = null;
+let autoAdvanceRefreshError: string | null = null;
+let autoAdvanceRefreshRequest = 0;
+let autoAdvanceRefreshing = false;
+let autoAdvanceSaving = false;
+/** True while the user has unsaved edits; status repaints must not clobber them. */
+let autoAdvanceDirty = false;
 
 /** Session cache for remote boards' own names (the board cache holds states). */
 const nameCache = new Map<string, string | null>();
@@ -1074,6 +1108,7 @@ function renderAll(): void {
   void renderTrail();
   // Async and request-guarded: a stale read never paints over a newer board.
   void renderPayments();
+  renderAutoAdvance();
 }
 
 const PAYMENT_BADGES: Record<
@@ -1327,6 +1362,489 @@ async function renderPayments(): Promise<void> {
   paymentEmpty.hidden = display !== null || incoming.length > 0;
 }
 
+/* Background payments (delegate auto-advance) ----------------------------- */
+
+const AUTO_ADVANCE_AUDIT_LIMIT = 5;
+
+/**
+ * The only place this file touches the backend's auto-advance members. The
+ * optional methods are the parallel delegate lane's interface; a backend
+ * without them degrades to an unavailable status instead of failing.
+ */
+function createDelegateControls(source: BoardBackend) {
+  return {
+    get available(): boolean {
+      return (
+        !isOffline &&
+        (typeof source.refreshDelegateStatus === "function" ||
+          typeof source.setAutoAdvance === "function" ||
+          source.delegateStatus !== undefined)
+      );
+    },
+    get controllable(): boolean {
+      return typeof source.setAutoAdvance === "function";
+    },
+    async refresh(): Promise<DelegateStatus | null> {
+      if (typeof source.refreshDelegateStatus !== "function") {
+        return source.delegateStatus ?? delegateStatusFromCallback;
+      }
+      return (
+        (await source.refreshDelegateStatus()) ??
+        source.delegateStatus ??
+        delegateStatusFromCallback
+      );
+    },
+    async setAutoAdvance(enabled: boolean, maxAmount: number): Promise<void> {
+      if (typeof source.setAutoAdvance !== "function") {
+        throw new Error("This build cannot change background payments.");
+      }
+      await source.setAutoAdvance(enabled, maxAmount);
+    },
+  };
+}
+
+/**
+ * `lastScan` is a count of completed scan passes, not a wall-clock time.
+ */
+function formatScanCount(value: number | null): { text: string; title: string } {
+  if (value === null) return { text: "—", title: "No scan reported." };
+  if (value <= 0) {
+    return { text: "Not yet", title: "No scan pass has completed." };
+  }
+  const count = Math.trunc(value);
+  return {
+    text: `pass ${count.toLocaleString()}`,
+    title: `${count.toLocaleString()} scan pass${count === 1 ? "" : "es"} since the component started.`,
+  };
+}
+
+const DELEGATE_ERROR_TEXT: Record<string, string> = {
+  "mixed-version":
+    "a board on this route uses a different version, so that payment was skipped",
+  "auto-advance-disabled": "auto-advance is off in the local component",
+  "address-mismatch":
+    "the local component's owner address did not match the board it read",
+  "destination-unknown":
+    "the destination board could not be read, so the payment was skipped",
+  "update-failed": "the node did not confirm the signed change",
+  "network budget exhausted":
+    "this scan used its network requests, so it will try again on the next wake",
+  "not configured: send configure first":
+    "the local component is not set up yet",
+};
+
+function autoAdvanceErrorText(value: string): string {
+  return DELEGATE_ERROR_TEXT[value] ?? value;
+}
+
+function autoAdvanceMaxText(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "";
+  return formatCents(BigInt(Math.trunc(value)));
+}
+
+/**
+ * The audit entry carries the payment id, not the amount. When that payment is
+ * still the board's current record and the step touched one slot, show its
+ * amount with the leg's direction. Older, multi-slot, or superseded steps keep
+ * just the id, leg, slot, and role.
+ */
+function formatAuditAmount(amount: bigint, role: string): string | null {
+  if (role !== "debit" && role !== "credit") return null;
+  const magnitude = amount < 0n ? -amount : amount;
+  const signed = role === "debit" ? -magnitude : magnitude;
+  const text = formatCents(signed);
+  if (role === "credit" && signed >= 0n) return `+${text}`;
+  return text.replace("-", "−");
+}
+
+function setAutoAdvanceFact(element: HTMLElement, text: string, title = ""): void {
+  element.textContent = text;
+  if (title === "") element.removeAttribute("title");
+  else element.title = title;
+}
+
+function renderAutoAdvance(): void {
+  const status = autoAdvanceStatus;
+  const online = boardStatus === "ready";
+  const available = delegateControls.available;
+  const controllable = delegateControls.controllable;
+
+  let reason: string | null = null;
+  if (isOffline) {
+    reason =
+      "The offline preview has no local component, so background payments are unavailable here.";
+  } else if (!available) {
+    reason =
+      "This build cannot read the local component's payment status, so these controls are off.";
+  } else if (!online) {
+    reason =
+      boardStatus === "disconnected"
+        ? "Reconnect to this node to change background payments."
+        : "Background payments are available once this node is connected.";
+  } else if (status === null) {
+    reason =
+      autoAdvanceRefreshError === null
+        ? "The local component has not reported a status yet."
+        : `Could not read the status: ${autoAdvanceRefreshError}`;
+  } else if (!status.configured) {
+    reason =
+      "The local component is not set up for this board, so it has nothing to advance. It is configured when your own board opens on this node with the current component.";
+  } else if (!controllable) {
+    reason =
+      "This build can show background payments but cannot change them.";
+  }
+
+  const canEdit =
+    reason === null &&
+    status !== null &&
+    status.configured &&
+    !autoAdvanceSaving;
+  autoAdvanceToggle.disabled = !canEdit;
+  autoAdvanceMax.disabled = !canEdit;
+  autoAdvanceSave.disabled = !canEdit;
+  autoAdvanceSave.textContent = autoAdvanceSaving
+    ? "Saving…"
+    : autoAdvanceDirty
+      ? "Save changes"
+      : "Save";
+  if (autoAdvanceSaving) autoAdvanceForm.setAttribute("aria-busy", "true");
+  else autoAdvanceForm.removeAttribute("aria-busy");
+
+  autoAdvanceReason.hidden = reason === null;
+  autoAdvanceReason.textContent = reason ?? "";
+  autoAdvanceReason.dataset.tone =
+    status === null && autoAdvanceRefreshError !== null ? "warning" : "muted";
+
+  autoAdvanceRefresh.disabled =
+    isOffline || !available || autoAdvanceRefreshing || autoAdvanceSaving;
+  autoAdvanceRefresh.title = autoAdvanceRefreshing
+    ? "Refreshing…"
+    : autoAdvanceRefresh.disabled
+      ? (reason ?? "Status cannot be refreshed right now.")
+      : "Ask the local component for its current status.";
+
+  let badgeLabel = "Checking…";
+  let badgeState = "checking";
+  let badgeTitle = "Waiting for the local component.";
+  if (isOffline) {
+    badgeLabel = "Unavailable";
+    badgeState = "unavailable";
+    badgeTitle = "The offline preview does not run the local component.";
+  } else if (!available) {
+    badgeLabel = "Unavailable";
+    badgeState = "unavailable";
+    badgeTitle = "This build has no background payment status.";
+  } else if (!autoAdvanceStatusReceived) {
+    badgeTitle = "No status has arrived yet.";
+  } else if (status === null) {
+    badgeLabel = "Unavailable";
+    badgeState = "unavailable";
+    badgeTitle = autoAdvanceRefreshError ?? "The local component did not report a status.";
+  } else if (!status.configured) {
+    badgeLabel = "Not set up";
+    badgeState = "not-configured";
+    badgeTitle = "The local component has no owner address for this board.";
+  } else if (isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash)) {
+    badgeLabel = "Stale";
+    badgeState = "stale";
+    badgeTitle =
+      "The component's contract build does not match this board, so it cannot find this board's payments.";
+  } else if (status.autoAdvance) {
+    badgeLabel = "On";
+    badgeState = "on";
+    badgeTitle =
+      "The component may sign the next leg while this node runs. It can take minutes and is not a guarantee.";
+  } else {
+    badgeLabel = "Off";
+    badgeState = "off";
+    badgeTitle = "Auto-advance is off; each leg waits for its owner.";
+  }
+  autoAdvanceBadge.textContent = badgeLabel;
+  autoAdvanceBadge.dataset.state = badgeState;
+  autoAdvanceBadge.title = badgeTitle;
+
+  if (!autoAdvanceDirty && status !== null) {
+    autoAdvanceToggle.checked = status.autoAdvance;
+    const nextMax = autoAdvanceMaxText(status.maxAmount);
+    if (autoAdvanceMax.value !== nextMax) autoAdvanceMax.value = nextMax;
+  }
+
+  setAutoAdvanceFact(
+    autoAdvanceState,
+    status === null
+      ? autoAdvanceStatusReceived
+        ? "Not reported"
+        : "Checking…"
+      : status.configured
+        ? "Configured"
+        : "Not configured",
+  );
+
+  if (status !== null && status.matchedCodeHash !== null) {
+    setAutoAdvanceFact(
+      autoAdvanceHash,
+      shorten(status.matchedCodeHash, 6, 4),
+      status.matchedCodeHash,
+    );
+  } else {
+    setAutoAdvanceFact(
+      autoAdvanceHash,
+      "—",
+      status?.configured
+        ? "The local component did not report a matching code hash."
+        : "",
+    );
+  }
+
+  if (status !== null && status.address !== null) {
+    const address = status.address === "" ? "root" : status.address;
+    setAutoAdvanceFact(
+      autoAdvanceAddress,
+      address,
+      status.address === ""
+        ? "This board is a root (empty octal address)."
+        : `Octal address ${status.address}`,
+    );
+  } else {
+    setAutoAdvanceFact(autoAdvanceAddress, "—");
+  }
+
+  const scan = formatScanCount(status === null ? null : status.lastScan);
+  setAutoAdvanceFact(autoAdvanceScan, scan.text, scan.title);
+
+  if (status === null) {
+    setAutoAdvanceFact(autoAdvanceSubs, "—");
+  } else {
+    const count = status.subscriptions.length;
+    setAutoAdvanceFact(
+      autoAdvanceSubs,
+      count === 0 ? "None yet" : `${count} board${count === 1 ? "" : "s"}`,
+      count === 0
+        ? "No board subscriptions reported."
+        : `Subscribed to ${count} board instance${count === 1 ? "" : "s"}.`,
+    );
+  }
+
+  const stale =
+    status !== null &&
+    isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash);
+  autoAdvanceStale.hidden = !stale;
+  autoAdvanceStale.textContent = stale
+    ? "The local component's contract build does not match this board. It cannot see this board's payments, so enabling auto-advance will not move anything until both are on the same build."
+    : "";
+  detailsAttention.hidden = !stale;
+  if (stale) {
+    detailsSummary.setAttribute(
+      "aria-label",
+      "Details, background payments need attention",
+    );
+    detailsSummary.title =
+      "Background payments are using a different contract build than this board.";
+  } else {
+    detailsSummary.removeAttribute("aria-label");
+    detailsSummary.removeAttribute("title");
+  }
+
+  const lastError = status === null ? null : status.lastError;
+  autoAdvanceLastError.hidden = lastError === null;
+  if (lastError !== null) {
+    autoAdvanceLastError.textContent = `Last problem: ${autoAdvanceErrorText(lastError)}`;
+    autoAdvanceLastError.title = lastError;
+  } else {
+    autoAdvanceLastError.textContent = "";
+    autoAdvanceLastError.removeAttribute("title");
+  }
+
+  const actions =
+    status === null
+      ? []
+      : status.audit.slice(-AUTO_ADVANCE_AUDIT_LIMIT).reverse();
+  const activePayment = ownState?.payments.entry ?? null;
+  autoAdvanceAudit.replaceChildren();
+  for (const action of actions) {
+    const item = document.createElement("li");
+    item.className = "auto-advance-audit-item";
+
+    const label = document.createElement("span");
+    label.className = "auto-advance-audit-text";
+    if (action.id === "") {
+      label.append(document.createTextNode("Advanced a payment"));
+    } else {
+      label.append(document.createTextNode("Advanced payment "));
+      const code = document.createElement("code");
+      code.textContent = shorten(action.id, 4, 4);
+      code.title = action.id;
+      label.append(code);
+    }
+
+    const details: string[] = [`leg ${action.cursor}`];
+    if (action.slots.length === 1) {
+      details.push(`slot ${action.slots[0]}`);
+    } else if (action.slots.length > 1) {
+      details.push(`slots ${action.slots.join(", ")}`);
+    }
+    const amount =
+      activePayment !== null &&
+      activePayment.id === action.id &&
+      action.slots.length === 1
+        ? formatAuditAmount(activePayment.amount, action.role)
+        : null;
+    if (amount !== null) details.push(amount);
+    else if (action.role !== "") details.push(action.role);
+    label.append(document.createTextNode(`, ${details.join(", ")}`));
+
+    if (action.role !== "") {
+      item.title =
+        action.role === "debit"
+          ? "A debit on this board."
+          : action.role === "credit"
+            ? "A credit on this board."
+            : action.role;
+    }
+
+    item.append(label);
+    autoAdvanceAudit.append(item);
+  }
+
+  autoAdvanceAudit.hidden = actions.length === 0;
+  autoAdvanceAuditEmpty.hidden = actions.length > 0;
+  autoAdvanceAuditEmpty.textContent =
+    status === null
+      ? "No status from the local component yet."
+      : "No advances yet. An entry appears here after the component signs a leg.";
+}
+
+async function refreshAutoAdvanceStatus(announceResult = false): Promise<void> {
+  if (isOffline || !delegateControls.available) {
+    autoAdvanceStatusReceived = true;
+    autoAdvanceRefreshError = null;
+    autoAdvanceStatus = null;
+    renderAutoAdvance();
+    if (announceResult) {
+      announce(
+        isOffline
+          ? "Background payment status is unavailable in the offline preview."
+          : "This build has no background payment status.",
+      );
+    }
+    return;
+  }
+
+  const request = ++autoAdvanceRefreshRequest;
+  autoAdvanceRefreshing = true;
+  renderAutoAdvance();
+  try {
+    const next = await delegateControls.refresh();
+    if (request !== autoAdvanceRefreshRequest) return;
+    autoAdvanceStatusReceived = true;
+    autoAdvanceRefreshError = null;
+    autoAdvanceStatus = next;
+    if (announceResult) {
+      announce(
+        next === null
+          ? "The local component did not report a background payment status."
+          : "Background payment status checked.",
+      );
+    }
+  } catch (error) {
+    if (request !== autoAdvanceRefreshRequest) return;
+    autoAdvanceStatusReceived = true;
+    autoAdvanceStatus = null;
+    autoAdvanceRefreshError = errorMessage(error);
+    if (announceResult) {
+      announce(
+        `Could not read background payment status: ${autoAdvanceRefreshError}`,
+      );
+    }
+  } finally {
+    if (request === autoAdvanceRefreshRequest) {
+      autoAdvanceRefreshing = false;
+      renderAutoAdvance();
+    }
+  }
+}
+
+function showAutoAdvanceMaxWarning(message: string): void {
+  autoAdvanceMaxWarning.textContent = message;
+  autoAdvanceMaxWarning.hidden = false;
+  autoAdvanceMax.setAttribute("aria-invalid", "true");
+  autoAdvanceMax.focus();
+}
+
+function clearAutoAdvanceMaxWarning(): void {
+  if (autoAdvanceMaxWarning.hidden) return;
+  autoAdvanceMaxWarning.hidden = true;
+  autoAdvanceMaxWarning.textContent = "";
+  autoAdvanceMax.removeAttribute("aria-invalid");
+}
+
+async function handleAutoAdvanceSubmit(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  if (autoAdvanceSaving) return;
+
+  const status = autoAdvanceStatus;
+  if (
+    status === null ||
+    !status.configured ||
+    !delegateControls.controllable ||
+    boardStatus !== "ready" ||
+    isOffline
+  ) {
+    renderAutoAdvance();
+    return;
+  }
+
+  autoAdvanceMaxWarning.hidden = true;
+  autoAdvanceMaxWarning.textContent = "";
+  autoAdvanceMax.removeAttribute("aria-invalid");
+  autoAdvanceError.hidden = true;
+  autoAdvanceError.textContent = "";
+
+  let cents: bigint;
+  try {
+    if (autoAdvanceMax.value.trim() === "") {
+      throw new Error("Enter an amount, or 0 to remove the cap.");
+    }
+    cents = parseCents(autoAdvanceMax.value);
+  } catch (error) {
+    showAutoAdvanceMaxWarning(errorMessage(error));
+    return;
+  }
+  if (cents < 0n) {
+    showAutoAdvanceMaxWarning("Enter zero or a positive amount.");
+    return;
+  }
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) {
+    showAutoAdvanceMaxWarning("That amount is too large.");
+    return;
+  }
+
+  const enabled = autoAdvanceToggle.checked;
+  const maxAmount = Number(cents);
+  autoAdvanceSaving = true;
+  renderAutoAdvance();
+
+  try {
+    await delegateControls.setAutoAdvance(enabled, maxAmount);
+    autoAdvanceDirty = false;
+    if (autoAdvanceStatus !== null) {
+      autoAdvanceStatus = { ...autoAdvanceStatus, autoAdvance: enabled, maxAmount };
+    }
+    announce(
+      `Background payments saved. Auto-advance is ${enabled ? "on" : "off"} with a maximum of ${formatCents(cents)} per payment.`,
+    );
+    void refreshAutoAdvanceStatus();
+  } catch (error) {
+    autoAdvanceDirty = true;
+    autoAdvanceError.textContent = errorMessage(error);
+    autoAdvanceError.hidden = false;
+    announce(`Could not save background payments: ${errorMessage(error)}`);
+  } finally {
+    autoAdvanceSaving = false;
+    renderAutoAdvance();
+  }
+}
+
 function clearPaymentMessages(): void {
   paymentWarning.hidden = true;
   paymentWarning.textContent = "";
@@ -1517,6 +2035,7 @@ function paintStatus(detail?: string): void {
   // The payment panel depends on the ready state; a status transition must
   // repaint it even when no state/identity callback follows.
   void renderPayments();
+  renderAutoAdvance();
 }
 
 function setStatus(next: BoardStatus, detail?: string): void {
@@ -1532,6 +2051,10 @@ function setStatus(next: BoardStatus, detail?: string): void {
   }
 
   paintStatus(detail);
+
+  if (next === "ready" && previous !== "ready") {
+    void refreshAutoAdvanceStatus();
+  }
 
   if (next === "disconnected" && previous === "ready") {
     showNotice(
@@ -2211,11 +2734,20 @@ const callbacks: BoardCallbacks = {
   onWarning: (message) => {
     showNotice("warning", "Notice", message);
   },
+  onDelegateStatus: (status) => {
+    delegateStatusFromCallback = status;
+    autoAdvanceStatusReceived = true;
+    autoAdvanceRefreshError = null;
+    autoAdvanceStatus = status;
+    renderAutoAdvance();
+  },
 };
 
 const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
+
+const delegateControls = createDelegateControls(backend);
 
 const paymentDeps: PaymentDeps = {
   readBoard: (id) => readBoardForView(id),
@@ -2391,6 +2923,28 @@ paymentCheck.addEventListener("click", () => {
   // Force the status/inbox read to look past the session cache.
   boardCache.clear();
   void renderPayments();
+});
+detailsBox.addEventListener("toggle", () => {
+  if (detailsBox.open) void refreshAutoAdvanceStatus();
+});
+autoAdvanceForm.addEventListener("submit", (event) => {
+  void handleAutoAdvanceSubmit(event);
+});
+autoAdvanceToggle.addEventListener("change", () => {
+  autoAdvanceDirty = true;
+  if (!autoAdvanceSaving) autoAdvanceSave.textContent = "Save changes";
+  autoAdvanceError.hidden = true;
+  autoAdvanceError.textContent = "";
+});
+autoAdvanceMax.addEventListener("input", () => {
+  autoAdvanceDirty = true;
+  if (!autoAdvanceSaving) autoAdvanceSave.textContent = "Save changes";
+  clearAutoAdvanceMaxWarning();
+  autoAdvanceError.hidden = true;
+  autoAdvanceError.textContent = "";
+});
+autoAdvanceRefresh.addEventListener("click", () => {
+  void refreshAutoAdvanceStatus(true);
 });
 paymentWithdraw.addEventListener("click", () => {
   void (async () => {

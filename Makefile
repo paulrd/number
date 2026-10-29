@@ -19,7 +19,7 @@ CONTRACT := contract
 DELEGATE := delegate
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-network node-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -91,6 +91,19 @@ node-network:
 node-isolated:
 	mkdir -p $(ISOLATED_NODE_ROOT)/data $(ISOLATED_NODE_ROOT)/config $(ISOLATED_NODE_ROOT)/logs
 	$(FREENET) local \
+	  --ws-api-port $(ISOLATED_WS_PORT) \
+	  --network-port $(ISOLATED_NETWORK_PORT) \
+	  --data-dir $(ISOLATED_NODE_ROOT)/data \
+	  --config-dir $(ISOLATED_NODE_ROOT)/config \
+	  --log-dir $(ISOLATED_NODE_ROOT)/logs
+
+# Second network-mode node, on the isolated ports/dirs. Use this with
+# `node-network` for a two-owner tree/payment test: both nodes must be in
+# network mode, otherwise neither fetches nor publishes the other's contracts.
+# Point a second UI at http://127.0.0.1:$(ISOLATED_WS_PORT).
+node-network-isolated:
+	mkdir -p $(ISOLATED_NODE_ROOT)/data $(ISOLATED_NODE_ROOT)/config $(ISOLATED_NODE_ROOT)/logs
+	$(FREENET) network \
 	  --ws-api-port $(ISOLATED_WS_PORT) \
 	  --network-port $(ISOLATED_NETWORK_PORT) \
 	  --data-dir $(ISOLATED_NODE_ROOT)/data \

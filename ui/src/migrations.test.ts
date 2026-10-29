@@ -138,6 +138,17 @@ describe("migration registry", () => {
     }
   });
 
+  it("registers the v7 delegate before the v8 re-key", () => {
+    // Verified against published/manifest.json (recorded v7 generation) and
+    // DELEGATE_VERSION = 7 in delegate/src/lib.rs. The v8 key/code hash are
+    // build-injected and must never be hardcoded here.
+    expect(LEGACY_DELEGATES).toContainEqual({
+      key: "6FN3m31BPRFVjFdKVDE4jNReq6cfon4mXFcpdmaaBEv1",
+      codeHash: "48A8jNz39wP1xx5oLRUvRgG8qxjxzmfkErCZp4j7kRhw",
+      webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+    });
+  });
+
   it("keeps every superseded generation registered", () => {
     const registeredContracts = [
       ...LEGACY_CONTRACT_CODE_HASHES,
