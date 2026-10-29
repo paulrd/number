@@ -2,6 +2,8 @@
 
 Date: 2026-10-29
 Node: `freenet 0.2.151 (39773c33c870)`, build `2026-10-27T17:03:07Z`
+
+Filed upstream: <https://github.com/freenet/freenet-core/issues/6039>
 Observed on `:7509`, `:7511`, `:7512`, `:7513` (four network nodes on one VPS).
 
 ## Summary
