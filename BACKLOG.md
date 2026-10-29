@@ -541,7 +541,8 @@ the Atlas operator to crawl it.
 - **Upstream remains:** a node whose shell lacks the permission overlay gives
   the user an install that waits on an unrendered prompt. The node should
   render it (the app correctly cannot self-grant; the prompt is node-authored).
-  Evidence and repro: `reports/upstream-background-grant-prompt.md`.
+  Evidence and repro: `reports/upstream-background-grant-prompt.md`;
+  filed as freenet/freenet-core#6039.
 - Deployed 2026-10-29: all four nodes serve
   `index-CBpG3i3c.js` (the detection UI, the #23 delegate key, #24 stuck state and #26 route warning).
 
@@ -717,11 +718,11 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 - `bfc1141` rerunnable live smoke (#25)
 - `ee70b3f` warn on a non-leaf board that cannot advance (#26); UI 199 tests
 
-`published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
-`4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
+`published/` records the v5 contract (`5YKH…`) and delegate `8G5M9…` / code
+`3PoWy…`; `make check-artifacts` proves the bytes. The live four-node bed is
 described above. All four nodes hold the Background grant and scan; `node
-ui/e2e/readiness.mjs` reports all READY. Open items: #22 (upstream shell
-prompt), #23–#26; #15 is blocked externally. The working tree is clean; the
+ui/e2e/readiness.mjs` reports all READY. Open items: #22 (filed upstream as
+freenet-core#6039; blocked on a node release); #15 is blocked externally. The working tree is clean; the
 ad-hoc probes were deleted after the smoke.
 
 Earlier history: the v3 tree change is `a95ca9e`, the header merge `88e7602`,
