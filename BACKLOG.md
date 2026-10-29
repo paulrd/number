@@ -519,7 +519,7 @@ site is live and now usable by a fresh node, but not listed (searching "number"
 or the contract id returns 0). Revisit when Atlas ships self-submission, or ask
 the Atlas operator to crawl it.
 
-### #22 — Background grant is not requested on a fresh node
+### #22 — Background grant prompt is not rendered by the node shell
 
 - A (`:7511`, node2) never scanned: `lastScan=0`, no subscriptions, even after a
   node restart. B (`:7512`, node3) scanned every ~5 minutes. The node gates
@@ -541,6 +541,7 @@ the Atlas operator to crawl it.
 - **Upstream remains:** a node whose shell lacks the permission overlay gives
   the user an install that waits on an unrendered prompt. The node should
   render it (the app correctly cannot self-grant; the prompt is node-authored).
+  Evidence and repro: `reports/upstream-background-grant-prompt.md`.
 - Deployed 2026-10-29: all four nodes serve
   `index-bmuisITe.js` (the detection UI).
 
