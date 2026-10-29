@@ -40,7 +40,11 @@ owner `4e7a…`; C `:7513` child at `03`, owner `06e6…`; D `:7509` was child a
 `01` for the smoke, now a root again, owner `3f84…`. B's slots hold C `90.00`
 (slot 3) and D `110.00` (slot 1) after the payment. All four nodes hold the
 number app's Background grant and scan: A was re-granted first, then D
-(`pass 4`); `node ui/e2e/readiness.mjs` reports all four READY.
+(`pass 4`); `node ui/e2e/readiness.mjs` reports all four READY. Link audit:
+the parent tree is acyclic (A root; B→A; C→B; D root). Live slots are A→B
+and B→C; B slot 1 names D (110.00) and D slots 0/5 name B (11.00) and A
+(45.40), but none of those parents point back, so they are stale references
+(including a B↔D slot cycle, not a parent/route cycle). `links.mjs` reports it.
 
 
 Website signing key: backed up in KeePass, synced across four devices. The
@@ -698,6 +702,7 @@ FREENET_BASE_URL=http://127.0.0.1:7510/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4
 make verify-merge
 # live nodes (through the SSH forwards): grants, addresses, scans, subscriptions
 node ui/e2e/readiness.mjs
+node ui/e2e/links.mjs   # parent tree + slot references, cycle detection
 ```
 
 ## Working tree
