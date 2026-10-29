@@ -715,6 +715,7 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 - `130ec53` stale own-board refresh (#23); delegate `8G5M9…`
 - `5d88595` stuck payment status (#24); UI 199 tests
 - `bfc1141` rerunnable live smoke (#25)
+- `ee70b3f` warn on a non-leaf board that cannot advance (#26); UI 199 tests
 
 `published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
 `4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
