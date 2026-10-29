@@ -3,6 +3,7 @@ import {
   actorStep,
   commonPrefixLength,
   isOctalAddress,
+  isStuckForeignRecord,
   paymentId,
   planRoute,
 } from "./payments";
@@ -144,5 +145,58 @@ describe("paymentId", () => {
     expect(paymentId(SRC, 3, DST, 1250n)).toBe(a);
     expect(paymentId(SRC, 3, DST, 1251n)).not.toBe(a);
     expect(paymentId(SRC, 4, DST, 1250n)).not.toBe(a);
+  });
+});
+
+
+describe("isStuckForeignRecord", () => {
+  const OWNER = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const SOURCE = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  it("flags a non-source forward record when the network copy is terminal", () => {
+    expect(
+      isStuckForeignRecord(
+        { phase: "forward", src: SOURCE },
+        { phase: "terminal" },
+        OWNER,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not flag a source's expected offered copy", () => {
+    expect(
+      isStuckForeignRecord(
+        { phase: "forward", src: OWNER },
+        { phase: "terminal" },
+        OWNER,
+      ),
+    ).toBe(false);
+  });
+
+  it("is not stuck while the progressed copy is still forward", () => {
+    expect(
+      isStuckForeignRecord(
+        { phase: "forward", src: SOURCE },
+        { phase: "forward" },
+        OWNER,
+      ),
+    ).toBe(false);
+  });
+
+  it("is not stuck when the own record is already terminal", () => {
+    expect(
+      isStuckForeignRecord(
+        { phase: "terminal", src: SOURCE },
+        { phase: "terminal" },
+        OWNER,
+      ),
+    ).toBe(false);
+  });
+
+  it("is not stuck without an own or progressed record", () => {
+    expect(isStuckForeignRecord(null, { phase: "terminal" }, OWNER)).toBe(false);
+    expect(
+      isStuckForeignRecord({ phase: "forward", src: SOURCE }, null, OWNER),
+    ).toBe(false);
   });
 });

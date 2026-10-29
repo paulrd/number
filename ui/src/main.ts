@@ -21,6 +21,7 @@ import {
   describeRoute,
   findIncoming,
   isOctalAddress,
+  isStuckForeignRecord,
   paymentProgress,
   planPayment,
   planRoute,
@@ -1373,6 +1374,7 @@ function paintPaymentStatus(display: PaymentEntry): void {
   const badge = PAYMENT_BADGES[display.status];
   paymentStatusBadge.textContent = badge.label;
   paymentStatusBadge.dataset.state = badge.state;
+  paymentStatusBadge.removeAttribute("title");
   // The card and the badge both key their colour off the status.
   paymentStatus.dataset.state = badge.state;
 
@@ -1414,6 +1416,27 @@ function paintPaymentStatus(display: PaymentEntry): void {
   if (display.next !== ZERO_PAYMENT_OWNER) {
     detail += ` Waiting for ${paymentOwnerLabel(display.next)}.`;
   }
+  paymentStatusDetail.textContent = detail;
+  paymentStatus.hidden = false;
+}
+
+/**
+ * The progressed view is settled but this board's own record is still a
+ * non-terminal payment it did not source. Painting "Complete" here hides the
+ * fact that the board cannot sign anything until the record is cleared.
+ */
+function paintStuckPayment(entry: PaymentEntry, display: PaymentEntry): void {
+  const detail = `A later copy of this payment is ${display.status}, but this board's own record is still pending. Clear it to continue.`;
+  paymentStatusBadge.textContent = "Stuck";
+  paymentStatusBadge.dataset.state = "stuck";
+  paymentStatusBadge.title = `${detail} The delegate reports Busy for this board until the record is cleared.`;
+  paymentStatus.dataset.state = "stuck";
+  paymentStatusTitle.textContent = `${formatCents(entry.amount)} along ${paymentAddresses(entry)}`;
+  const route = planRoute(entry.srcAddr, entry.dstAddr);
+  const routeText =
+    "error" in route ? paymentAddresses(entry) : describeRoute(route);
+  paymentStatusRoute.textContent = routeText;
+  paymentStatusRoute.title = routeText;
   paymentStatusDetail.textContent = detail;
   paymentStatus.hidden = false;
 }
@@ -1540,6 +1563,7 @@ async function renderPayments(): Promise<void> {
   // A settled payment (complete/reversed/blocked/superseded) no longer blocks a
   // new one, even though the source's own copy may still be the offered record.
   const active = display !== null && display.phase !== "terminal";
+  const stuck = isStuckForeignRecord(entry, display, own.ownerId);
   const canWithdraw =
     entry !== null &&
     entry.src === own.ownerId &&
@@ -1554,18 +1578,24 @@ async function renderPayments(): Promise<void> {
     typeof backend.clearStuckPayment === "function";
   paymentClear.hidden = !canClear;
   paymentClear.disabled = busy || navigating;
-  paymentOpen.disabled = busy || navigating || active || isRoot;
-  paymentOpen.title = active
-    ? "This board already has a payment in progress."
-    : isRoot
-      ? "A root has no parent edge to debit, so it cannot send a payment."
-      : "Send a payment along the board tree.";
+  paymentClear.title = stuck
+    ? "Clear this board's stuck payment record; the network copy is already settled."
+    : "Clear this board's payment record.";
+  paymentOpen.disabled = busy || navigating || active || stuck || isRoot;
+  paymentOpen.title = stuck
+    ? "Clear this board's stuck payment record before starting another payment."
+    : active
+      ? "This board already has a payment in progress."
+      : isRoot
+        ? "A root has no parent edge to debit, so it cannot send a payment."
+        : "Send a payment along the board tree.";
   // Refreshing the inbox is read-only; never lock it behind an in-flight
   // write or navigation. Clicking it clears the cache and repaints.
   paymentCheck.disabled = false;
   paymentCheck.title = "Refresh the payment status and inbox.";
 
   if (display === null) paymentStatus.hidden = true;
+  else if (stuck && entry !== null) paintStuckPayment(entry, display);
   else paintPaymentStatus(display);
 
   let incoming: IncomingPayment[];

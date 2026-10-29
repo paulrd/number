@@ -29,7 +29,7 @@ peer; the live test identity opens the v3 contract as a root board.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-rK-NuId8.js` |
+| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-DK_anGpc.js` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -503,7 +503,7 @@ frame.
   `ContractNotification` cache, with a regression test.
 - Artifacts: contract `5YKH…` (unchanged), delegate `Fwgf…` / code `4ems…`;
   `5C2s…` is the registered legacy generation, so seeds and counters migrate.
-- Verification: contract 116, delegate 53, UI 190, 321 merge cases,
+- Verification: contract 116, delegate 53, UI 195, 321 merge cases,
   `make check-artifacts` OK, 9 offline e2e. Live smoke 2026-10-29 with B as the
   LCA: C `90.00`, D `110.00`, B audit `leg 2, slots 3, 1, lca`, C payment
   `Complete 10.00 along 03 → 01`; D restored to root afterwards.
@@ -543,7 +543,7 @@ the Atlas operator to crawl it.
   render it (the app correctly cannot self-grant; the prompt is node-authored).
   Evidence and repro: `reports/upstream-background-grant-prompt.md`.
 - Deployed 2026-10-29: all four nodes serve
-  `index-rK-NuId8.js` (the detection UI and the #23 delegate key).
+  `index-DK_anGpc.js` (the detection UI, the #23 delegate key and the #24 stuck state).
 
 ### #23 — A stale committed copy still beats the network
 
@@ -574,8 +574,16 @@ the Atlas operator to crawl it.
 - `paymentProgress` follows `next` to a terminal copy on another board, so the
   card showed "Complete 1.00…" while B's own record was still forward and
   `plan_leg` returned `Busy`. The Clear action existed but was easy to miss.
-- Next: show the raw record's state (stuck) and keep Clear visible whenever the
-  raw entry is non-terminal, independent of the progressed display.
+- Fixed:
+  - `isStuckForeignRecord` distinguishes a stuck non-source forward record from
+    a source's expected offered copy after settlement.
+  - The status card paints a distinct **Stuck** badge/state with the raw
+    record's amount and route, says a later copy is settled, and points at
+    Clear. "Make a payment" is disabled with the same explanation.
+  - Clear stays visible whenever the raw entry is non-terminal; its title
+    explains when the network copy is already settled.
+  - Five new tests (195 UI tests).
+- Deployed in `index-DK_anGpc.js` to all four nodes; readiness is READY.
 
 ### #25 — Live smoke preconditions are stateful
 

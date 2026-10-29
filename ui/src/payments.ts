@@ -82,6 +82,30 @@ export function isTerminalPhase(entry: PaymentEntry): boolean {
   return entry.phase === "terminal" && entry.next === ZERO_OWNER;
 }
 
+/**
+ * True when the progressed view is terminal but this board's own record is a
+ * non-terminal payment it did not source.
+ *
+ * A source's own record legitimately stays `offered` after the payment
+ * settles: the source signs no leg, and the settled copy lives downstream. But
+ * a non-source board with a forward record is stuck: the network copy says the
+ * payment is over while this board still holds a blocking entry, so `plan_leg`
+ * reports Busy and the board cannot act. That record has to be cleared.
+ */
+export function isStuckForeignRecord(
+  ownEntry: Pick<PaymentEntry, "phase" | "src"> | null,
+  display: Pick<PaymentEntry, "phase"> | null,
+  ownOwnerId: string,
+): boolean {
+  return (
+    ownEntry !== null &&
+    ownEntry.src !== ownOwnerId &&
+    ownEntry.phase !== "terminal" &&
+    display !== null &&
+    display.phase === "terminal"
+  );
+}
+
 export type RouteError =
   | "invalid-address"
   | "same-address"

@@ -3217,6 +3217,12 @@ body:has(#delegate-install[open]) {
   color: var(--faint);
 }
 
+.state-badge[data-state="stuck"] {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
 .state-badge[data-state="stale"] {
   border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
   background: var(--warning-soft);
@@ -3894,6 +3900,14 @@ body:has(#contacts-dialog[open]) {
 
   border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
   background: color-mix(in srgb, var(--danger-soft) 38%, var(--surface-raised));
+}
+
+.payment-status[data-state="stuck"] {
+  --status-mark: var(--warning);
+
+  border-left-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--border));
+  background: color-mix(in srgb, var(--warning-soft) 36%, var(--surface-raised));
 }
 
 .payment-status[data-state="blocked"] {
