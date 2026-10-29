@@ -588,9 +588,14 @@ the Atlas operator to crawl it.
 ### #25 — Live smoke preconditions are stateful
 
 - `ui/e2e/live-smoke-b.mjs` expects B to hold 100.00 against C and D; after a
-  pass it holds 90.00/110.00. Rerunning needs a reset (issue/burn back) or a
-  documented precondition/skip flag. The harness now clears a stuck B record
-  before offering.
+  pass it holds 90.00/110.00. Rerunning needed a reset or a documented
+  precondition.
+- Resolved: after the address check proves B's slots 3 and 1 are C and D, the
+  harness clears a stuck B record and any pending C offer, then resets both
+  slots to 100.00 with the v5 issue/burn controls. A rerun from the 90.00/110.00
+  state passed end to end (reset → pay 10.00 → 90.00/110.00, LCA audit, D back
+  to root), so the reset also exercises the adjustment path. The header
+  documents the behaviour.
 
 ### #26 — Warn when a non-leaf board cannot auto-advance
 

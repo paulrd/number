@@ -5,12 +5,12 @@ import { chromium } from "playwright";
  *
  * Topology: A (7511) root; B (7512) child of A at address "0"; C (7513) child
  * of B at slot 3 ("03") and D (7509) child of B at slot 1 ("01"). B holds
- * 100.00 against each. C pays D 10.00 at address "1". B's tab is closed before
+ * 100.00 against each. C pays D 10.00 at address "01". B's tab is closed before
  * the payment, so only B's background delegate may apply the paired LCA delta:
  * C 90.00, D 110.00, and B's audit non-empty.
  *
- * This is the original topology; B's stale payment (the only blocker recorded
- * in HANDOFF.md) was cleared afterwards, so B is usable again.
+ * A previous run leaves B at 90.00/110.00. The harness resets both slots to
+ * 100.00 with v5 issue/burn before each run, so it is rerunnable.
  *
  * Run from ui/: node e2e/live-smoke-b.mjs
  */
@@ -218,6 +218,36 @@ async function clearParent(node) {
   await sleep(1_200);
 }
 
+async function currentCents(node) {
+  const text = await node.app.locator("#adjust-current").textContent().catch(() => "0.00");
+  return Math.round(Number((text ?? "0.00").replace(/,/g, "")) * 100);
+}
+
+async function adjustTo(node, slot, targetCents, note) {
+  const { app } = node;
+  await app.locator(".slot").nth(slot).click();
+  await waitFor(app, "#editor", 10_000);
+  const current = await currentCents(node);
+  if (current === targetCents) {
+    await app.locator("#cancel-button").click();
+    await waitGone(app, "#editor", 10_000);
+    return;
+  }
+  const delta = targetCents - current;
+  if (delta < 0) await app.locator("#adjust-burn").check();
+  await app.locator("#adjust-amount").fill((Math.abs(delta) / 100).toFixed(2));
+  if (note) await app.locator("#adjust-note").fill(note);
+  await app.locator("#adjust-submit").click();
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const text = await app.locator("#adjust-status").textContent().catch(() => "");
+    if (text && text.trim().length > 0) break;
+    await sleep(250);
+  }
+  await app.locator("#cancel-button").click();
+  await waitGone(app, "#editor", 10_000);
+}
+
 async function clearStuckIfNeeded(node) {
   const { app } = node;
   // renderPayments is async: the Clear control only appears after the payment
@@ -351,8 +381,9 @@ try {
   await ensureContact(D, "B-lca", B.pubkey);
   await ensureContact(C, "D-destination", D.pubkey);
 
-  // C already points at B (address 03) and B already holds 100.00 on slots 3
-  // (C) and 1 (D). Only D's parent link is missing.
+  // C already points at B (address 03); D's parent link is the only topology
+  // change needed. B's slots 3 and 1 must name C and D; the address check below
+  // proves that before we touch the values.
   await setParent(D, B.pubkey);
 
   for (const node of [B, C, D]) await reload(node);
@@ -363,19 +394,26 @@ try {
   if (bAddr !== "0" || cAddr !== "03" || dAddr !== "01") {
     throw new Error(`unexpected addresses: B=${JSON.stringify(bAddr)} C=${JSON.stringify(cAddr)} D=${JSON.stringify(dAddr)}`);
   }
+
+  // A previous run leaves B at 90.00/110.00. Reset the precondition with the
+  // same v5 issue/burn the UI exposes, so the smoke is rerunnable.
+  await withdrawOffer(C);
+  await adjustTo(B, 3, 10_000, "smoke reset to C");
+  await adjustTo(B, 1, 10_000, "smoke reset to D");
+  for (const node of [B, C, D]) await reload(node);
+
   for (const node of [C, D]) {
     const amount = (await node.app.locator("#parent-value-amount").textContent().catch(() => "?")).trim();
     console.log(`[topology] ${node.node.name} liability=${amount}`);
     if (amount !== "100.00") throw new Error(`${node.node.name} liability is ${amount}, expected 100.00`);
   }
 
-  await withdrawOffer(C);
   await offerPayment(C, "01", D.pubkey, "10.00");
   console.log("[payment] offered 10.00 from C to D at address 01");
   console.log("[payment] closing B's tab; only B's background delegate may act");
   await B.page.close();
 
-  const status = await waitUntil(
+  await waitUntil(
     "the payment to complete",
     async () => {
       const current = await paymentStatus(C);
@@ -392,7 +430,7 @@ try {
     console.log("[debug] B delegate", JSON.stringify(await delegateFacts(B2)));
     throw error;
   });
-  console.log(`[payment] final: ${status}`);
+  console.log("[payment] complete");
 
   await reload(C);
   await reload(D);
