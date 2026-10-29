@@ -14,11 +14,17 @@
 import { blake3 } from "@noble/hashes/blake3";
 import { deriveInstanceIdFromBytes, encodeBase58 } from "./freenet";
 import {
+  I64_MAX,
+  MAX_ADJUSTMENTS,
   emptyState,
   mergeDelta,
+  optionalText,
+  validateAdjustment,
+  validateAdjustmentList,
   validateContactList,
   validateEntry,
   validatePaymentEntry,
+  type Adjustment,
   type Contact,
   type Delta,
   type DeltaSlot,
@@ -110,6 +116,23 @@ function mockPaymentsSignature(
   return bytesToHex(bytes);
 }
 
+function mockAdjustmentsSignature(seq: number, entries: Adjustment[]): string {
+  const body = JSON.stringify({
+    seq,
+    entries: entries.map((entry) => ({
+      slot: entry.slot,
+      slotSeq: entry.slotSeq,
+      delta: entry.delta.toString(),
+      postValue: entry.postValue.toString(),
+      note: entry.note,
+    })),
+  });
+  const bytes = new Uint8Array(64);
+  bytes.set(digest(`number:offline:adjustments:0:${body}`), 0);
+  bytes.set(digest(`number:offline:adjustments:1:${body}`), 32);
+  return bytesToHex(bytes);
+}
+
 /**
  * Fixture owner ids for the offline tree. Both are stable across reloads so the
  * e2e suite can reference them, and neither is the own (mock) owner.
@@ -150,6 +173,7 @@ export class OfflineBoard implements BoardBackend {
       contactsNextSeq: 1,
       parentNextSeq: 1,
       paymentsNextSeq: 1,
+      adjustmentsNextSeq: 1,
     };
     this.contractKeyBase58 = deriveInstanceIdFromBytes(
       this.codeHashBytes,
@@ -212,7 +236,7 @@ export class OfflineBoard implements BoardBackend {
         this.identity.contactsNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: {
           seq,
@@ -220,6 +244,7 @@ export class OfflineBoard implements BoardBackend {
           sig: mockContactsSignature(seq, validated),
         },
         payments: null,
+        adjustments: null,
         slots: [],
       };
 
@@ -261,10 +286,11 @@ export class OfflineBoard implements BoardBackend {
         this.identity.parentNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: { seq, userId, sig: mockParentSignature(seq, userId) },
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [],
       };
 
@@ -369,7 +395,7 @@ export class OfflineBoard implements BoardBackend {
       const settled = nextSettled(this.currentState.payments, signedEntry);
 
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: {
@@ -378,6 +404,7 @@ export class OfflineBoard implements BoardBackend {
           entry: signedEntry,
           sig: mockPaymentsSignature(paymentsSeq, settled, signedEntry),
         },
+        adjustments: null,
         slots: deltaSlots,
       };
 
@@ -388,6 +415,93 @@ export class OfflineBoard implements BoardBackend {
       this.callbacks.onIdentity(this.snapshotIdentity());
       this.callbacks.onState(this.currentState);
       return signedEntry;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /**
+   * Issue (positive delta) or burn (negative delta) one slot's liability with
+   * deterministic mock signatures. Mirrors `OnlineBoard.issueOrBurn`: the slot
+   * write and the capped v5 adjustment log travel in one delta, and the slot's
+   * contact/unit/note are preserved. There is no real delegate in offline mode,
+   * so the record gets a synthetic 128-hex signature the UI can render.
+   */
+  async issueOrBurn(
+    slotIndex: number,
+    delta: bigint,
+    note: string,
+  ): Promise<void> {
+    if (!this.started || !this.currentState) {
+      throw new Error("Offline board is not ready yet");
+    }
+    if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
+      throw new Error(`slot must be in 0..7, got ${slotIndex}`);
+    }
+    if (typeof delta !== "bigint" || delta === 0n) {
+      throw new Error("delta must be a non-zero bigint (hundredths).");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    const slot = this.currentState.slots[slotIndex];
+    if (slot.entry === null) {
+      throw new Error("Cannot issue or burn an empty slot.");
+    }
+
+    const newValue = slot.entry.value + delta;
+    if (newValue < 0n) {
+      throw new Error("A burn cannot take the slot below zero.");
+    }
+    if (newValue > I64_MAX) {
+      throw new Error("The new value does not fit in a signed 64-bit integer.");
+    }
+
+    const slotSeq = Math.max(
+      slot.seq + 1,
+      this.identity.nextSeq[slotIndex] ?? 1,
+    );
+    const adjustment = validateAdjustment({
+      slot: slotIndex,
+      slotSeq,
+      delta,
+      postValue: newValue,
+      note: optionalText(note),
+    });
+    const entries = [...this.currentState.adjustments.entries, adjustment];
+    const capped =
+      entries.length > MAX_ADJUSTMENTS
+        ? entries.slice(entries.length - MAX_ADJUSTMENTS)
+        : entries;
+    validateAdjustmentList(capped);
+
+    this.mutating = true;
+    try {
+      await delay(70);
+      const entry: Entry = { ...slot.entry, value: newValue };
+      const sig = mockSignature(slotIndex, slotSeq, entry);
+      const adjustmentsSeq = Math.max(
+        this.currentState.adjustments.seq + 1,
+        this.identity.adjustmentsNextSeq ?? 1,
+      );
+      const deltaRecord: Delta = {
+        v: 5,
+        parent: null,
+        contacts: null,
+        payments: null,
+        adjustments: {
+          seq: adjustmentsSeq,
+          entries: capped,
+          sig: mockAdjustmentsSignature(adjustmentsSeq, capped),
+        },
+        slots: [{ i: slotIndex, seq: slotSeq, entry, sig }],
+      };
+
+      this.currentState = mergeDelta(this.currentState, deltaRecord);
+      this.identity.nextSeq[slotIndex] = slotSeq + 1;
+      this.identity.adjustmentsNextSeq = adjustmentsSeq + 1;
+
+      this.callbacks.onIdentity(this.snapshotIdentity());
+      this.callbacks.onState(this.currentState);
     } finally {
       this.mutating = false;
     }
@@ -437,6 +551,7 @@ export class OfflineBoard implements BoardBackend {
       contactsNextSeq: this.identity.contactsNextSeq,
       parentNextSeq: this.identity.parentNextSeq,
       paymentsNextSeq: this.identity.paymentsNextSeq ?? 1,
+      adjustmentsNextSeq: this.identity.adjustmentsNextSeq ?? 1,
     };
   }
 
@@ -555,10 +670,11 @@ export class OfflineBoard implements BoardBackend {
       const seq = Math.max(this.currentState.slots[slotIndex].seq + 1, nextSeq);
       const sig = mockSignature(slotIndex, seq, entry);
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 

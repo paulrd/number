@@ -6,14 +6,20 @@ import {
   I64_MIN,
   LEGACY_STATE_VERSION,
   LIMITS,
+  MAX_ADJUSTMENTS,
+  MAX_ADJUSTMENT_NOTE_BYTES,
   MAX_CONTACTS,
   StateError,
+  V4_STATE_VERSION,
+  adjustmentsDigest16,
+  adjustmentsSigningBytes,
   computeDelta,
   contactsDigest16,
   contactsSigningBytes,
   decodeDelta,
   decodeState,
   decodeSummary,
+  emptyAdjustments,
   emptyContacts,
   emptyParent,
   emptyPayments,
@@ -24,6 +30,7 @@ import {
   entryFromInputs,
   formatCents,
   isI64,
+  mergeAdjustments,
   mergeContacts,
   mergeDelta,
   mergeParent,
@@ -39,6 +46,8 @@ import {
   slotDigest16,
   stateWarnings,
   summaryFromState,
+  validateAdjustment,
+  validateAdjustments,
   validateContacts,
   validateDelta,
   validateEntry,
@@ -47,6 +56,8 @@ import {
   validatePayments,
   validateState,
   validateSummary,
+  type Adjustment,
+  type Adjustments,
   type Contact,
   type ContactsRecord,
   type Entry,
@@ -113,6 +124,21 @@ const GOLDEN_PAYMENTS_BYTES_2 =
   "0123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
 const GOLDEN_PAYMENTS_DIGEST_2 = "9b1419ef01132905668a238ad95e3456";
 
+// DESIGN-v4.1-v5 §Pass 2: v5 adjustments signing bytes, seq 1 with one entry
+// (slot 1, slotSeq 4, delta +100, postValue 3750, note "issue"). Cross-pinned
+// with the contract/delegate lane's adjustments_signing_bytes.
+const GOLDEN_ADJUSTMENTS_BYTES =
+  "6e756d6265723a76353a61646a7573746d656e7473" + // "number:v5:adjustments"
+  "0100000000000000" + // seq 1
+  "01000000" + // count
+  "01" + // slot 1
+  "0400000000000000" + // slotSeq 4
+  "6400000000000000" + // delta +100
+  "a60e000000000000" + // postValue 3750
+  "05000000" + // note length
+  "6973737565"; // "issue"
+const GOLDEN_ADJUSTMENTS_DIGEST16 = "3ee15da20e9d1ce05d7478122818bf0e";
+
 function payment(
   overrides: Partial<PaymentEntry> = {},
 ): PaymentEntry {
@@ -137,6 +163,23 @@ function payments(
   overrides: Partial<PaymentsRecord> = {},
 ): PaymentsRecord {
   return { seq: 0, settled: [], entry: null, sig: null, ...overrides };
+}
+
+function adjustment(overrides: Partial<Adjustment> = {}): Adjustment {
+  return {
+    slot: 1,
+    slotSeq: 4,
+    delta: 100n,
+    postValue: 3750n,
+    note: "issue",
+    ...overrides,
+  };
+}
+
+function adjustments(
+  overrides: Partial<Adjustments> = {},
+): Adjustments {
+  return { seq: 0, entries: [], sig: null, ...overrides };
 }
 
 function entry(value: number | bigint, overrides: Partial<Entry> = {}): Entry {
@@ -257,6 +300,61 @@ describe("golden vectors (spec §2.5)", () => {
     expect(paymentsDigest16(emptyPayments())).toBe("0".repeat(32));
   });
 
+  it("matches the contract lane's v5 adjustment golden vectors", () => {
+    // Cross-pin: contract/adjustments_golden_vector.txt.
+    const case1 = [
+      adjustment({ slot: 1, slotSeq: 4, delta: 500n, postValue: 3750n, note: "issue" }),
+      adjustment({ slot: 3, slotSeq: 5, delta: -250n, postValue: 1000n, note: null }),
+    ];
+    expect(bytesToHex(adjustmentsSigningBytes(6, case1))).toBe(
+      "6e756d6265723a76353a61646a7573746d656e7473" +
+        "0600000000000000" +
+        "02000000" +
+        "01" +
+        "0400000000000000" +
+        "f401000000000000" +
+        "a60e000000000000" +
+        "05000000" +
+        "6973737565" +
+        "03" +
+        "0500000000000000" +
+        "06ffffffffffffff" +
+        "e803000000000000" +
+        "00000000",
+    );
+    expect(adjustmentsDigest16({ seq: 6, entries: case1, sig: SIG_A })).toBe(
+      "77e51bf4156a440a0dd97456f350918a",
+    );
+
+    const case2 = [
+      adjustment({ slot: 0, slotSeq: 1, delta: 7n, postValue: 7n, note: null }),
+    ];
+    expect(bytesToHex(adjustmentsSigningBytes(1, case2))).toBe(
+      "6e756d6265723a76353a61646a7573746d656e7473" +
+        "0100000000000000" +
+        "01000000" +
+        "00" +
+        "0100000000000000" +
+        "0700000000000000" +
+        "0700000000000000" +
+        "00000000",
+    );
+    expect(adjustmentsDigest16({ seq: 1, entries: case2, sig: SIG_A })).toBe(
+      "33a936e304f242accf347d520f5f616c",
+    );
+  });
+
+  it("builds the exact v5 adjustments signing bytes and digest16", () => {
+    const entries = [adjustment()];
+    expect(bytesToHex(adjustmentsSigningBytes(1, entries))).toBe(
+      GOLDEN_ADJUSTMENTS_BYTES,
+    );
+    expect(
+      adjustmentsDigest16({ seq: 1, entries, sig: SIG_A }),
+    ).toBe(GOLDEN_ADJUSTMENTS_DIGEST16);
+    expect(adjustmentsDigest16(emptyAdjustments())).toBe("0".repeat(32));
+  });
+
   it("signs a payments tombstone at seq > 0 with tag 0", () => {
     expect(bytesToHex(paymentsSigningBytes(3, [], null))).toBe(
       "6e756d6265723a76343a7061796d656e7473" +
@@ -280,7 +378,7 @@ describe("golden vectors (spec §2.5)", () => {
 });
 
 describe("state encode/decode", () => {
-  it("round-trips the exact v4 state shape, including tombstones", () => {
+  it("round-trips the exact v5 state shape, including tombstones", () => {
     const state = stateWith(
       {
         0: { seq: 0, entry: null, sig: null },
@@ -298,9 +396,10 @@ describe("state encode/decode", () => {
     expect(decodeState(encoded)).toEqual(state);
 
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(4);
+    expect(json.v).toBe(5);
     expect(json.parent).toEqual(emptyParent());
     expect(json.payments).toEqual(emptyPayments());
+    expect(json.adjustments).toEqual(emptyAdjustments());
     expect(json.contacts).toEqual({
       seq: 2,
       entries: [{ label: "Alice", userId: CONTACT_A }],
@@ -317,10 +416,11 @@ describe("state encode/decode", () => {
 
   it("normalises absent value and empty optional strings", () => {
     const state = validateState({
-      v: 4,
+      v: 5,
       parent: emptyParent(),
       contacts: { seq: 0, entries: [], sig: null },
       payments: emptyPayments(),
+      adjustments: emptyAdjustments(),
       slots: emptyState().slots.map((slot, index) => {
         if (index === 2) {
           return { seq: 1, entry: { contact: CONTACT_A }, sig: SIG_A };
@@ -354,10 +454,11 @@ describe("state encode/decode", () => {
 
   it("round-trips delta and summary encodings with contacts", () => {
     const delta = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
       payments: null,
+      adjustments: null,
       slots: [
         { i: 2, seq: 4, entry: entry(8, { unit: "kg" }), sig: SIG_C },
         { i: 5, seq: 9, entry: null, sig: SIG_A },
@@ -372,10 +473,11 @@ describe("state encode/decode", () => {
       ),
     );
     expect(decodeSummary(encodeSummary(summary))).toEqual(summary);
-    expect(summary.v).toBe(4);
+    expect(summary.v).toBe(5);
     expect(summary.parent).toEqual([0, "0".repeat(32)]);
     expect(summary.contacts).toEqual([1, GOLDEN_CONTACTS_DIGEST16]);
     expect(summary.payments).toEqual([0, "0".repeat(32)]);
+    expect(summary.adjustments).toEqual([0, "0".repeat(32)]);
     expect(summary.slots).toHaveLength(8);
     expect(summary.slots[0]).toEqual([0, "0".repeat(32)]);
     expect(summary.slots[3][1]).toBe(GOLDEN_SLOT_DIGEST16);
@@ -383,8 +485,8 @@ describe("state encode/decode", () => {
 
   it("accepts an absent or null delta contacts record", () => {
     for (const raw of [
-      { v: 4, slots: [] },
-      { v: 4, parent: null, contacts: null, slots: [] },
+      { v: 5, slots: [] },
+      { v: 5, parent: null, contacts: null, slots: [] },
     ]) {
       expect(validateDelta(raw).contacts).toBeNull();
       expect(validateDelta(raw).payments).toBeNull();
@@ -398,27 +500,30 @@ describe("state encode/decode", () => {
     ).toThrow(/state\.v/);
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots,
       }),
     ).toThrow(/state\.contacts/);
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots.slice(0, 7),
       }),
     ).toThrow(/exactly 8/);
     expect(() =>
       validateDelta({
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [
           { i: 1, seq: 1, entry: entry(1), sig: SIG_A },
           { i: 1, seq: 2, entry: entry(2), sig: SIG_B },
@@ -427,36 +532,38 @@ describe("state encode/decode", () => {
     ).toThrow(/duplicate/);
     expect(() =>
       validateSummary({
-        v: 4,
+        v: 5,
         parent: [0, "0".repeat(32)],
         contacts: [0, "0".repeat(32)],
         payments: [0, "0".repeat(32)],
+        adjustments: [0, "0".repeat(32)],
         slots: [],
       }),
     ).toThrow(/exactly 8/);
     expect(() =>
-      validateSummary({ v: 4, slots: [] }),
+      validateSummary({ v: 5, slots: [] }),
     ).toThrow(/summary\.parent/);
   });
 });
 
-describe("v2/v3 → v4 upgrade", () => {
-  it("normalises a v2 state to v4 with empty parent and payments", () => {
+describe("v2/v3/v4 → v5 upgrade", () => {
+  it("normalises a v2 state to v5 with empty parent and payments", () => {
     const v2 = {
       v: LEGACY_STATE_VERSION,
       contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
       slots: emptyState().slots,
     };
     const upgraded = validateState(v2);
-    expect(upgraded.v).toBe(4);
+    expect(upgraded.v).toBe(5);
     expect(upgraded.parent).toEqual(emptyParent());
     expect(upgraded.payments).toEqual(emptyPayments());
+    expect(upgraded.adjustments).toEqual(emptyAdjustments());
     expect(upgraded.contacts).toEqual(v2.contacts);
 
     // A v2 state's slot/contacts signatures are unchanged, so encoding writes
-    // the same records under v4.
+    // the same records under v5.
     const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(4);
+    expect(json.v).toBe(5);
     expect(json.parent).toEqual({ seq: 0, userId: null, sig: null });
     expect(json.payments).toEqual({
       seq: 0,
@@ -464,10 +571,11 @@ describe("v2/v3 → v4 upgrade", () => {
       entry: null,
       sig: null,
     });
+    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
     expect(json.contacts).toEqual(v2.contacts);
   });
 
-  it("normalises a v3 state to v4 with an empty payments record", () => {
+  it("normalises a v3 state to v5 with empty payments and adjustments", () => {
     const v3 = {
       v: 3,
       parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
@@ -475,19 +583,58 @@ describe("v2/v3 → v4 upgrade", () => {
       slots: emptyState().slots,
     };
     const upgraded = validateState(v3);
-    expect(upgraded.v).toBe(4);
+    expect(upgraded.v).toBe(5);
     expect(upgraded.parent).toEqual(v3.parent);
     expect(upgraded.payments).toEqual(emptyPayments());
+    expect(upgraded.adjustments).toEqual(emptyAdjustments());
     expect(upgraded.contacts).toEqual(v3.contacts);
 
     const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(4);
+    expect(json.v).toBe(5);
     expect(json.payments).toEqual({
       seq: 0,
       settled: [],
       entry: null,
       sig: null,
     });
+    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
+  });
+
+  it("normalises a v4 state to v5 with an empty adjustments record", () => {
+    const v4 = {
+      v: V4_STATE_VERSION,
+      parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
+      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+      payments: payments({ seq: 1, entry: payment(), sig: SIG_B }),
+      slots: emptyState().slots,
+    };
+    const upgraded = validateState(v4);
+    expect(upgraded.v).toBe(5);
+    expect(upgraded.parent).toEqual(v4.parent);
+    expect(upgraded.payments).toEqual(v4.payments);
+    expect(upgraded.adjustments).toEqual(emptyAdjustments());
+    expect(upgraded.contacts).toEqual(v4.contacts);
+
+    // A v4 signature set stays valid: only an empty adjustments record is added.
+    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
+    expect(json.v).toBe(5);
+    expect(json.payments.seq).toBe(1);
+    expect(json.payments.sig).toBe(SIG_B);
+    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
+    expect(json.contacts).toEqual(v4.contacts);
+  });
+
+  it("rejects a v4 state that already carries an adjustments record", () => {
+    expect(() =>
+      validateState({
+        v: V4_STATE_VERSION,
+        parent: emptyParent(),
+        contacts: emptyContacts(),
+        payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
+        slots: emptyState().slots,
+      }),
+    ).toThrow(/v4 state must not carry an adjustments record/);
   });
 
   it("rejects a v2 state that carries a parent", () => {
@@ -508,6 +655,7 @@ describe("v2/v3 → v4 upgrade", () => {
       validateState({
         v: LEGACY_STATE_VERSION,
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         contacts: emptyContacts(),
         slots: emptyState().slots,
       }),
@@ -517,6 +665,7 @@ describe("v2/v3 → v4 upgrade", () => {
         v: 3,
         parent: emptyParent(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         contacts: emptyContacts(),
         slots: emptyState().slots,
       }),
@@ -532,9 +681,10 @@ describe("v2/v3 → v4 upgrade", () => {
     ).toThrow(/state\.parent/);
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots,
       }),
     ).toThrow(/state\.parent/);
@@ -586,7 +736,7 @@ describe("parent codec", () => {
 });
 
 describe("parent in state, delta, summary, merge", () => {
-  it("round-trips a v4 state with a parent", () => {
+  it("round-trips a v5 state with a parent", () => {
     const state = stateWith(
       { 0: { seq: 1, entry: entry(5), sig: SIG_A } },
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
@@ -594,7 +744,7 @@ describe("parent in state, delta, summary, merge", () => {
     );
     const encoded = encodeState(state);
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(4);
+    expect(json.v).toBe(5);
     expect(json.parent).toEqual({
       seq: 4,
       userId: CONTACT_B,
@@ -634,10 +784,11 @@ describe("parent in state, delta, summary, merge", () => {
     expect(computeDelta(theirs, ours).parent).toBeNull();
     expect(computeDelta(ours, ours).parent).toBeNull();
     expect(computeDelta(emptyState(), emptyState())).toEqual({
-      v: 4,
+      v: 5,
       parent: null,
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [],
     });
   });
@@ -663,10 +814,11 @@ describe("parent in state, delta, summary, merge", () => {
       sig: SIG_A,
     });
     const delta = {
-      v: 4 as const,
+      v: 5 as const,
       parent: { seq: 3, userId: CONTACT_B, sig: SIG_B },
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [],
     };
     expect(decodeDelta(encodeDelta(delta))).toEqual(delta);
@@ -675,10 +827,11 @@ describe("parent in state, delta, summary, merge", () => {
     expect(next.parent).toEqual(delta.parent);
 
     const stale = {
-      v: 4 as const,
+      v: 5 as const,
       parent: { seq: 1, userId: null, sig: SIG_C },
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [],
     };
     expect(mergeDelta(next, stale).parent).toEqual(delta.parent);
@@ -988,10 +1141,11 @@ describe("merge determinism", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
     );
     const delta = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_C }),
       payments: null,
+      adjustments: null,
       slots: [],
     };
     const next = mergeDelta(base, delta);
@@ -999,10 +1153,11 @@ describe("merge determinism", () => {
     expect(next.slots).toEqual(base.slots);
 
     const stale = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: contacts({ seq: 1, entries: [contact("Old", CONTACT_A)], sig: SIG_A }),
       payments: null,
+      adjustments: null,
       slots: [],
     };
     expect(mergeDelta(next, stale).contacts).toEqual(delta.contacts);
@@ -1011,19 +1166,21 @@ describe("merge determinism", () => {
   it("treats a repeated delta as a no-op and lets stale slots lose", () => {
     const base = stateWith({ 0: { seq: 2, entry: entry(2), sig: SIG_B } });
     const stale = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [{ i: 0, seq: 1, entry: entry(1), sig: SIG_A }],
     };
     expect(mergeDelta(base, stale)).toEqual(base);
 
     const fresh = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [{ i: 0, seq: 3, entry: entry(3), sig: SIG_C }],
     };
     const once = mergeDelta(base, fresh);
@@ -1041,15 +1198,16 @@ describe("delta filtering", () => {
       contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
     );
     expect(computeDelta(state, state)).toEqual({
-      v: 4,
+      v: 5,
       parent: null,
       contacts: null,
       payments: null,
+      adjustments: null,
       slots: [],
     });
     expect(
       JSON.parse(new TextDecoder().decode(encodeDelta(computeDelta(state, state)))),
-    ).toEqual({ v: 4, parent: null, contacts: null, payments: null, slots: [] });
+    ).toEqual({ v: 5, parent: null, contacts: null, payments: null, adjustments: null, slots: [] });
   });
 
   it("includes contacts when ours is newer, otherwise leaves them null", () => {
@@ -1347,10 +1505,11 @@ describe("payments record", () => {
     expect(decodeState(encoded).payments).toEqual(record);
 
     const delta = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: null,
       payments: record,
+      adjustments: null,
       slots: [],
     };
     expect(decodeDelta(encodeDelta(delta)).payments).toEqual(record);
@@ -1376,10 +1535,11 @@ describe("payments record", () => {
     expect(decodeState(encodeState(state)).payments).toEqual(record);
 
     const delta = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: null,
       payments: record,
+      adjustments: null,
       slots: [],
     };
     const decoded = decodeDelta(encodeDelta(delta));
@@ -1497,13 +1657,189 @@ describe("payments record", () => {
     expect(computeDelta(ours, ours).payments).toBeNull();
 
     const stale = {
-      v: 4 as const,
+      v: 5 as const,
       parent: null,
       contacts: null,
       payments: payments({ seq: 3, entry: null, sig: SIG_B }),
+      adjustments: null,
       slots: [],
     };
     expect(mergeDelta(ours, stale).payments).toEqual(ours.payments);
+  });
+});
+
+describe("v5 adjustments codec, merge and delta", () => {
+  it("round-trips adjustments in a state, delta and summary", () => {
+    const record = adjustments({
+      seq: 2,
+      entries: [
+        adjustment({ slot: 0, slotSeq: 2, delta: 500n, postValue: 500n, note: null }),
+        adjustment({ slot: 0, slotSeq: 3, delta: -200n, postValue: 300n, note: "burn" }),
+      ],
+      sig: SIG_A,
+    });
+    const state = stateWith({});
+    state.adjustments = record;
+
+    expect(decodeState(encodeState(state)).adjustments).toEqual(record);
+
+    const delta = {
+      v: 5 as const,
+      parent: null,
+      contacts: null,
+      payments: null,
+      adjustments: record,
+      slots: [],
+    };
+    expect(decodeDelta(encodeDelta(delta)).adjustments).toEqual(record);
+    expect(mergeDelta(emptyState(), delta).adjustments).toEqual(record);
+
+    const summary = summaryFromState(state);
+    expect(summary.adjustments).toEqual([2, adjustmentsDigest16(record)]);
+    expect(decodeSummary(encodeSummary(summary)).adjustments).toEqual(
+      summary.adjustments,
+    );
+  });
+
+  it("merges adjustments by seq then signature bytes", () => {
+    const low = adjustments({
+      seq: 1,
+      entries: [adjustment({ slotSeq: 1, postValue: 100n })],
+      sig: SIG_A,
+    });
+    const high = adjustments({
+      seq: 2,
+      entries: [adjustment({ slotSeq: 2, postValue: 200n })],
+      sig: SIG_A,
+    });
+    expect(mergeAdjustments(low, high)).toEqual(high);
+    expect(mergeAdjustments(high, low)).toEqual(high);
+
+    const sigB = { ...high, sig: SIG_B };
+    expect(mergeAdjustments(high, sigB)).toEqual(sigB);
+    expect(mergeAdjustments(sigB, high)).toEqual(sigB);
+  });
+
+  it("includes adjustments in computeDelta only when ours is newer or diverged", () => {
+    const ours = stateWith({});
+    ours.adjustments = adjustments({
+      seq: 3,
+      entries: [adjustment()],
+      sig: SIG_A,
+    });
+    const theirs = stateWith({});
+
+    expect(computeDelta(ours, theirs).adjustments).toEqual(ours.adjustments);
+    expect(computeDelta(theirs, ours).adjustments).toBeNull();
+    expect(computeDelta(ours, ours).adjustments).toBeNull();
+
+    const stale = {
+      v: 5 as const,
+      parent: null,
+      contacts: null,
+      payments: null,
+      adjustments: adjustments({ seq: 2, sig: SIG_B }),
+      slots: [],
+    };
+    expect(mergeDelta(ours, stale).adjustments).toEqual(ours.adjustments);
+  });
+
+  it("enforces adjustment bounds without cross-checking slots", () => {
+    expect(() => validateAdjustment(adjustment({ slot: 8 }))).toThrow(/slot/);
+    expect(() => validateAdjustment(adjustment({ slotSeq: 0 }))).toThrow(
+      /slotSeq/,
+    );
+    expect(() => validateAdjustment(adjustment({ delta: 0n }))).toThrow(
+      /delta/,
+    );
+    expect(() => validateAdjustment(adjustment({ postValue: -1n }))).toThrow(
+      /postValue/,
+    );
+    expect(() =>
+      validateAdjustment(adjustment({ delta: 10n, postValue: 5n })),
+    ).toThrow(/pre-value/);
+    expect(() =>
+      validateAdjustment(
+        adjustment({ note: "n".repeat(MAX_ADJUSTMENT_NOTE_BYTES + 1) }),
+      ),
+    ).toThrow(/128-byte limit/);
+    expect(() =>
+      validateAdjustments({
+        seq: 1,
+        entries: [
+          adjustment({ slotSeq: 2 }),
+          adjustment({ slotSeq: 2, postValue: 3900n }),
+        ],
+        sig: SIG_A,
+      }),
+    ).toThrow(/duplicate/);
+    expect(() =>
+      validateAdjustments({
+        seq: 1,
+        entries: [
+          adjustment({ slotSeq: 3 }),
+          adjustment({ slotSeq: 2, postValue: 3900n }),
+        ],
+        sig: SIG_A,
+      }),
+    ).toThrow(/increase/);
+    expect(() =>
+      validateAdjustments({
+        seq: 0,
+        entries: [adjustment()],
+        sig: null,
+      }),
+    ).toThrow(/seq 0 must have no adjustments/);
+
+    // Deliberately mismatched with the slot table: the log is merge-invariant
+    // and must validate even when a slot write from another delta is absent.
+    const state = validateState({
+      v: 5,
+      parent: emptyParent(),
+      contacts: emptyContacts(),
+      payments: emptyPayments(),
+      adjustments: {
+        seq: 1,
+        entries: [adjustment({ slot: 7, slotSeq: 99, postValue: 1n, delta: 1n })],
+        sig: SIG_A,
+      },
+      slots: emptyState().slots,
+    });
+    expect(state.adjustments.entries[0].slotSeq).toBe(99);
+  });
+
+  it("requires a v5 state to carry an adjustments record", () => {
+    expect(() =>
+      validateState({
+        v: 5,
+        parent: emptyParent(),
+        contacts: emptyContacts(),
+        payments: emptyPayments(),
+        slots: emptyState().slots,
+      }),
+    ).toThrow(/state\.adjustments/);
+  });
+
+  it("caps the log at MAX_ADJUSTMENTS entries", () => {
+    const entries = Array.from({ length: MAX_ADJUSTMENTS }, (_, index) =>
+      adjustment({
+        slot: 0,
+        slotSeq: index + 1,
+        delta: 1n,
+        postValue: BigInt(index + 1),
+        note: null,
+      }),
+    );
+    expect(
+      validateAdjustments({ seq: 1, entries, sig: SIG_A }).entries,
+    ).toHaveLength(MAX_ADJUSTMENTS);
+    expect(() =>
+      validateAdjustments({
+        seq: 1,
+        entries: [...entries, adjustment({ slot: 0, slotSeq: 33 })],
+        sig: SIG_A,
+      }),
+    ).toThrow(/at most 32/);
   });
 });
 
@@ -1534,10 +1870,11 @@ describe("bounds and invariants", () => {
   it("enforces slot seq-0 and signature invariants atomically", () => {
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: entry(1), sig: null } : slot,
         ),
@@ -1546,10 +1883,11 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 0, entry: null, sig: SIG_A } : slot,
         ),
@@ -1558,10 +1896,11 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: null } : slot,
         ),
@@ -1570,10 +1909,11 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateState({
-        v: 4,
+        v: 5,
         parent: emptyParent(),
         contacts: emptyContacts(),
         payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
         slots: emptyState().slots.map((slot, index) =>
           index === 0 ? { seq: 1, entry: entry(1), sig: "A".repeat(128) } : slot,
         ),
@@ -1582,10 +1922,11 @@ describe("bounds and invariants", () => {
 
     expect(() =>
       validateDelta({
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [{ i: 8, seq: 1, entry: entry(1), sig: SIG_A }],
       }),
     ).toThrow(/0\.\.7/);

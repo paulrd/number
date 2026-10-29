@@ -7,9 +7,10 @@
     "repoRoot": "/build"
   },
   "contract": {
-    "codeHash": "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
+    "codeHash": "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
     "file": "published/contract/number_contract.wasm",
     "generations": [
+      "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
       "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
       "6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57",
       "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",

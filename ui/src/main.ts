@@ -31,11 +31,13 @@ import {
 } from "./payments";
 import {
   formatCents,
+  I64_MAX,
   MAX_CONTACTS,
   parseCents,
   SLOT_COUNT,
   stateWarnings,
   validateEntry,
+  type Adjustment,
   type Contact,
   type Entry,
   type StateV3,
@@ -54,7 +56,7 @@ import {
   type LinkState,
   type TrailStep,
 } from "./tree-view";
-import { errorMessage, hexToBytes, shorten } from "./util";
+import { errorMessage, hexToBytes, shorten, utf8Length } from "./util";
 
 const isOffline = __OFFLINE_MODE__;
 
@@ -141,9 +143,19 @@ const boardAddressNote = byId<HTMLElement>("board-address-note");
 const parentValueBox = byId<HTMLElement>("parent-value");
 const parentValueBoard = byId<HTMLElement>("parent-value-board");
 const parentValueSlot = byId<HTMLElement>("parent-value-slot");
+const parentValueState = byId<HTMLElement>("parent-value-state");
+const parentValueFigure = byId<HTMLParagraphElement>("parent-value-figure");
 const parentValueAmount = byId<HTMLElement>("parent-value-amount");
 const parentValueUnit = byId<HTMLElement>("parent-value-unit");
+const parentValueChange = byId<HTMLParagraphElement>("parent-value-change");
 const parentValueNote = byId<HTMLParagraphElement>("parent-value-note");
+const parentValueEmpty = byId<HTMLParagraphElement>("parent-value-empty");
+const parentAdjustments = byId<HTMLElement>("parent-adjustments");
+const parentAdjustmentsMeta = byId<HTMLElement>("parent-adjustments-meta");
+const parentAdjustmentsList = byId<HTMLOListElement>("parent-adjustments-list");
+const parentAdjustmentsEmpty = byId<HTMLParagraphElement>(
+  "parent-adjustments-empty",
+);
 const boardElement = byId<HTMLDivElement>("board");
 const boardHint = byId<HTMLParagraphElement>("board-hint");
 
@@ -153,8 +165,24 @@ const editorSlot = byId<HTMLSpanElement>("editor-slot");
 const editorTitle = byId<HTMLHeadingElement>("editor-title");
 const editorSeq = byId<HTMLParagraphElement>("editor-seq");
 const editorClose = byId<HTMLButtonElement>("editor-close");
-const valueInput = byId<HTMLInputElement>("value-input");
-const valueWarning = byId<HTMLParagraphElement>("value-warning");
+const adjustPanel = byId<HTMLElement>("adjust-panel");
+const adjustControls = byId<HTMLElement>("adjust-controls");
+const adjustChild = byId<HTMLElement>("adjust-child");
+const adjustStale = byId<HTMLParagraphElement>("adjust-stale");
+const adjustCurrent = byId<HTMLElement>("adjust-current");
+const adjustUnit = byId<HTMLElement>("adjust-unit");
+const adjustResult = byId<HTMLElement>("adjust-result");
+const adjustResultTag = byId<HTMLElement>("adjust-result-tag");
+const adjustDirection = byId<HTMLFieldSetElement>("adjust-direction");
+const adjustIssue = byId<HTMLInputElement>("adjust-issue");
+const adjustBurn = byId<HTMLInputElement>("adjust-burn");
+const adjustAmount = byId<HTMLInputElement>("adjust-amount");
+const adjustNote = byId<HTMLInputElement>("adjust-note");
+const adjustNoteCount = byId<HTMLElement>("adjust-note-count");
+const adjustWarning = byId<HTMLParagraphElement>("adjust-warning");
+const adjustSubmit = byId<HTMLButtonElement>("adjust-submit");
+const adjustStatus = byId<HTMLParagraphElement>("adjust-status");
+const adjustEmpty = byId<HTMLParagraphElement>("adjust-empty");
 const contactSelect = byId<HTMLSelectElement>("contact-select");
 const contactAdd = byId<HTMLButtonElement>("contact-add");
 const contactHint = byId<HTMLParagraphElement>("contact-hint");
@@ -213,6 +241,10 @@ interface ViewedBoard {
   isOwn: boolean;
 }
 
+/** Newest adjustments kept in the child's "Held by parent" band. */
+const CHILD_ADJUSTMENT_LIMIT = 4;
+const ADJUST_NOTE_BYTES = 128;
+
 const slotViews: SlotView[] = [];
 
 /** The viewer's own board, kept live even while another board is on screen. */
@@ -225,6 +257,8 @@ let contractKeyFull: string | null = null;
 let boardStatus: BoardStatus = "starting";
 let busy = false;
 let navigating = false;
+/** True while an adjustment is being signed, for the button's own label. */
+let adjusting = false;
 let currentSlot = 0;
 let currentChildId: string | null = null;
 let childLinkOpenable = false;
@@ -256,11 +290,12 @@ const nameCache = new Map<string, string | null>();
 const nameInflight = new Map<string, Promise<string | null>>();
 
 const OWN_BOARD_HINT =
-  "Select a slot to set its value, contact, unit, or note. Values show two " +
-  "decimal places, and a blank value saves as 0.00. Slots keep the contact's " +
-  "key, so renaming a label keeps the link. Every change is signed by the owner " +
-  "key and merged by the contract. Clearing a slot records that it was cleared, " +
-  "so an older copy cannot bring it back.";
+  "Select a slot to issue or burn the liability it holds for its child, or to " +
+  "change the contact, unit, or note. Amounts show two decimal places, and a " +
+  "burn cannot take a liability below 0.00. Slots keep the contact's key, so " +
+  "renaming a label keeps the link. Every change is signed by the owner key and " +
+  "merged by the contract. Clearing a slot records that it was cleared, so an " +
+  "older copy cannot bring it back.";
 
 const REMOTE_BOARD_HINT =
   "You are viewing another owner's board. It is read-only here, and only the " +
@@ -370,6 +405,28 @@ function contactsWithoutSelfOf(state: StateV3, ownerId: string): Contact[] {
   return state.contacts.entries.filter(
     (contact) => contact.userId !== ownerId,
   );
+}
+
+/**
+ * The backend's issue/burn method, or null when this build cannot sign
+ * adjustments (the offline preview). Callers turn null into an explained state
+ * instead of a dead button.
+ */
+type AdjustSigner = (
+  slotIndex: number,
+  delta: bigint,
+  note: string,
+) => Promise<void>;
+
+function adjustmentBackend(): AdjustSigner | null {
+  const method = backend.issueOrBurn;
+  return typeof method === "function" ? method.bind(backend) : null;
+}
+
+/** Signed two-decimal amount for a log row: +12.00 or -5.00. */
+function formatAdjustmentDelta(delta: bigint): string {
+  const magnitude = formatCents(delta < 0n ? -delta : delta);
+  return delta > 0n ? `+${magnitude}` : `-${magnitude}`;
 }
 
 function ownSnapshot(): BoardSnapshot | null {
@@ -836,24 +893,162 @@ function renderBoardAddress(): void {
 }
 
 /**
- * The value the parent board holds for this board. Shown only for a mutual
- * link whose readable parent has a signed entry in the matching slot.
+ * The value the parent board holds for this board, plus the parent's recent
+ * issue/burn entries for the slot that names this board. A board with no parent
+ * gets no band; its parent row says so instead.
  */
-function renderParentValue(): void {
-  const request = ++parentValueRequest;
-  const current = view;
-
+function resetParentValue(): void {
   parentValueBox.hidden = true;
+  parentValueBox.removeAttribute("data-state");
   parentValueBoard.textContent = "";
   parentValueBoard.removeAttribute("title");
   parentValueSlot.textContent = "";
+  parentValueSlot.removeAttribute("title");
+  parentValueState.hidden = true;
+  parentValueState.textContent = "";
+  parentValueState.removeAttribute("data-state");
+  parentValueState.removeAttribute("title");
+  parentValueFigure.hidden = true;
   parentValueAmount.textContent = "—";
   parentValueAmount.classList.remove("is-long", "is-xlong");
   parentValueUnit.textContent = "";
   parentValueUnit.hidden = true;
+  parentValueChange.hidden = true;
+  parentValueChange.removeAttribute("title");
   parentValueNote.textContent = "";
   parentValueNote.removeAttribute("title");
   parentValueNote.hidden = true;
+  parentValueEmpty.textContent = "";
+  parentValueEmpty.hidden = true;
+  parentAdjustments.hidden = true;
+  parentAdjustmentsMeta.textContent = "";
+  parentAdjustmentsEmpty.textContent = "";
+  parentAdjustmentsEmpty.hidden = true;
+  parentAdjustmentsList.replaceChildren();
+}
+
+function paintParentAmount(amount: string): void {
+  parentValueFigure.hidden = false;
+  parentValueAmount.textContent = amount;
+  parentValueAmount.classList.toggle(
+    "is-long",
+    amount.length > 10 && amount.length <= 15,
+  );
+  parentValueAmount.classList.toggle("is-xlong", amount.length > 15);
+}
+
+function parentEmptyExplanation(state: LinkState, label: string): string {
+  switch (state) {
+    case "pending":
+      return `${label} has not added this board yet, so no liability is recorded there.`;
+    case "not-created":
+      return `${label} has not opened number yet, so there is no board to hold a liability.`;
+    case "error":
+      return `${label}'s board could not be read, so the liability could not be checked.`;
+    case "root":
+      return "This board has no parent, so no board holds a liability for it.";
+    case "linked":
+      return `${label} has no slot for this board yet, so nothing is held here.`;
+  }
+}
+
+function adjustmentRow(entry: Adjustment): HTMLLIElement {
+  const row = createElement("li", "adjustment");
+  row.title = `Recorded at slot sequence ${entry.slotSeq}.`;
+
+  const issue = entry.delta > 0n;
+  const tag = createElement("span", "adjustment-tag", issue ? "Issue" : "Burn");
+  tag.dataset.dir = issue ? "issue" : "burn";
+
+  const amount = createElement(
+    "span",
+    "adjustment-amount",
+    formatAdjustmentDelta(entry.delta),
+  );
+
+  const copy = createElement("span", "adjustment-copy");
+  copy.append(
+    createElement(
+      "span",
+      "adjustment-after",
+      `Liability ${formatCents(entry.postValue)}`,
+    ),
+  );
+
+  const note = (entry.note ?? "").trim();
+  if (note !== "") {
+    const noteLine = createElement("span", "adjustment-note", note);
+    noteLine.title = note;
+    copy.append(noteLine);
+  }
+
+  row.append(tag, amount, copy);
+  return row;
+}
+
+/**
+ * The parent's log for one slot, newest first and bounded. A board on the
+ * previous version has no log at all, so it gets an explained empty state
+ * rather than a misleading "nothing yet".
+ */
+function renderParentAdjustments(options: {
+  state: StateV3;
+  slot: number;
+  slotSeq: number;
+  slotValue: bigint;
+  legacy: boolean;
+  parentLabel: string;
+}): void {
+  const { state, slot, slotSeq, slotValue, legacy, parentLabel } = options;
+
+  if (legacy) {
+    parentValueEmpty.textContent =
+      `${parentLabel} is on the previous version, which keeps no adjustment ` +
+      "log. Only the current value is shown.";
+    parentValueEmpty.hidden = false;
+    return;
+  }
+
+  const entries = state.adjustments.entries.filter(
+    (entry) => entry.slot === slot,
+  );
+  const latest = entries[entries.length - 1];
+  if (latest !== undefined && slotSeq > latest.slotSeq) {
+    // The log is only a hint: the slot was written again after it. Compare the
+    // values so a mere unit/note edit is not reported as a payment.
+    const valueMoved = slotValue !== latest.postValue;
+    parentValueChange.textContent = valueMoved
+      ? "Also changed by a payment since the latest adjustment."
+      : "Also written after the latest adjustment; the value itself is unchanged.";
+    parentValueChange.hidden = false;
+    parentValueChange.title =
+      "The parent's slot was written again after the latest adjustment. A " +
+      "payment, or an edit that kept the value, moves the slot sequence on.";
+  }
+
+  parentAdjustments.hidden = false;
+  if (entries.length === 0) {
+    parentAdjustmentsMeta.textContent = "";
+    parentAdjustmentsEmpty.textContent =
+      `${parentLabel} has not issued or burned anything in this slot yet.`;
+    parentAdjustmentsEmpty.hidden = false;
+    return;
+  }
+
+  parentAdjustmentsEmpty.hidden = true;
+  const recent = entries.slice(-CHILD_ADJUSTMENT_LIMIT).reverse();
+  parentAdjustmentsMeta.textContent =
+    entries.length > recent.length
+      ? `newest first · ${recent.length} of ${entries.length}`
+      : "newest first";
+  parentAdjustmentsList.replaceChildren(...recent.map(adjustmentRow));
+}
+
+function renderParentValue(): void {
+  const request = ++parentValueRequest;
+  const current = view;
+
+  resetParentValue();
 
   if (!current) return;
   const parentId = current.state.parent.userId;
@@ -862,29 +1057,41 @@ function renderParentValue(): void {
   const board = current.isOwn ? (ownSnapshot() ?? current) : current;
   void parentLink(board, linkDeps).then((info) => {
     if (request !== parentValueRequest || view !== current) return;
-    if (info.state !== "linked" || info.snapshot === null) return;
-
-    const value = parentValueFor(info.snapshot, board.ownerId);
-    if (value === null) return;
+    if (info.state === "root") return;
 
     const label = labelForOwner(
       parentId,
       [current.state.contacts.entries, ownContactsWithoutSelf()],
-      value.parentName,
+      info.snapshot ? selfNameOf(info.snapshot.state, parentId) : null,
     );
+
+    parentValueBox.hidden = false;
+    parentValueBox.dataset.state = info.state;
     parentValueBoard.textContent = label;
     parentValueBoard.title = parentId;
+
+    if (info.state !== "linked" || info.snapshot === null) {
+      parentValueState.hidden = false;
+      parentValueState.dataset.state = info.state;
+      parentValueState.textContent = LINK_LABELS[info.state];
+      parentValueState.title = LINK_TITLES[info.state];
+      parentValueEmpty.textContent = parentEmptyExplanation(info.state, label);
+      parentValueEmpty.hidden = false;
+      return;
+    }
+
+    const value = parentValueFor(info.snapshot, board.ownerId);
+    if (value === null) {
+      parentValueEmpty.textContent = parentEmptyExplanation("linked", label);
+      parentValueEmpty.hidden = false;
+      return;
+    }
+
     parentValueSlot.textContent = `zero-based slot ${value.slot}`;
     parentValueSlot.title =
       "The slot number in the parent board. The grid's slot labels are one-based.";
 
-    const amount = formatCents(value.entry.value);
-    parentValueAmount.textContent = amount;
-    parentValueAmount.classList.toggle(
-      "is-long",
-      amount.length > 10 && amount.length <= 15,
-    );
-    parentValueAmount.classList.toggle("is-xlong", amount.length > 15);
+    paintParentAmount(formatCents(value.entry.value));
 
     const unit = value.entry.unit ?? "";
     parentValueUnit.textContent = unit;
@@ -895,7 +1102,14 @@ function renderParentValue(): void {
     parentValueNote.title = note;
     parentValueNote.hidden = note === "";
 
-    parentValueBox.hidden = false;
+    renderParentAdjustments({
+      state: info.snapshot.state,
+      slot: value.slot,
+      slotSeq: info.snapshot.state.slots[value.slot].seq,
+      slotValue: value.entry.value,
+      legacy: info.snapshot.legacy,
+      parentLabel: label,
+    });
   });
 }
 
@@ -928,7 +1142,11 @@ function renderParentRow(): void {
     parentName.title = "This board has no parent.";
     parentName.classList.add("is-root");
     parentStatus.hidden = true;
-    parentNote.hidden = true;
+    parentNote.textContent =
+      "No parent board, so no board holds a liability for this one.";
+    parentNote.title =
+      "Set a parent to record a liability above this board and to receive payments through it.";
+    parentNote.hidden = false;
     parentOpen.hidden = true;
     return;
   }
@@ -2165,7 +2383,6 @@ function announce(message: string): void {
 
 function setEditorBusy(value: boolean): void {
   busy = value;
-  valueInput.disabled = value;
   contactSelect.disabled = value;
   contactAdd.disabled = value;
   unitInput.disabled = value;
@@ -2175,9 +2392,10 @@ function setEditorBusy(value: boolean): void {
   childOpen.disabled = value || !childLinkOpenable;
   clearButton.disabled =
     value || !ownState || ownState.slots[currentSlot].entry === null;
-  saveButton.textContent = value ? "Saving…" : "Save";
+  saveButton.textContent = value ? "Saving…" : "Save details";
   editorForm.setAttribute("aria-busy", String(value));
   saveButton.setAttribute("aria-busy", String(value));
+  renderAdjust();
   updateContactState();
   renderBoard();
   renderControls();
@@ -2353,6 +2571,258 @@ async function refreshChildLink(
     : `${label} has not created a board yet.`;
 }
 
+type AdjustDirection = "issue" | "burn";
+
+/** A validated issue/burn, in exact hundredths. */
+interface AdjustPlan {
+  direction: AdjustDirection;
+  magnitude: bigint;
+  delta: bigint;
+  note: string;
+  current: bigint;
+  result: bigint;
+}
+
+interface AdjustState {
+  /** Why the block cannot be used at all (offline, no saved child). */
+  unavailable: string | null;
+  /** Blocking problem with what is typed. */
+  error: string | null;
+  amountInvalid: boolean;
+  noteInvalid: boolean;
+  plan: AdjustPlan | null;
+}
+
+function currentAdjustDirection(): AdjustDirection {
+  return adjustBurn.checked ? "burn" : "issue";
+}
+
+function savedEntry(): Entry | null {
+  return ownState?.slots[currentSlot]?.entry ?? null;
+}
+
+/**
+ * Validate the adjustment block from the current controls and slot. Nothing is
+ * written here; the plan is what a successful submit would sign. An empty
+ * amount is "nothing typed yet": the action stays disabled with no error, so a
+ * finished save does not leave a warning behind.
+ */
+function planAdjustment(): AdjustState {
+  const entry = savedEntry();
+  const canSign = adjustmentBackend() !== null;
+  const direction = currentAdjustDirection();
+
+  let unavailable: string | null = null;
+  if (!canSign) {
+    unavailable =
+      "Issue and burn need the online build. This preview cannot sign an adjustment.";
+  } else if (entry === null || entry.contact === "") {
+    unavailable =
+      "Choose a contact and save the slot first. Issue and burn change a " +
+      "liability that is already recorded for a child.";
+  } else if (!view?.isOwn) {
+    unavailable = "Only the owner can adjust this board.";
+  }
+
+  const raw = adjustAmount.value.trim();
+  let magnitude = 0n;
+  let error: string | null = null;
+  let amountInvalid = false;
+  let noteInvalid = false;
+
+  if (unavailable === null && raw !== "") {
+    // A lone sign or point is half-typed, not a mistake yet.
+    if (!/^[+-]?$/.test(raw) && !/^[+-]?\.$/.test(raw)) {
+      try {
+        magnitude = parseCents(raw);
+      } catch (parseError) {
+        error = errorMessage(parseError);
+        amountInvalid = true;
+      }
+
+      if (error === null) {
+        if (magnitude < 0n) {
+          error = "Use a positive amount, then choose Issue or Burn.";
+          amountInvalid = true;
+        } else if (magnitude === 0n) {
+          error = "Enter an amount above 0.00.";
+        }
+      }
+    }
+  }
+
+  const current = entry?.value ?? 0n;
+  const delta = direction === "burn" ? -magnitude : magnitude;
+  const result = current + delta;
+
+  if (unavailable === null && error === null) {
+    if (result < 0n) {
+      error =
+        `A burn cannot take the liability below 0.00. ` +
+        `You can burn up to ${formatCents(current)}.`;
+      amountInvalid = true;
+    } else if (result > I64_MAX) {
+      error =
+        "That amount would take the liability past the largest value a slot " +
+        "can hold.";
+      amountInvalid = true;
+    }
+  }
+
+  const note = adjustNote.value.trim();
+  const noteBytes = utf8Length(adjustNote.value);
+  if (unavailable === null && error === null && noteBytes > ADJUST_NOTE_BYTES) {
+    error =
+      `The reason is ${noteBytes} bytes. Keep it to ${ADJUST_NOTE_BYTES} bytes.`;
+    noteInvalid = true;
+  }
+
+  const plan: AdjustPlan | null =
+    unavailable === null && error === null && magnitude > 0n
+      ? {
+          direction,
+          magnitude,
+          delta,
+          note,
+          current,
+          result,
+        }
+      : null;
+
+  return { unavailable, error, amountInvalid, noteInvalid, plan };
+}
+
+/** Paint the whole issue/burn block from state plus the controls. */
+function renderAdjust(): void {
+  const entry = savedEntry();
+  const child = entry?.contact ?? "";
+
+  adjustChild.textContent =
+    child === "" ? "Not set" : labelForOwner(child, [ownContactsWithoutSelf()]);
+  adjustChild.classList.toggle("is-empty", child === "");
+  if (child === "") adjustChild.removeAttribute("title");
+  else adjustChild.title = child;
+
+  adjustCurrent.textContent = formatCents(entry?.value ?? 0n);
+  const unit = entry?.unit ?? "";
+  adjustUnit.textContent = unit;
+  adjustUnit.hidden = unit === "";
+
+  const state = planAdjustment();
+  const available = state.unavailable === null;
+  const direction = currentAdjustDirection();
+
+  adjustPanel.dataset.state = available ? "ready" : "unavailable";
+  adjustControls.hidden = !available;
+  adjustEmpty.textContent = state.unavailable ?? "";
+  adjustEmpty.hidden = available;
+
+  const noteBytes = utf8Length(adjustNote.value);
+  adjustNoteCount.textContent = `${noteBytes} / ${ADJUST_NOTE_BYTES} bytes`;
+  adjustNoteCount.classList.toggle("is-warning", noteBytes > ADJUST_NOTE_BYTES);
+
+  const magnitude = state.plan?.magnitude ?? 0n;
+  const preview = state.plan?.result ?? entry?.value ?? 0n;
+  const belowZero = preview < 0n;
+  adjustResult.textContent = formatCents(belowZero ? 0n : preview);
+  adjustResult.dataset.state = belowZero
+    ? "below-zero"
+    : direction === "burn"
+      ? "burn"
+      : "issue";
+
+  const showTag = state.plan !== null && magnitude > 0n;
+  adjustResultTag.hidden = !showTag;
+  if (showTag) {
+    adjustResultTag.textContent =
+      direction === "burn"
+        ? `lowered by ${formatCents(magnitude)}`
+        : `raised by ${formatCents(magnitude)}`;
+  }
+
+  adjustWarning.textContent = state.error ?? "";
+  adjustWarning.hidden = state.error === null;
+  if (state.amountInvalid) adjustAmount.setAttribute("aria-invalid", "true");
+  else adjustAmount.removeAttribute("aria-invalid");
+  if (state.noteInvalid) adjustNote.setAttribute("aria-invalid", "true");
+  else adjustNote.removeAttribute("aria-invalid");
+  adjustAmount.setAttribute(
+    "aria-describedby",
+    state.amountInvalid
+      ? "adjust-amount-hint adjust-warning"
+      : "adjust-amount-hint",
+  );
+  adjustNote.setAttribute(
+    "aria-describedby",
+    state.noteInvalid ? "adjust-note-hint adjust-warning" : "adjust-note-hint",
+  );
+
+  // A new contact in the select is not the child the saved liability belongs to
+  // until the details are saved. Say so rather than adjusting the wrong slot.
+  const pendingContact = contactSelect.value;
+  const contactMoved =
+    entry !== null && pendingContact !== "" && pendingContact !== entry.contact;
+  adjustStale.hidden = !contactMoved;
+  if (contactMoved) {
+    adjustStale.textContent =
+      "The contact selected below has not been saved. Save the slot details " +
+      "first; until then, adjustments apply to the child named above.";
+  }
+
+  adjustAmount.disabled = busy;
+  adjustNote.disabled = busy;
+  adjustDirection.disabled = busy;
+  adjustSubmit.disabled = busy || state.plan === null;
+  adjustSubmit.textContent = adjusting
+    ? "Signing…"
+    : direction === "burn"
+      ? "Burn"
+      : "Issue";
+  adjustSubmit.setAttribute("aria-busy", String(adjusting));
+}
+
+async function handleAdjust(): Promise<void> {
+  if (busy || !view?.isOwn || !ownState) return;
+  const sign = adjustmentBackend();
+  if (sign === null) return;
+
+  const state = planAdjustment();
+  if (state.plan === null) {
+    // Re-render so the blocking reason is visible and focusable context is set.
+    renderAdjust();
+    if (state.error !== null) showEditorError(state.error, adjustAmount);
+    return;
+  }
+
+  const { delta, magnitude, note, result } = state.plan;
+  const slotNumber = currentSlot + 1;
+  const verb = delta > 0n ? "Issued" : "Burned";
+
+  editorError.hidden = true;
+  editorError.textContent = "";
+  adjustStatus.textContent = "";
+  adjusting = true;
+  setEditorBusy(true);
+  try {
+    await sign(currentSlot, delta, note);
+    hideErrorNotice();
+    adjustAmount.value = "";
+    adjustNote.value = "";
+    adjustStatus.textContent =
+      `${verb} ${formatCents(magnitude)}. ` +
+      `Liability is now ${formatCents(result)}.`;
+    announce(
+      `${verb} ${formatCents(magnitude)} on slot ${slotNumber}. ` +
+        `Liability is now ${formatCents(result)}.`,
+    );
+  } catch (error) {
+    handleActionError(error);
+  } finally {
+    adjusting = false;
+    setEditorBusy(false);
+  }
+}
+
 function openEditor(index: number): void {
   if (!ownState || !ownIdentity || busy || !view?.isOwn) return;
 
@@ -2364,7 +2834,6 @@ function openEditor(index: number): void {
   editorTitle.textContent = `Slot ${index + 1}`;
   editorSeq.textContent =
     slot.seq === 0 ? "Never written" : `Signed at sequence ${slot.seq}`;
-  valueInput.value = entry ? formatCents(entry.value) : "";
   unitInput.value = entry?.unit ?? "";
   noteInput.value = entry?.note ?? "";
   clearButton.disabled = entry === null;
@@ -2372,60 +2841,22 @@ function openEditor(index: number): void {
 
   editorError.hidden = true;
   editorError.textContent = "";
-  valueInput.removeAttribute("aria-invalid");
+  adjustAmount.value = "";
+  adjustNote.value = "";
+  adjustStatus.textContent = "";
+  adjustIssue.checked = true;
+  adjustBurn.checked = false;
   populateContactOptions(entry?.contact ?? "");
-  updateValueWarning();
+  renderAdjust();
   setChildLink(entry?.contact ?? null);
 
   if (!editor.open) editor.showModal();
-  valueInput.focus();
-  valueInput.select();
+  if (adjustControls.hidden) contactSelect.focus();
+  else adjustAmount.focus();
 }
 
 function closeEditor(): void {
   if (editor.open) editor.close();
-}
-
-const VALUE_DESCRIBED_BY = "value-hint";
-
-function setValueWarning(message: string | null, invalid = false): void {
-  if (message === null) {
-    valueWarning.hidden = true;
-    valueWarning.textContent = "";
-    valueInput.removeAttribute("aria-invalid");
-    valueInput.setAttribute("aria-describedby", VALUE_DESCRIBED_BY);
-    return;
-  }
-
-  valueWarning.textContent = message;
-  valueWarning.hidden = false;
-  valueInput.setAttribute(
-    "aria-describedby",
-    `${VALUE_DESCRIBED_BY} value-warning`,
-  );
-  if (invalid) valueInput.setAttribute("aria-invalid", "true");
-  else valueInput.removeAttribute("aria-invalid");
-}
-
-function updateValueWarning(): void {
-  const raw = valueInput.value.trim();
-  if (raw === "") {
-    setValueWarning(null);
-    return;
-  }
-
-  // A lone sign or point is a half-typed number, not a mistake yet.
-  if (/^[+-]?$/.test(raw) || /^[+-]?\.$/.test(raw)) {
-    setValueWarning(null);
-    return;
-  }
-
-  try {
-    parseCents(raw);
-    setValueWarning(null);
-  } catch (error) {
-    setValueWarning(errorMessage(error), true);
-  }
 }
 
 function showEditorError(message: string, focus: HTMLElement | null): void {
@@ -2450,14 +2881,10 @@ async function handleSave(event: SubmitEvent): Promise<void> {
     return;
   }
 
-  let value: bigint;
-  try {
-    value = parseCents(valueInput.value);
-  } catch (error) {
-    valueInput.setAttribute("aria-invalid", "true");
-    showEditorError(errorMessage(error), valueInput);
-    return;
-  }
+  // The value is no longer edited here. Issue and burn own the liability; a
+  // details save keeps whatever the slot already holds so a contact, unit or
+  // note change cannot rewrite the amount.
+  const value = ownState.slots[currentSlot].entry?.value ?? 0n;
 
   let entry: Entry;
   try {
@@ -2712,6 +3139,7 @@ const callbacks: BoardCallbacks = {
     if (editor.open) {
       populateContactOptions(contactSelect.value);
       updateContactState();
+      renderAdjust();
     }
   },
   onIdentity: (next) => {
@@ -2813,6 +3241,7 @@ const contactsDialog = createContactsDialog({
     editorError.hidden = true;
     editorError.textContent = "";
     updateContactState();
+    renderAdjust();
     setChildLink(contact.userId);
     contactSelect.focus({ preventScroll: true });
   },
@@ -2905,10 +3334,44 @@ clearButton.addEventListener("click", () => {
 editorForm.addEventListener("submit", (event) => {
   void handleSave(event);
 });
-valueInput.addEventListener("input", updateValueWarning);
+function onAdjustInput(): void {
+  // A new draft replaces the old result message.
+  if (!busy) adjustStatus.textContent = "";
+  renderAdjust();
+}
+
+adjustAmount.addEventListener("input", onAdjustInput);
+adjustAmount.addEventListener("blur", () => {
+  // Normalise to the app's exact two-decimal shape once the user leaves.
+  const raw = adjustAmount.value.trim();
+  if (raw === "" || /^[+-]?$/.test(raw) || /^[+-]?\.$/.test(raw)) return;
+  try {
+    const cents = parseCents(raw);
+    if (cents >= 0n) adjustAmount.value = formatCents(cents);
+  } catch {
+    // Keep what was typed; the warning under the field explains it.
+  }
+  renderAdjust();
+});
+adjustNote.addEventListener("input", onAdjustInput);
+adjustIssue.addEventListener("change", onAdjustInput);
+adjustBurn.addEventListener("change", onAdjustInput);
+
+// Enter in the amount or reason runs the adjustment, not the details form.
+for (const field of [adjustAmount, adjustNote]) {
+  field.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (!adjustSubmit.disabled) void handleAdjust();
+  });
+}
+adjustSubmit.addEventListener("click", () => {
+  void handleAdjust();
+});
 contactSelect.addEventListener("change", () => {
   updateContactState();
   setChildLink(contactSelect.value === "" ? null : contactSelect.value);
+  renderAdjust();
 });
 contactAdd.addEventListener("click", () => {
   addingForParent = false;

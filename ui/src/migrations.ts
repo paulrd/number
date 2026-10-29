@@ -99,6 +99,9 @@ export const LEGACY_DELEGATES: LegacyDelegate[] = [
  * slot schema/signing bytes and remain unmigratable.
  */
 export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
+  // v4 (payments). v5 adds an empty adjustments record; every existing slot,
+  // contacts, parent and payments signature remains valid.
+  "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
   // v3 (tree parent link). v4 adds an empty payments record; slot/contacts/
   // parent signatures remain valid.
   "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",

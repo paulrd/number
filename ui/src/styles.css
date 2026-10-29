@@ -1043,6 +1043,169 @@ textarea:focus-visible {
   -webkit-line-clamp: 3;
 }
 
+/* The value moved after the latest issue/burn (a payment, or an edit that kept
+   the value). Text carries the meaning; the rule is decoration only. */
+.parent-value-change {
+  margin: 0.15rem 0 0;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.parent-value-empty {
+  max-width: 52rem;
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.parent-value-meta .state-badge {
+  align-self: center;
+}
+
+/* The parent's issue/burn log for the slot that names this board. */
+
+.parent-adjustments {
+  display: grid;
+  margin-top: 0.6rem;
+  padding-top: 0.55rem;
+  gap: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+
+.parent-adjustments-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.parent-adjustments-title {
+  margin: 0;
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.parent-adjustments-meta {
+  margin: 0;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+}
+
+.parent-adjustments-meta:empty {
+  display: none;
+}
+
+.parent-adjustments-meta::before {
+  content: "·";
+  margin-right: 0.35rem;
+  color: var(--border-strong);
+}
+
+.parent-adjustments-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.adjustment-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 0.3rem;
+  list-style: none;
+}
+
+.adjustment {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.1rem 0.45rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 12%, var(--border));
+}
+
+.adjustment-list .adjustment:first-child {
+  border-top: 0;
+  padding-top: 0.1rem;
+}
+
+/* Direction is always spelled out, so the tag colour only reinforces it. */
+.adjustment-tag {
+  padding: 0.05rem 0.35rem;
+  justify-self: start;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+.adjustment-tag[data-dir="issue"] {
+  color: var(--accent-strong);
+}
+
+.adjustment-tag[data-dir="burn"] {
+  color: var(--warning);
+}
+
+.adjustment-amount {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.adjustment-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.05rem;
+}
+
+.adjustment-after {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  line-height: 1.35;
+}
+
+.adjustment-note {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@media (max-width: 34rem) {
+  .adjustment {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .adjustment-copy {
+    grid-column: 1 / -1;
+  }
+}
+
 .slot-grid {
   display: grid;
   overflow: hidden;
@@ -1586,11 +1749,11 @@ body:has(#editor[open]) {
   white-space: nowrap;
 }
 
-#value-input {
-  min-height: 3.2rem;
+#adjust-amount {
+  min-height: 3.05rem;
   padding-block: 0.4rem;
   font-family: var(--font-display);
-  font-size: 1.55rem;
+  font-size: 1.5rem;
   font-variant-numeric: lining-nums tabular-nums;
   font-weight: 500;
   letter-spacing: -0.03em;
@@ -2009,6 +2172,326 @@ body:has(#delegate-install[open]) {
 .child-link .button {
   justify-self: start;
   margin-top: 0.1rem;
+}
+
+/* Issue / burn block in the slot editor ----------------------------------- */
+
+.adjust-panel {
+  position: relative;
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem 0.9rem 0.9rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    158deg,
+    color-mix(in srgb, var(--accent-soft) 66%, var(--surface)) 0%,
+    color-mix(in srgb, var(--accent-soft) 20%, var(--surface)) 58%,
+    var(--surface) 100%
+  );
+}
+
+.adjust-panel[data-state="unavailable"] {
+  border-left-color: var(--border-strong);
+}
+
+.adjust-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  flex-wrap: wrap;
+}
+
+.adjust-eyebrow {
+  margin-bottom: 0.35rem;
+  font-size: 0.56rem;
+}
+
+.adjust-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.28rem;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.adjust-child {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.adjust-child-label {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.adjust-child-name {
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.adjust-child-name.is-empty {
+  color: var(--faint);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.adjust-controls {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.adjust-ledger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-raised) 86%, transparent);
+}
+
+.adjust-figure {
+  display: grid;
+  min-width: 0;
+  padding: 0.5rem 0.65rem 0.55rem;
+  gap: 0.1rem;
+}
+
+.adjust-figure--after {
+  border-left: 1px dashed var(--border-strong);
+}
+
+.adjust-figure-label {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.adjust-figure-value {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  align-items: baseline;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  font-family: var(--font-display);
+  font-size: 1.42rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.adjust-figure-value > span:first-child {
+  min-width: 0;
+}
+
+.adjust-figure-unit {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.adjust-result-tag {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+}
+
+#adjust-result[data-state="issue"] {
+  color: var(--accent-strong);
+}
+
+#adjust-result[data-state="below-zero"] {
+  color: var(--danger);
+}
+
+.adjust-direction {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.adjust-legend {
+  margin-bottom: 0.3rem;
+  padding: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.adjust-direction-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.adjust-choice {
+  display: flex;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  align-items: flex-start;
+  gap: 0.45rem;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 140ms var(--ease),
+    background-color 140ms var(--ease),
+    box-shadow 140ms var(--ease);
+}
+
+.adjust-choice:hover {
+  border-color: var(--border-strong);
+}
+
+.adjust-choice:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.adjust-choice:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.adjust-choice input {
+  margin: 0.2rem 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.adjust-choice-body {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.adjust-choice-name {
+  font-size: 0.86rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.adjust-choice-hint {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.adjust-choice:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.field-optional {
+  color: var(--faint);
+  font-size: 0.9em;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.field-count {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.field-count.is-warning {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.adjust-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem 0.7rem;
+  flex-wrap: wrap;
+}
+
+.adjust-actions .button {
+  min-width: 6.5rem;
+}
+
+.adjust-status {
+  min-width: 0;
+  margin: 0;
+  flex: 1 1 11rem;
+  color: var(--accent-strong);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.adjust-status:empty {
+  display: none;
+}
+
+.adjust-empty {
+  margin: 0;
+}
+
+.editor-divider {
+  display: flex;
+  margin: 0.1rem 0 -0.15rem;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.editor-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--rule);
+}
+
+@media (max-width: 26rem) {
+  .adjust-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .adjust-figure--after {
+    border-top: 1px dashed var(--border-strong);
+    border-left: 0;
+  }
+
+  .adjust-direction-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .parent-error.form-error {

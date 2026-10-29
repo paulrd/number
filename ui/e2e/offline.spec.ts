@@ -48,6 +48,38 @@ async function addContact(
   await expect(page.locator("#contacts-dialog")).toBeHidden();
 }
 
+/** Save just the slot details for an empty slot, leaving the value at 0.00. */
+async function saveDetails(
+  page: Page,
+  slotIndex: number,
+  userId: string,
+): Promise<void> {
+  await page.locator(".slot").nth(slotIndex).click();
+  await expect(page.locator("#editor")).toBeVisible();
+  await page.locator("#contact-select").selectOption(userId);
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+}
+
+/** Open a slot and run one issue/burn from the liability block. */
+async function adjust(
+  page: Page,
+  slotIndex: number,
+  direction: "issue" | "burn",
+  amount: string,
+  note = "",
+): Promise<void> {
+  await page.locator(".slot").nth(slotIndex).click();
+  await expect(page.locator("#editor")).toBeVisible();
+  if (direction === "burn") await page.locator("#adjust-burn").check();
+  await page.locator("#adjust-amount").fill(amount);
+  if (note !== "") await page.locator("#adjust-note").fill(note);
+  await expect(page.locator("#adjust-submit")).toBeEnabled();
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).not.toHaveText("");
+  await expect(page.locator("#editor")).toBeVisible();
+}
+
 test("board mounts, adds a contact, saves a decimal slot, and passes axe", async ({
   page,
 }) => {
@@ -68,9 +100,15 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator(".slot")).toHaveCount(8);
   await expect(page.locator("#contacts-count")).toHaveText("0");
 
-  // The editor starts without contacts: a clear hint and a disabled Save.
+  // The editor starts without contacts: a clear hint and a disabled Save. The
+  // liability block explains that a contact must be saved first.
   await page.locator(".slot").first().click();
-  await expect(page.locator("#value-input")).toBeVisible();
+  await expect(page.locator("#adjust-panel")).toBeVisible();
+  await expect(page.locator("#adjust-empty")).toBeVisible();
+  await expect(page.locator("#adjust-empty")).toContainText(
+    "Choose a contact and save the slot first",
+  );
+  await expect(page.locator("#adjust-controls")).toBeHidden();
   await expect(page.locator("#contact-hint")).toContainText("No contacts yet");
   await expect(page.locator("#save-button")).toBeDisabled();
 
@@ -89,16 +127,34 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#contact-hint")).toBeHidden();
   await expect(page.locator("#save-button")).toBeEnabled();
 
-  // 12.5 hundredths -> the board always shows two decimals.
-  await page.locator("#value-input").fill("12.5");
+  // Save details first: with no value typed, the slot is recorded at 0.00.
   await page.locator("#save-button").click();
-  await expect(page.locator(".slot .slot-value").first()).toHaveText("12.50");
+  await expect(page.locator("#editor")).toBeHidden();
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("0.00");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Alice");
   await expect(page.locator("#contacts-count")).toHaveText("1");
 
-  // Reopening shows the normalised decimal, not the typed shorthand.
+  // Issue is what sets the liability now. 12.5 hundredths -> the board always
+  // shows two decimals, and leaving the field normalises the typed shorthand.
   await page.locator(".slot").first().click();
-  await expect(page.locator("#value-input")).toHaveValue("12.50");
+  await expect(page.locator("#adjust-current")).toHaveText("0.00");
+  await expect(page.locator("#adjust-controls")).toBeVisible();
+  await expect(page.locator("#adjust-issue")).toBeChecked();
+  await page.locator("#adjust-amount").fill("12.5");
+  await page.locator("#adjust-amount").press("Tab");
+  await expect(page.locator("#adjust-amount")).toHaveValue("12.50");
+  await expect(page.locator("#adjust-result")).toHaveText("12.50");
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).toContainText(
+    "Issued 12.50. Liability is now 12.50.",
+  );
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("12.50");
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("Alice");
+
+  // Reopening shows the saved liability and the normalised decimal.
+  await page.locator("#cancel-button").click();
+  await page.locator(".slot").first().click();
+  await expect(page.locator("#adjust-current")).toHaveText("12.50");
   await expect(page.locator("#contact-select")).toHaveValue(aliceId);
   await page.locator("#cancel-button").click();
 
@@ -138,11 +194,11 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("a blank value saves as 0.00 and more than two decimals is rejected", async ({
+test("a saved slot starts at 0.00 and more than two decimals is rejected", async ({
   page,
 }) => {
   const errors = watchConsole(page);
-  const aliceId = ALICE_ID.toLowerCase();
+  const bobId = BOB_ID.toLowerCase();
 
   await page.goto("/");
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
@@ -150,37 +206,47 @@ test("a blank value saves as 0.00 and more than two decimals is rejected", async
   await addContact(page, "Bob", BOB_ID);
   await expect(page.locator("#contacts-count")).toHaveText("2");
 
-  // Blank value: optional, stored as zero hundredths.
-  await page.locator(".slot").first().click();
-  await page.locator("#contact-select").selectOption(aliceId);
-  await page.locator("#value-input").fill("");
-  await page.locator("#save-button").click();
+  // Details-only save: the value stays at zero hundredths, and an empty amount
+  // leaves the issue/burn action disabled with no warning.
+  await saveDetails(page, 0, ALICE_ID.toLowerCase());
   await expect(page.locator(".slot .slot-value").first()).toHaveText("0.00");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Alice");
+  await page.locator(".slot").first().click();
+  await expect(page.locator("#adjust-amount")).toHaveValue("");
+  await expect(page.locator("#adjust-warning")).toBeHidden();
+  await expect(page.locator("#adjust-submit")).toBeDisabled();
+  await page.locator("#cancel-button").click();
 
   // Three decimal places never reaches the board. A different child board is
   // used because a child id may only appear in one slot.
+  await saveDetails(page, 1, bobId);
   await page.locator(".slot").nth(1).click();
-  await page.locator("#contact-select").selectOption(BOB_ID.toLowerCase());
-  await page.locator("#value-input").fill("1.234");
-  await expect(page.locator("#value-warning")).toBeVisible();
-  await expect(page.locator("#value-warning")).toContainText("2 decimal places");
-  await expect(page.locator("#value-input")).toHaveAttribute("aria-invalid", "true");
+  await page.locator("#adjust-amount").fill("1.234");
+  await expect(page.locator("#adjust-warning")).toBeVisible();
+  await expect(page.locator("#adjust-warning")).toContainText("2 decimal places");
+  await expect(page.locator("#adjust-amount")).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
+  await expect(page.locator("#adjust-submit")).toBeDisabled();
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("0.00");
 
-  await page.locator("#save-button").click();
-  await expect(page.locator("#editor-error")).toBeVisible();
-  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("+");
-
-  // Correcting the value saves it.
-  await page.locator("#value-input").fill("1.23");
-  await expect(page.locator("#value-warning")).toBeHidden();
-  await page.locator("#save-button").click();
+  // Correcting the amount issues it.
+  await page.locator("#adjust-amount").fill("1.23");
+  await expect(page.locator("#adjust-warning")).toBeHidden();
+  await expect(page.locator("#adjust-submit")).toBeEnabled();
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).toContainText(
+    "Issued 1.23. Liability is now 1.23.",
+  );
   await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("1.23");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("saves and reopens the full cents range exactly", async ({ page }) => {
+test("issues and reopens the largest amount the editor accepts exactly", async ({
+  page,
+}) => {
   const errors = watchConsole(page);
 
   await page.goto("/");
@@ -188,42 +254,66 @@ test("saves and reopens the full cents range exactly", async ({ page }) => {
   await addContact(page, "Bob", BOB_ID);
   await addContact(page, "Carol", CAROL_ID);
   const bobId = BOB_ID.toLowerCase();
+  const carolId = CAROL_ID.toLowerCase();
 
-  // 92233720368547758.07 is i64 max cents and not representable as a JS number.
-  const max = "92233720368547758.07";
+  // i64 max is the contract's largest slot value. The editor and the bigint
+  // delta path must carry it exactly, without going through a JS float.
+  const i64Max = "92233720368547758.07";
+  await saveDetails(page, 0, bobId);
   await page.locator(".slot").first().click();
-  await page.locator("#contact-select").selectOption(bobId);
-  await page.locator("#value-input").fill(max);
-  await page.locator("#save-button").click();
-  await expect(page.locator(".slot .slot-value").first()).toHaveText(max);
+  await page.locator("#adjust-amount").fill(i64Max);
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).toContainText(
+    `Issued ${i64Max}. Liability is now ${i64Max}.`,
+  );
+  await expect(page.locator(".slot .slot-value").first()).toHaveText(i64Max);
 
+  await page.locator("#cancel-button").click();
   await page.locator(".slot").first().click();
-  await expect(page.locator("#value-input")).toHaveValue(max);
+  await expect(page.locator("#adjust-current")).toHaveText(i64Max);
   await page.locator("#cancel-button").click();
 
-  // One hundredth past the bound is rejected inline, not rounded. A different
+  // One hundredth past i64 max is rejected inline, not rounded. A different
   // child board is used because a child id may only appear in one slot.
+  await saveDetails(page, 1, carolId);
   await page.locator(".slot").nth(1).click();
-  await page.locator("#contact-select").selectOption(CAROL_ID.toLowerCase());
-  await page.locator("#value-input").fill("92233720368547758.08");
-  await expect(page.locator("#value-warning")).toBeVisible();
-  await expect(page.locator("#value-warning")).toContainText(
+  await page.locator("#adjust-amount").fill("92233720368547758.08");
+  await expect(page.locator("#adjust-warning")).toBeVisible();
+  await expect(page.locator("#adjust-warning")).toContainText(
     "92233720368547758",
   );
-  await page.locator("#save-button").click();
-  await expect(page.locator("#editor-error")).toBeVisible();
-  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("+");
+  await expect(page.locator("#adjust-submit")).toBeDisabled();
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("0.00");
 
-  // The negative bound is exact too.
-  const min = "-92233720368547758.08";
-  await page.locator("#value-input").fill(min);
-  await expect(page.locator("#value-warning")).toBeHidden();
-  await page.locator("#save-button").click();
-  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText(min);
+  // Adjustments take a magnitude, not a signed number: a negative amount is
+  // rejected rather than treated as a burn.
+  await page.locator("#adjust-amount").fill("-92233720368547758.08");
+  await expect(page.locator("#adjust-warning")).toBeVisible();
+  await expect(page.locator("#adjust-warning")).toContainText(
+    "Use a positive amount",
+  );
+  await expect(page.locator("#adjust-submit")).toBeDisabled();
 
-  await page.locator(".slot").nth(1).click();
-  await expect(page.locator("#value-input")).toHaveValue(min);
-  await page.locator("#cancel-button").click();
+  // A burn clamps at zero: the exact boundary succeeds, one hundredth more is
+  // rejected and the slot keeps its old value.
+  await page.locator("#adjust-amount").fill("5.00");
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("5.00");
+
+  await page.locator("#adjust-burn").check();
+  await expect(page.locator("#adjust-burn")).toBeChecked();
+  await page.locator("#adjust-amount").fill("5.01");
+  await expect(page.locator("#adjust-warning")).toBeVisible();
+  await expect(page.locator("#adjust-warning")).toContainText("below 0.00");
+  await expect(page.locator("#adjust-submit")).toBeDisabled();
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("5.00");
+
+  await page.locator("#adjust-amount").fill("5.00");
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).toContainText(
+    "Burned 5.00. Liability is now 0.00.",
+  );
+  await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("0.00");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -262,13 +352,32 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#child-link-detail")).toContainText(
     "lists this board as its parent",
   );
-  await page.locator("#value-input").fill("3.25");
   await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+
+  // The liability itself is recorded by an issue, with a reason the child sees.
+  await page.locator(".slot").first().click();
+  await page.locator("#adjust-amount").fill("3.25");
+  await page.locator("#adjust-note").fill("October allowance");
+  await page.locator("#adjust-submit").click();
+  await expect(page.locator("#adjust-status")).toContainText(
+    "Issued 3.25. Liability is now 3.25.",
+  );
   await expect(page.locator(".slot .slot-value").first()).toHaveText("3.25");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
 
+  // A details-only save keeps the issued liability (and the signed log) while
+  // the unit changes.
+  await page.locator("#cancel-button").click();
+  await page.locator(".slot").first().click();
+  await page.locator("#unit-input").fill("kg");
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await expect(page.locator(".slot .slot-value").first()).toHaveText("3.25");
+
   // Open the child board read-only from the editor, then return home.
   await page.locator(".slot").first().click();
+  await expect(page.locator("#adjust-current")).toHaveText("3.25");
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await page.locator("#child-open").click();
   await expect(page.locator("#board-meta")).toBeVisible();
@@ -293,7 +402,20 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   // The parent (the own board) holds 3.25 for this child; show it prominently.
   await expect(page.locator("#parent-value")).toBeVisible();
   await expect(page.locator("#parent-value")).toContainText("3.25");
+  await expect(page.locator("#parent-value")).toContainText("kg");
   await expect(page.locator("#parent-value")).toContainText("My board");
+  // A later details save moves the slot sequence on without changing the value;
+  // the band explains that the log is only a hint.
+  await expect(page.locator("#parent-value-change")).toBeVisible();
+  // The parent's recent adjustment log is child-facing: direction, delta,
+  // post value and the reason.
+  await expect(page.locator("#parent-adjustments")).toBeVisible();
+  const latestAdjustment = page.locator("#parent-adjustments-list .adjustment");
+  await expect(latestAdjustment).toHaveCount(1);
+  await expect(latestAdjustment).toContainText("Issue");
+  await expect(latestAdjustment).toContainText("+3.25");
+  await expect(latestAdjustment).toContainText("Liability 3.25");
+  await expect(latestAdjustment).toContainText("October allowance");
   // The fixture child has no slots, and they are not editable.
   await expect(page.locator(".slot").first()).toBeDisabled();
 
@@ -314,9 +436,13 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#child-link-detail")).toContainText(
     "has not set this board as its parent",
   );
-  await page.locator("#value-input").fill("1.00");
   await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await page.locator(".slot").nth(1).click();
+  await page.locator("#adjust-amount").fill("1.00");
+  await page.locator("#adjust-submit").click();
   await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
+  await page.locator("#cancel-button").click();
 
   // Setting this board's parent to the child would close a loop, so it is
   // blocked before anything is signed.
@@ -373,8 +499,8 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   // A contact with no board is "Not created yet"; the slot still saves.
   await page.locator(".slot").nth(3).click();
   await page.locator("#contact-select").selectOption(GHOST_ID);
-  await page.locator("#value-input").fill("1.00");
   await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
   await expect(page.locator(".slot .slot-label").nth(3)).toHaveText("Ghost");
   await page.locator(".slot").nth(3).click();
   await expect(page.locator("#child-link-status")).toHaveText("Not created yet");
@@ -527,15 +653,23 @@ test("falls back to fixture board names when contacts are removed", async ({
   // Set up the child slot and a mutual parent link.
   await page.locator(".slot").first().click();
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
-  await page.locator("#value-input").fill("2.00");
   await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await page.locator(".slot").first().click();
+  await page.locator("#adjust-amount").fill("2.00");
+  await page.locator("#adjust-submit").click();
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
+  await page.locator("#cancel-button").click();
 
   await page.locator(".slot").nth(1).click();
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
-  await page.locator("#value-input").fill("1.00");
   await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await page.locator(".slot").nth(1).click();
+  await page.locator("#adjust-amount").fill("1.00");
+  await page.locator("#adjust-submit").click();
   await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
+  await page.locator("#cancel-button").click();
 
   await page.locator("#parent-edit").click();
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
@@ -603,16 +737,13 @@ test("advances a cooperative payment and offers a source payment", async ({
   await addContact(page, "Sibling", MOCK_SIBLING_ID);
 
   // Own board root is the LCA: slot 0 is the payer, slot 1 the destination.
-  await page.locator(".slot").first().click();
-  await page.locator("#contact-select").selectOption(MOCK_PAYER_ID);
-  await page.locator("#value-input").fill("10.00");
-  await page.locator("#save-button").click();
+  await saveDetails(page, 0, MOCK_PAYER_ID);
+  await adjust(page, 0, "issue", "10.00");
   await expect(page.locator(".slot .slot-value").first()).toHaveText("10.00");
+  await page.locator("#cancel-button").click();
 
-  await page.locator(".slot").nth(1).click();
-  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
-  await page.locator("#value-input").fill("0.00");
-  await page.locator("#save-button").click();
+  // The destination starts clean; a details-only save records 0.00.
+  await saveDetails(page, 1, MOCK_CHILD_ID);
   await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("0.00");
 
   // The payer fixture has already offered 2.50 through this LCA.

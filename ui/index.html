@@ -390,14 +390,36 @@
             <p class="parent-value-meta">
               <span id="parent-value-board" class="parent-value-board"></span>
               <span id="parent-value-slot" class="parent-value-slot"></span>
+              <span id="parent-value-state" class="state-badge" hidden></span>
             </p>
           </div>
-          <p class="parent-value-figure">
+          <p id="parent-value-figure" class="parent-value-figure" hidden>
             <span class="sr-only">Value: </span>
             <span id="parent-value-amount" class="parent-value-amount">—</span>
             <span id="parent-value-unit" class="parent-value-unit" hidden></span>
           </p>
+          <p id="parent-value-change" class="parent-value-change" hidden></p>
           <p id="parent-value-note" class="parent-value-note" hidden></p>
+          <p id="parent-value-empty" class="parent-value-empty" hidden></p>
+          <div
+            id="parent-adjustments"
+            class="parent-adjustments"
+            aria-labelledby="parent-adjustments-title"
+            hidden
+          >
+            <div class="parent-adjustments-head">
+              <h4 id="parent-adjustments-title" class="parent-adjustments-title">
+                Recent adjustments
+              </h4>
+              <p id="parent-adjustments-meta" class="parent-adjustments-meta"></p>
+            </div>
+            <ol
+              id="parent-adjustments-list"
+              class="adjustment-list"
+              aria-labelledby="parent-adjustments-title"
+            ></ol>
+            <p id="parent-adjustments-empty" class="parent-adjustments-empty" hidden></p>
+          </div>
         </section>
         <section id="payments" class="payments" aria-labelledby="payments-title" hidden>
           <div class="payments-head">
@@ -441,11 +463,12 @@
           aria-describedby="board-hint"
         ></div>
         <p id="board-hint" class="board-hint">
-          Select a slot to set its value, contact, unit, or note. Values show two
-          decimal places, and a blank value saves as 0.00. Slots keep the contact's
-          key, so renaming a label keeps the link. Every change is signed by the owner
-          key and merged by the contract. Clearing a slot records that it was cleared,
-          so an older copy cannot bring it back.
+          Select a slot to issue or burn the liability it holds for its child, or
+          to change the contact, unit, or note. Amounts show two decimal places,
+          and a burn cannot take a liability below 0.00. Slots keep the contact's
+          key, so renaming a label keeps the link. Every change is signed by the
+          owner key and merged by the contract. Clearing a slot records that it
+          was cleared, so an older copy cannot bring it back.
         </p>
       </main>
 
@@ -510,23 +533,133 @@
           </header>
 
           <div class="editor-body">
-            <label class="field">
-              <span>Value</span>
-              <input
-                id="value-input"
-                name="value"
-                type="text"
-                inputmode="decimal"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="e.g. 12.50"
-                aria-describedby="value-hint"
-              />
-            </label>
-            <p id="value-hint" class="field-hint">
-              Up to two decimal places. Leave it blank to save 0.00.
-            </p>
-            <p id="value-warning" class="field-warning" role="status" hidden></p>
+            <section
+              id="adjust-panel"
+              class="adjust-panel"
+              aria-labelledby="adjust-title"
+              aria-describedby="adjust-desc"
+            >
+              <div class="adjust-head">
+                <div>
+                  <p class="eyebrow adjust-eyebrow">Liability</p>
+                  <h3 id="adjust-title" class="adjust-title">Issue or burn</h3>
+                </div>
+                <p class="adjust-child">
+                  <span class="adjust-child-label">Child</span>
+                  <span id="adjust-child" class="adjust-child-name">Not set</span>
+                </p>
+              </div>
+              <p id="adjust-desc" class="field-hint">
+                Raises or lowers the liability this board records for this
+                child. Your owner key signs it and the child board can see it.
+                It is not a payment: nothing moves until a payment is made.
+              </p>
+              <p id="adjust-stale" class="field-hint is-warning" hidden></p>
+
+              <div id="adjust-controls" class="adjust-controls">
+                <div class="adjust-ledger">
+                  <div class="adjust-figure">
+                    <span class="adjust-figure-label">Liability now</span>
+                    <p class="adjust-figure-value">
+                      <span id="adjust-current">0.00</span>
+                      <span id="adjust-unit" class="adjust-figure-unit" hidden></span>
+                    </p>
+                  </div>
+                  <div class="adjust-figure adjust-figure--after">
+                    <span class="adjust-figure-label">After this adjustment</span>
+                    <p class="adjust-figure-value">
+                      <span id="adjust-result">0.00</span>
+                      <span id="adjust-result-tag" class="adjust-result-tag" hidden></span>
+                    </p>
+                  </div>
+                </div>
+
+                <fieldset id="adjust-direction" class="adjust-direction">
+                  <legend class="adjust-legend">Direction</legend>
+                  <div class="adjust-direction-options">
+                    <label class="adjust-choice">
+                      <input
+                        id="adjust-issue"
+                        name="adjust-direction"
+                        type="radio"
+                        value="issue"
+                        checked
+                      />
+                      <span class="adjust-choice-body">
+                        <span class="adjust-choice-name">Issue</span>
+                        <span class="adjust-choice-hint">Raises the liability</span>
+                      </span>
+                    </label>
+                    <label class="adjust-choice">
+                      <input
+                        id="adjust-burn"
+                        name="adjust-direction"
+                        type="radio"
+                        value="burn"
+                      />
+                      <span class="adjust-choice-body">
+                        <span class="adjust-choice-name">Burn</span>
+                        <span class="adjust-choice-hint">Lowers it, never below 0.00</span>
+                      </span>
+                    </label>
+                  </div>
+                </fieldset>
+
+                <label class="field">
+                  <span>Amount</span>
+                  <input
+                    id="adjust-amount"
+                    name="adjust-amount"
+                    type="text"
+                    inputmode="decimal"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="e.g. 12.50"
+                    aria-describedby="adjust-amount-hint"
+                  />
+                </label>
+                <p id="adjust-amount-hint" class="field-hint">
+                  Up to two decimal places. Issue adds this amount; burn
+                  subtracts it.
+                </p>
+
+                <label class="field">
+                  <span>Reason <span class="field-optional">optional</span></span>
+                  <input
+                    id="adjust-note"
+                    name="adjust-note"
+                    type="text"
+                    maxlength="128"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="e.g. October allowance"
+                    aria-describedby="adjust-note-hint"
+                  />
+                </label>
+                <p id="adjust-note-hint" class="field-hint">
+                  Stored with the adjustment and shown to the child.
+                  <span id="adjust-note-count" class="field-count">0 / 128 bytes</span>
+                </p>
+
+                <p id="adjust-warning" class="field-warning" role="status" hidden></p>
+
+                <div class="adjust-actions">
+                  <button
+                    id="adjust-submit"
+                    class="button button--primary button--small"
+                    type="button"
+                    disabled
+                  >
+                    Issue
+                  </button>
+                  <p id="adjust-status" class="adjust-status" role="status" aria-live="polite"></p>
+                </div>
+              </div>
+
+              <p id="adjust-empty" class="field-hint adjust-empty" hidden></p>
+            </section>
+
+            <p class="editor-divider"><span>Slot details</span></p>
 
             <div class="field">
               <label for="contact-select">Contact</label>
@@ -583,7 +716,7 @@
             <button id="clear-button" class="button button--danger" type="button">Clear slot</button>
             <div class="editor-actions-right">
               <button id="cancel-button" class="button button--quiet" type="button">Cancel</button>
-              <button id="save-button" class="button button--primary" type="submit">Save</button>
+              <button id="save-button" class="button button--primary" type="submit">Save details</button>
             </div>
           </footer>
         </form>

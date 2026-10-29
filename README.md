@@ -18,10 +18,17 @@ in the UI but only the owner can sign them.
   book updates, last-writer-wins on a monotonic `seq`, tombstones for cleared
   slots/contacts, canonical JSON state, small fixed-size summary, delta sync.
 - **Delegate** (`delegate/`) — holds the owner's signing key locally and signs
-  slot and address-book updates. Secrets never leave the node.
+  slot, address-book, parent, payment and adjustment updates. **v4.1:** while
+  the node runs it subscribes to the board's parent and children and can
+  advance a forward payment leg with no tab open (Background permission
+  required). Secrets never leave the node.
 - **UI** (`ui/`) — TypeScript + Vite. Derives the board key from the owner key,
   creates the instance on first use (PUT), subscribes, sends signed deltas, and
   manages the address book.
+- **Adjustments (v5)** — each board owner can issue (raise) or burn (lower) the
+  liability recorded for a child slot. The adjustment is signed and carried in
+  a bounded log the child can read; a burn clamps at zero. It is bookkeeping,
+  not a payment.
 
 Values are i64 **counts of hundredths** in the contract (the wire type did not
 change; the UI divides by 100 and shows exactly two decimals).

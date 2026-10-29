@@ -1,18 +1,18 @@
 /**
  * Contract state, delta, and summary codecs plus the client-side merge.
  *
- * These shapes are the v4 wire format in DESIGN.md §2–§5 and
- * DESIGN-payments.md. The browser cannot run Ed25519 verification here, but it
- * can enforce every structural and bounds rule, build the canonical signing
- * bytes (for summaries and optimistic digests), and merge with exactly the
- * same max-over-seq/signature rule as the contract. The contract remains the
- * authority; a bad local merge is corrected by the next GET/notification.
+ * These shapes are the v5 wire format in DESIGN.md and DESIGN-v4.1-v5.md.
+ * The browser cannot run Ed25519 verification here, but it can enforce every
+ * structural and bounds rule, build the canonical signing bytes (for summaries
+ * and optimistic digests), and merge with exactly the same max-over-seq/
+ * signature rule as the contract. The contract remains the authority; a bad
+ * local merge is corrected by the next GET/notification.
  *
- * v4 adds a signed `payments` record (cooperative payments) to the v3 shape.
- * The slot, contacts and parent signing bytes are unchanged, so a v3 state
- * upgrades by adding an empty payments record and a v2 state upgrades by
- * adding an empty parent and payments record. `validateState`/`decodeState`
- * accept v2, v3 and v4 and always return v4.
+ * v5 adds a signed `adjustments` log (issue/burn hints) to the v4 shape. Every
+ * earlier signing byte is unchanged, so a v4 state upgrades by adding an empty
+ * adjustments record, a v3 state by also adding an empty payments record, and a
+ * v2 state by also adding an empty parent. `validateState`/`decodeState` accept
+ * v2, v3, v4 and v5 and always return v5.
  */
 
 import { blake3 } from "@noble/hashes/blake3";
@@ -39,11 +39,17 @@ export const SLOT_COUNT = 8;
 export const MAX_CONTACTS = 64;
 /** Phase 1 bound on the payments record's recently settled id list. */
 export const MAX_PAYMENT_SETTLED = 8;
-export const STATE_VERSION = 4 as const;
+/** Bound on the v5 issue/burn adjustment log. */
+export const MAX_ADJUSTMENTS = 32;
+/** Bound on an adjustment note, in UTF-8 bytes. */
+export const MAX_ADJUSTMENT_NOTE_BYTES = 128;
+export const STATE_VERSION = 5 as const;
 /**
- * The predecessor wire versions. A v3 state has a parent but no payments; a v2
- * state has neither. Both are upgraded on read and never written.
+ * The predecessor wire versions. A v4 state has payments but no adjustments; a
+ * v3 state has a parent but no payments; a v2 state has neither. All are
+ * upgraded on read and never written.
  */
+export const V4_STATE_VERSION = 4 as const;
 export const V3_STATE_VERSION = 3 as const;
 export const LEGACY_STATE_VERSION = 2 as const;
 
@@ -60,6 +66,7 @@ export const SIGNING_DOMAIN_SLOT = "number:v2:slot";
 export const SIGNING_DOMAIN_CONTACTS = "number:v2:contacts";
 export const SIGNING_DOMAIN_PARENT = "number:v3:parent";
 export const SIGNING_DOMAIN_PAYMENTS = "number:v4:payments";
+export const SIGNING_DOMAIN_ADJUSTMENTS = "number:v5:adjustments";
 
 export const I64_MIN = -(2n ** 63n);
 export const I64_MAX = 2n ** 63n - 1n;
@@ -103,16 +110,41 @@ export interface ParentRecord {
   sig: string | null;
 }
 
-export interface StateV4 {
-  v: 4;
+export interface Adjustment {
+  /** Slot index this entry applies to, 0..7. */
+  slot: number;
+  /** The slot write this adjustment describes; > 0. */
+  slotSeq: number;
+  /** +issue, -burn, non-zero, in hundredths. */
+  delta: bigint;
+  /** The signed post-value; >= 0. */
+  postValue: bigint;
+  /** Optional short reason; at most MAX_ADJUSTMENT_NOTE_BYTES UTF-8 bytes. */
+  note: string | null;
+}
+
+/**
+ * The signed v5 issue/burn log. `seq` 0 means empty. A higher-seq record
+ * replaces the whole log; this is a child-facing hint, not an audit trail.
+ */
+export interface Adjustments {
+  seq: number;
+  /** Oldest first, at most MAX_ADJUSTMENTS. */
+  entries: Adjustment[];
+  sig: string | null;
+}
+
+export interface StateV5 {
+  v: 5;
   parent: ParentRecord;
   contacts: ContactsRecord;
   payments: PaymentsRecord;
+  adjustments: Adjustments;
   slots: Slot[];
 }
 
-/** Compatibility alias: every import that names the current state gets v4. */
-export type StateV3 = StateV4;
+/** Compatibility alias: every import that names the current state gets v5. */
+export type StateV3 = StateV5;
 
 export interface DeltaSlot {
   i: number;
@@ -122,23 +154,26 @@ export interface DeltaSlot {
 }
 
 export interface Delta {
-  v: 4;
+  v: 5;
   /** `null` when the parent record is unchanged. */
   parent: ParentRecord | null;
   /** `null` when the contacts record is unchanged. */
   contacts: ContactsRecord | null;
   /** `null` when the payments record is unchanged. */
   payments: PaymentsRecord | null;
+  /** `null` when the adjustments record is unchanged. */
+  adjustments: Adjustments | null;
   slots: DeltaSlot[];
 }
 
 export type SummarySlot = [seq: number, digest16: string];
 
 export interface Summary {
-  v: 4;
+  v: 5;
   parent: SummarySlot;
   contacts: SummarySlot;
   payments: SummarySlot;
+  adjustments: SummarySlot;
   slots: SummarySlot[];
 }
 
@@ -154,6 +189,7 @@ const SLOT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_SLOT);
 const CONTACTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_CONTACTS);
 const PARENT_PREFIX = textEncoder.encode(SIGNING_DOMAIN_PARENT);
 const PAYMENTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_PAYMENTS);
+const ADJUSTMENTS_PREFIX = textEncoder.encode(SIGNING_DOMAIN_ADJUSTMENTS);
 const ZERO_DIGEST16 = "0".repeat(32);
 
 const PAYMENT_PHASE_TAGS: Record<PaymentPhase, number> = {
@@ -546,6 +582,116 @@ export function validatePayments(
   return { seq, settled, entry, sig };
 }
 
+/** Validate/normalise one v5 issue/burn log entry. */
+export function validateAdjustment(raw: unknown, path = "adjustment"): Adjustment {
+  const obj = asRecord(raw, path);
+
+  const slot = obj.slot;
+  if (
+    typeof slot !== "number" ||
+    !Number.isSafeInteger(slot) ||
+    slot < 0 ||
+    slot >= SLOT_COUNT
+  ) {
+    fail(`${path}.slot`, `expected an integer in 0..${SLOT_COUNT - 1}`);
+  }
+
+  const slotSeq = validateSeq(obj.slotSeq, `${path}.slotSeq`);
+  if (slotSeq === 0) fail(`${path}.slotSeq`, "must be greater than 0");
+
+  const delta = validateValue(obj.delta, `${path}.delta`);
+  if (delta === 0n) fail(`${path}.delta`, "must be non-zero");
+
+  const postValue = validateValue(obj.postValue, `${path}.postValue`);
+  if (postValue < 0n) fail(`${path}.postValue`, "must not be negative");
+
+  // The implied pre-value must be a non-negative i64. `post - delta` covers
+  // both directions and detects i64 overflow exactly.
+  const preValue = postValue - delta;
+  if (preValue < 0n || preValue < I64_MIN || preValue > I64_MAX) {
+    fail(
+      `${path}.postValue`,
+      "implies a pre-value that is negative or outside the signed 64-bit range",
+    );
+  }
+
+  return {
+    slot,
+    slotSeq,
+    delta,
+    postValue,
+    note: validateOptionalText(
+      obj.note,
+      `${path}.note`,
+      MAX_ADJUSTMENT_NOTE_BYTES,
+    ),
+  };
+}
+
+/**
+ * Validate an adjustment list: at most MAX_ADJUSTMENTS entries, no duplicate
+ * `(slot, slotSeq)`, and strictly increasing `slotSeq` within one slot in list
+ * order. Deliberately does not compare against `state.slots`: adjustments and
+ * slots merge independently, so a cross-check would break convergence.
+ */
+export function validateAdjustmentList(
+  raw: unknown,
+  path = "adjustments.entries",
+): Adjustment[] {
+  if (!Array.isArray(raw)) fail(path, "expected an array");
+  if (raw.length > MAX_ADJUSTMENTS) {
+    fail(path, `expected at most ${MAX_ADJUSTMENTS} adjustments`);
+  }
+  const entries = raw.map((value, index) =>
+    validateAdjustment(value, `${path}[${index}]`),
+  );
+  const seen = new Set<string>();
+  const lastSeq = new Map<number, number>();
+  for (const [index, entry] of entries.entries()) {
+    const key = `${entry.slot}:${entry.slotSeq}`;
+    if (seen.has(key)) {
+      fail(
+        `${path}[${index}].slotSeq`,
+        `duplicate (slot, slotSeq) ${entry.slot}/${entry.slotSeq}`,
+      );
+    }
+    seen.add(key);
+    const previous = lastSeq.get(entry.slot);
+    if (previous !== undefined && entry.slotSeq <= previous) {
+      fail(
+        `${path}[${index}].slotSeq`,
+        `slotSeq must increase within slot ${entry.slot}`,
+      );
+    }
+    lastSeq.set(entry.slot, entry.slotSeq);
+  }
+  return entries;
+}
+
+/** Validate/normalise the signed v5 adjustments record. */
+export function validateAdjustments(
+  raw: unknown,
+  path = "adjustments",
+): Adjustments {
+  const obj = asRecord(raw, path);
+  const seq = validateSeq(obj.seq, `${path}.seq`);
+  const entries = validateAdjustmentList(obj.entries ?? [], `${path}.entries`);
+
+  let sig: string | null = null;
+  if (obj.sig !== undefined && obj.sig !== null) {
+    sig = validateSignature(obj.sig, `${path}.sig`);
+  }
+
+  if (seq === 0) {
+    if (entries.length > 0) fail(path, "seq 0 must have no adjustments");
+    if (sig !== null) fail(path, "seq 0 must have a null signature");
+  } else if (sig === null) {
+    fail(path, "seq > 0 requires a signature");
+  }
+
+  return { seq, entries, sig };
+}
+
 /** Validate/normalise one entry. Optional strings become null, never "". */
 export function validateEntry(raw: unknown, path = "entry"): Entry {
   const obj = asRecord(raw, path);
@@ -587,36 +733,65 @@ export function validateSlot(raw: unknown, index: number, path = `slots[${index}
   return { seq, entry, sig };
 }
 
-export function validateState(raw: unknown): StateV4 {
+export function validateState(raw: unknown): StateV5 {
   const obj = asRecord(raw, "state");
   let parent: ParentRecord;
   let payments: PaymentsRecord;
+  let adjustments: Adjustments;
   if (obj.v === STATE_VERSION) {
     parent = validateParent(obj.parent, "state.parent");
     payments = validatePayments(obj.payments, "state.payments");
+    adjustments = validateAdjustments(obj.adjustments, "state.adjustments");
+  } else if (obj.v === V4_STATE_VERSION) {
+    parent = validateParent(obj.parent, "state.parent");
+    payments = validatePayments(obj.payments, "state.payments");
+    // v4 never had an adjustments field. Reject it rather than silently
+    // dropping signed data; the client upgrade adds an empty record.
+    if (obj.adjustments !== undefined) {
+      fail(
+        "state.adjustments",
+        "a v4 state must not carry an adjustments record",
+      );
+    }
+    adjustments = emptyAdjustments();
   } else if (obj.v === V3_STATE_VERSION) {
     parent = validateParent(obj.parent, "state.parent");
-    // v3 never had a payments field. Reject it rather than silently dropping
-    // signed data; the client upgrade adds an empty payments record.
+    // v3 never had a payments or adjustments field. Reject them rather than
+    // silently dropping signed data; the client upgrade adds empty records.
     if (obj.payments !== undefined) {
       fail("state.payments", "a v3 state must not carry a payments record");
     }
+    if (obj.adjustments !== undefined) {
+      fail(
+        "state.adjustments",
+        "a v3 state must not carry an adjustments record",
+      );
+    }
     payments = emptyPayments();
+    adjustments = emptyAdjustments();
   } else if (obj.v === LEGACY_STATE_VERSION) {
-    // v2 never had a parent or payments field. Explicitly reject them rather
-    // than silently dropping signed data; the upgrade adds empty records.
+    // v2 never had a parent, payments or adjustments field. Explicitly reject
+    // them rather than silently dropping signed data; the upgrade adds empty
+    // records.
     if (obj.parent !== undefined) {
       fail("state.parent", "a v2 state must not carry a parent record");
     }
     if (obj.payments !== undefined) {
       fail("state.payments", "a v2 state must not carry a payments record");
     }
+    if (obj.adjustments !== undefined) {
+      fail(
+        "state.adjustments",
+        "a v2 state must not carry an adjustments record",
+      );
+    }
     parent = emptyParent();
     payments = emptyPayments();
+    adjustments = emptyAdjustments();
   } else {
     fail(
       "state.v",
-      `expected ${LEGACY_STATE_VERSION}, ${V3_STATE_VERSION} or ${STATE_VERSION}`,
+      `expected ${LEGACY_STATE_VERSION}, ${V3_STATE_VERSION}, ${V4_STATE_VERSION} or ${STATE_VERSION}`,
     );
   }
 
@@ -629,6 +804,7 @@ export function validateState(raw: unknown): StateV4 {
     parent,
     contacts,
     payments,
+    adjustments,
     slots: obj.slots.map((slot, index) => validateSlot(slot, index)),
   };
 }
@@ -652,6 +828,11 @@ export function validateDelta(raw: unknown): Delta {
       ? null
       : validatePayments(obj.payments, "delta.payments");
 
+  const adjustments =
+    obj.adjustments === undefined || obj.adjustments === null
+      ? null
+      : validateAdjustments(obj.adjustments, "delta.adjustments");
+
   if (!Array.isArray(obj.slots)) fail("delta.slots", "expected an array");
 
   const seen = new Set<number>();
@@ -673,7 +854,14 @@ export function validateDelta(raw: unknown): Delta {
     return { i, ...validated };
   });
 
-  return { v: STATE_VERSION, parent, contacts, payments, slots };
+  return {
+    v: STATE_VERSION,
+    parent,
+    contacts,
+    payments,
+    adjustments,
+    slots,
+  };
 }
 
 function validateSummaryPair(raw: unknown, path: string): SummarySlot {
@@ -694,6 +882,10 @@ export function validateSummary(raw: unknown): Summary {
   const parent = validateSummaryPair(obj.parent, "summary.parent");
   const contacts = validateSummaryPair(obj.contacts, "summary.contacts");
   const payments = validateSummaryPair(obj.payments, "summary.payments");
+  const adjustments = validateSummaryPair(
+    obj.adjustments,
+    "summary.adjustments",
+  );
   if (!Array.isArray(obj.slots) || obj.slots.length !== SLOT_COUNT) {
     fail("summary.slots", `expected exactly ${SLOT_COUNT} pairs`);
   }
@@ -702,6 +894,7 @@ export function validateSummary(raw: unknown): Summary {
     parent,
     contacts,
     payments,
+    adjustments,
     slots: obj.slots.map((pair, index) =>
       validateSummaryPair(pair, `summary.slots[${index}]`),
     ),
@@ -780,6 +973,10 @@ export function emptyPayments(): PaymentsRecord {
   return { seq: 0, settled: [], entry: null, sig: null };
 }
 
+export function emptyAdjustments(): Adjustments {
+  return { seq: 0, entries: [], sig: null };
+}
+
 export function emptyContacts(): ContactsRecord {
   return { seq: 0, entries: [], sig: null };
 }
@@ -794,6 +991,7 @@ export function emptyState(): StateV3 {
     parent: emptyParent(),
     contacts: emptyContacts(),
     payments: emptyPayments(),
+    adjustments: emptyAdjustments(),
     slots: Array.from({ length: SLOT_COUNT }, emptySlot),
   };
 }
@@ -835,12 +1033,31 @@ export function clonePayments(record: PaymentsRecord): PaymentsRecord {
   };
 }
 
+export function cloneAdjustment(entry: Adjustment): Adjustment {
+  return {
+    slot: entry.slot,
+    slotSeq: entry.slotSeq,
+    delta: entry.delta,
+    postValue: entry.postValue,
+    note: entry.note,
+  };
+}
+
+export function cloneAdjustments(record: Adjustments): Adjustments {
+  return {
+    seq: record.seq,
+    entries: record.entries.map(cloneAdjustment),
+    sig: record.sig,
+  };
+}
+
 export function cloneState(state: StateV3): StateV3 {
   return {
     v: STATE_VERSION,
     parent: cloneParent(state.parent),
     contacts: cloneContacts(state.contacts),
     payments: clonePayments(state.payments),
+    adjustments: cloneAdjustments(state.adjustments),
     slots: state.slots.map(cloneSlot),
   };
 }
@@ -1136,6 +1353,72 @@ export function paymentsDigest16(record: PaymentsRecord): string {
   );
 }
 
+/**
+ * Canonical v5 adjustments signing bytes:
+ *   b"number:v5:adjustments" || seq u64 LE || count u32 LE
+ *   || for each entry: slot u8 || slotSeq u64 LE || delta i64 LE
+ *      || postValue i64 LE || note_len u32 LE || note bytes.
+ * Kept byte-for-byte in sync with the contract and delegate; used here for
+ * summary digests.
+ */
+export function adjustmentsSigningBytes(
+  seq: number,
+  entries: Adjustment[],
+): Uint8Array {
+  const validatedSeq = validateSeq(seq, "seq");
+  const validatedEntries = validateAdjustmentList(entries);
+  if (validatedSeq === 0 && validatedEntries.length > 0) {
+    throw new StateError("seq 0 must have no adjustments");
+  }
+
+  const noteBytes = validatedEntries.map((entry) =>
+    textEncoder.encode(entry.note ?? ""),
+  );
+  let length = ADJUSTMENTS_PREFIX.length + 8 + 4;
+  for (const bytes of noteBytes) {
+    length += 1 + 8 + 8 + 8 + 4 + bytes.length;
+  }
+
+  const out = new Uint8Array(length);
+  const view = new DataView(out.buffer);
+  let offset = 0;
+
+  out.set(ADJUSTMENTS_PREFIX, offset);
+  offset += ADJUSTMENTS_PREFIX.length;
+
+  view.setBigUint64(offset, BigInt(validatedSeq), true);
+  offset += 8;
+
+  view.setUint32(offset, validatedEntries.length, true);
+  offset += 4;
+
+  for (const [index, entry] of validatedEntries.entries()) {
+    out[offset] = entry.slot;
+    offset += 1;
+    view.setBigUint64(offset, BigInt(entry.slotSeq), true);
+    offset += 8;
+    view.setBigInt64(offset, entry.delta, true);
+    offset += 8;
+    view.setBigInt64(offset, entry.postValue, true);
+    offset += 8;
+    const bytes = noteBytes[index];
+    view.setUint32(offset, bytes.length, true);
+    offset += 4;
+    out.set(bytes, offset);
+    offset += bytes.length;
+  }
+
+  return out;
+}
+
+/** First 16 bytes of BLAKE3(adjustments signing bytes); zeros at seq 0. */
+export function adjustmentsDigest16(record: Adjustments): string {
+  if (record.seq === 0) return ZERO_DIGEST16;
+  return bytesToHex(
+    blake3(adjustmentsSigningBytes(record.seq, record.entries)).slice(0, 16),
+  );
+}
+
 /** First 16 bytes of BLAKE3(signing bytes), as 32 lowercase hex chars. */
 export function slotDigest16(index: number, slot: Slot): string {
   if (slot.seq === 0) return ZERO_DIGEST16;
@@ -1156,6 +1439,10 @@ export function summaryFromState(state: StateV3): Summary {
     parent: [validated.parent.seq, parentDigest16(validated.parent)],
     contacts: [validated.contacts.seq, contactsDigest16(validated.contacts)],
     payments: [validated.payments.seq, paymentsDigest16(validated.payments)],
+    adjustments: [
+      validated.adjustments.seq,
+      adjustmentsDigest16(validated.adjustments),
+    ],
     slots: validated.slots.map((slot, index) => [
       slot.seq,
       slotDigest16(index, slot),
@@ -1193,6 +1480,17 @@ function needsPayments(
   );
 }
 
+function needsAdjustments(
+  ours: Adjustments,
+  theirs: Adjustments,
+): boolean {
+  return (
+    ours.seq > theirs.seq ||
+    (ours.seq === theirs.seq &&
+      adjustmentsDigest16(ours) !== adjustmentsDigest16(theirs))
+  );
+}
+
 /**
  * Delta the contract would produce for `theirs` (spec §2): include parent and
  * contacts when ours is newer or diverged at equal seq; include a slot iff ours
@@ -1225,6 +1523,9 @@ export function computeDelta(ours: StateV3, theirs: StateV3): Delta {
       : null,
     payments: needsPayments(mine.payments, other.payments)
       ? clonePayments(mine.payments)
+      : null,
+    adjustments: needsAdjustments(mine.adjustments, other.adjustments)
+      ? cloneAdjustments(mine.adjustments)
       : null,
     slots,
   };
@@ -1375,6 +1676,39 @@ export function mergePayments(
   return clonePayments((aCanonical ?? "") > (bCanonical ?? "") ? left : right);
 }
 
+/**
+ * Merge the v5 adjustments record: higher seq wins, then lexicographically
+ * greater signature bytes. The whole log is replaced, never unioned: a higher
+ * seq is the owner's current view, and a child treats it as a hint.
+ */
+export function mergeAdjustments(a: Adjustments, b: Adjustments): Adjustments {
+  const left = validateAdjustments(a);
+  const right = validateAdjustments(b);
+  if (left.seq !== right.seq) {
+    return cloneAdjustments(left.seq > right.seq ? left : right);
+  }
+  const sigOrder = compareSignatures(left.sig, right.sig);
+  if (sigOrder !== 0) return cloneAdjustments(sigOrder > 0 ? left : right);
+
+  // Equal seq + sig means the same record for all valid inputs. The canonical
+  // tie-break only makes the function deterministic for malformed duplicates.
+  const canonical = (record: Adjustments): string =>
+    stringifyJsonLossless([
+      record.seq,
+      record.entries.map((entry) => [
+        entry.slot,
+        entry.slotSeq,
+        entry.delta,
+        entry.postValue,
+        entry.note,
+      ]),
+    ]) ?? "null";
+  const aCanonical = canonical(left);
+  const bCanonical = canonical(right);
+  if (aCanonical === bCanonical) return cloneAdjustments(left);
+  return cloneAdjustments(aCanonical > bCanonical ? left : right);
+}
+
 export function mergeStates(a: StateV3, b: StateV3): StateV3 {
   const left = validateState(a);
   const right = validateState(b);
@@ -1383,6 +1717,7 @@ export function mergeStates(a: StateV3, b: StateV3): StateV3 {
     parent: mergeParent(left.parent, right.parent),
     contacts: mergeContacts(left.contacts, right.contacts),
     payments: mergePayments(left.payments, right.payments),
+    adjustments: mergeAdjustments(left.adjustments, right.adjustments),
     slots: left.slots.map((slot, index) => mergeSlot(slot, right.slots[index])),
   };
 }
@@ -1413,6 +1748,10 @@ export function mergeDelta(state: StateV3, delta: Delta): StateV3 {
       incoming.payments === null
         ? clonePayments(base.payments)
         : mergePayments(base.payments, incoming.payments),
+    adjustments:
+      incoming.adjustments === null
+        ? cloneAdjustments(base.adjustments)
+        : mergeAdjustments(base.adjustments, incoming.adjustments),
     slots,
   };
 }

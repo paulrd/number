@@ -25,14 +25,20 @@ import {
 } from "./delegate";
 import { octalAddress } from "./tree-view";
 import {
+  I64_MAX,
+  MAX_ADJUSTMENTS,
   MAX_PAYMENT_SETTLED,
   decodeDelta,
   decodeState,
   entryFromInputs,
   mergeDelta,
+  optionalText,
+  validateAdjustment,
+  validateAdjustmentList,
   validateContactList,
   validateEntry,
   validatePaymentEntry,
+  type Adjustment,
   type Contact,
   type Delta,
   type DeltaSlot,
@@ -157,6 +163,13 @@ export interface BoardBackend {
     entry: PaymentEntry | null,
     slots: PaymentSlotWrite[],
   ): Promise<PaymentEntry | null>;
+  /**
+   * Sign an issue (positive delta) or burn (negative delta) to one slot's
+   * liability: an ordinary slot write plus one signed v5 adjustment record in a
+   * single delta. Deltas are hundredths; burn clamps at 0. Optional for
+   * backends that cannot sign v5 adjustments (offline).
+   */
+  issueOrBurn?(slotIndex: number, delta: bigint, note: string): Promise<void>;
   /** Read one board by owner id; null when no instance/state exists. */
   readBoard(ownerId: string): Promise<BoardSnapshot | null>;
   retry(): Promise<StateV3>;
@@ -169,6 +182,7 @@ export interface BoardBackend {
     contactsNextSeq: number,
     parentNextSeq: number,
     paymentsNextSeq?: number,
+    adjustmentsNextSeq?: number,
   ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
@@ -306,6 +320,7 @@ export class OnlineBoard implements BoardBackend {
             exported.contactsNextSeq,
             exported.parentNextSeq,
             exported.paymentsNextSeq ?? 1,
+            exported.adjustmentsNextSeq ?? 1,
           );
           this.callbacks.onWarning?.(
             "Recovered the owner identity from the previous delegate.",
@@ -530,10 +545,11 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signContacts(seq, validated);
 
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: { seq, entries: validated, sig },
         payments: null,
+        adjustments: null,
         slots: [],
       };
 
@@ -600,10 +616,11 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signParent(seq, userId);
 
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: { seq, userId, sig },
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [],
       };
 
@@ -743,7 +760,7 @@ export class OnlineBoard implements BoardBackend {
       );
 
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: {
@@ -752,6 +769,7 @@ export class OnlineBoard implements BoardBackend {
           entry: signedEntry,
           sig: paymentsSig,
         },
+        adjustments: null,
         slots: deltaSlots,
       };
 
@@ -780,6 +798,122 @@ export class OnlineBoard implements BoardBackend {
       }
 
       return signedEntry;
+    } catch (error) {
+      this.currentState = previous;
+      this.callbacks.onState(previous);
+      if (updateStarted) void this.refresh();
+      throw error;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /**
+   * Sign an issue (positive delta) or burn (negative delta) to one slot's
+   * liability. The slot entry keeps its contact/unit/note and moves to the new
+   * value; one signed v5 adjustment records the slot write that produced it.
+   * Both travel in a single delta. Deltas are hundredths; burn clamps at 0 by
+   * rejecting the write rather than storing a negative value.
+   */
+  async issueOrBurn(
+    slotIndex: number,
+    delta: bigint,
+    note: string,
+  ): Promise<void> {
+    if (!this.started || !this.currentState || !this.identity || !this.contract) {
+      throw new Error("The board is not connected yet");
+    }
+    if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
+      throw new Error(`slot must be in 0..7, got ${slotIndex}`);
+    }
+    if (typeof delta !== "bigint" || delta === 0n) {
+      throw new Error("delta must be a non-zero bigint (hundredths).");
+    }
+    if (this.mutating) throw new Error("Another change is still in progress");
+
+    const previous = this.currentState;
+    const slot = previous.slots[slotIndex];
+    if (slot.entry === null) {
+      throw new Error("Cannot issue or burn an empty slot.");
+    }
+
+    const newValue = slot.entry.value + delta;
+    if (newValue < 0n) {
+      throw new Error("A burn cannot take the slot below zero.");
+    }
+    if (newValue > I64_MAX) {
+      throw new Error("The new value does not fit in a signed 64-bit integer.");
+    }
+
+    const slotSeq = this.nextSlotSeq(previous, this.identity, slotIndex);
+    const adjustment: Adjustment = validateAdjustment({
+      slot: slotIndex,
+      slotSeq,
+      delta: BigInt(delta),
+      postValue: newValue,
+      note: optionalText(note),
+    });
+    // The log is capped; the oldest entry drops off the front.
+    const entries = [...previous.adjustments.entries, adjustment];
+    const capped =
+      entries.length > MAX_ADJUSTMENTS
+        ? entries.slice(entries.length - MAX_ADJUSTMENTS)
+        : entries;
+    // Validate before signing the slot so a bad note/log cannot write a slot
+    // without its matching adjustment.
+    validateAdjustmentList(capped);
+
+    this.mutating = true;
+    let updateStarted = false;
+
+    try {
+      const entry: Entry = { ...slot.entry, value: newValue };
+      const sig = await this.delegate.sign(slotIndex, slotSeq, entry);
+
+      const adjustmentsSeq = Math.max(
+        previous.adjustments.seq + 1,
+        this.identity.adjustmentsNextSeq ?? 1,
+      );
+      const signed = await this.delegate.signAdjustment(adjustmentsSeq, capped);
+
+      const delta: Delta = {
+        v: 5,
+        parent: null,
+        contacts: null,
+        payments: null,
+        adjustments: { seq: signed.seq, entries: capped, sig: signed.sig },
+        slots: [{ i: slotIndex, seq: slotSeq, entry, sig }],
+      };
+
+      const optimistic = mergeDelta(previous, delta);
+      this.currentState = optimistic;
+      this.callbacks.onState(optimistic);
+
+      this.identity = {
+        ...this.identity,
+        nextSeq: this.identity.nextSeq.map((value, index) =>
+          index === slotIndex ? slotSeq + 1 : value,
+        ),
+        adjustmentsNextSeq: signed.seq + 1,
+      };
+      this.callbacks.onIdentity(this.identity);
+
+      updateStarted = true;
+      await this.contract.updateDelta(delta);
+
+      try {
+        const fresh = await this.contract.getState();
+        this.currentState = fresh;
+        this.callbacks.onState(fresh);
+      } catch (error) {
+        this.callbacks.onWarning?.(
+          `Saved the issue/burn, but could not refresh the board: ${errorMessage(error)}`,
+        );
+      }
+
+      // Keep the delegate pointing at the active v5 instance and the legacy
+      // generations it may still need to read.
+      await this.reconfigureDelegate();
     } catch (error) {
       this.currentState = previous;
       this.callbacks.onState(previous);
@@ -879,6 +1013,7 @@ export class OnlineBoard implements BoardBackend {
     contactsNextSeq: number,
     parentNextSeq: number,
     paymentsNextSeq = 1,
+    adjustmentsNextSeq = 1,
   ): Promise<void> {
     await this.delegate.importSecrets(
       seed,
@@ -886,6 +1021,7 @@ export class OnlineBoard implements BoardBackend {
       contactsNextSeq,
       parentNextSeq,
       paymentsNextSeq,
+      adjustmentsNextSeq,
     );
   }
 
@@ -1057,10 +1193,11 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.sign(slotIndex, seq, entry);
 
       const delta: Delta = {
-        v: 4,
+        v: 5,
         parent: null,
         contacts: null,
         payments: null,
+        adjustments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
       };
 

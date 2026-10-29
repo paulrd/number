@@ -15,7 +15,7 @@ import {
   isMissingDelegateError,
   parseDelegatePayloads,
 } from "./delegate";
-import { MAX_CONTACTS, type Contact, type Entry } from "./state";
+import { MAX_CONTACTS, type Adjustment, type Contact, type Entry } from "./state";
 import type { PaymentEntry } from "./payments";
 import { LEGACY_CONTRACT_CODE_HASHES } from "./migrations";
 
@@ -112,6 +112,17 @@ function entry(value: bigint = 12n): Entry {
   return { value, contact: CONTACT_A, unit: null, note: null };
 }
 
+function adjustment(overrides: Partial<Adjustment> = {}): Adjustment {
+  return {
+    slot: 1,
+    slotSeq: 4,
+    delta: 100n,
+    postValue: 3750n,
+    note: "issue",
+    ...overrides,
+  };
+}
+
 function payment(overrides: Partial<PaymentEntry> = {}): PaymentEntry {
   return {
     id: "0123456789abcdef0123456789abcdef",
@@ -161,6 +172,7 @@ describe("delegate transport", () => {
       contactsNextSeq: 3,
       parentNextSeq: 4,
       paymentsNextSeq: 5,
+      adjustmentsNextSeq: 1,
     });
     expect(sent).toHaveLength(1);
 
@@ -270,6 +282,26 @@ describe("delegate transport", () => {
     }
   });
 
+  it("rejects a malformed adjustmentsNextSeq", async () => {
+    for (const adjustmentsNextSeq of [0, -1, 1.5, "2", null, true]) {
+      let reply: object = {};
+      let client!: DelegateClient;
+      client = new DelegateClient(
+        () => client.handleResponse(response(reply)),
+        KEY_BYTES,
+        CODE_HASH_BYTES,
+        PARAMS_BYTES,
+      );
+      reply = {
+        ok: true,
+        pubkey: "ab".repeat(32),
+        nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+        adjustmentsNextSeq,
+      };
+      await expect(client.identity()).rejects.toMatchObject({ code: "Protocol" });
+    }
+  });
+
   it("signs a parent link with the signParent command", async () => {
     let reply: object = {};
     let client!: DelegateClient;
@@ -372,6 +404,96 @@ describe("delegate transport", () => {
       entry: null,
     });
     expect(sent).toHaveLength(2);
+  });
+
+  it("signs the v5 adjustment log with the signAdjustment command", async () => {
+    let reply: object = {};
+    let client!: DelegateClient;
+    const sent: ClientRequestT[] = [];
+    client = new DelegateClient(
+      (request) => {
+        sent.push(request);
+        client.handleResponse(response(reply));
+      },
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+
+    const entries = [adjustment()];
+    reply = { ok: true, seq: 1, sig: SIG };
+    await expect(client.signAdjustment(1, entries)).resolves.toEqual({
+      seq: 1,
+      sig: SIG,
+    });
+    expect(sentPayload(sent)).toEqual({
+      cmd: "signAdjustment",
+      seq: 1,
+      entries: [
+        {
+          slot: 1,
+          slotSeq: 4,
+          delta: 100,
+          postValue: 3750,
+          note: "issue",
+        },
+      ],
+    });
+  });
+
+  it("rejects malformed signAdjustment arguments and replies", async () => {
+    const sent: ClientRequestT[] = [];
+    const client = new DelegateClient(
+      (request) => sent.push(request),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+    await expect(client.signAdjustment(0, [])).rejects.toMatchObject({
+      code: "Protocol",
+    });
+    await expect(
+      client.signAdjustment(1, [adjustment({ slot: 8 })]),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    await expect(
+      client.signAdjustment(1, [adjustment({ delta: 0n })]),
+    ).rejects.toMatchObject({ code: "Protocol" });
+    expect(sent).toHaveLength(0);
+
+    // The delegate's returned seq is authoritative; a lower/absent seq is a
+    // protocol error, but a higher one is used for the record.
+    const higher = new DelegateClient(
+      () => higher.handleResponse(response({ ok: true, seq: 3, sig: SIG })),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+    await expect(higher.signAdjustment(1, [])).resolves.toEqual({
+      seq: 3,
+      sig: SIG,
+    });
+
+    for (const seq of [0, 1, 1.5, "2", null]) {
+      const invalid = new DelegateClient(
+        () => invalid.handleResponse(response({ ok: true, seq, sig: SIG })),
+        KEY_BYTES,
+        CODE_HASH_BYTES,
+        PARAMS_BYTES,
+      );
+      await expect(invalid.signAdjustment(2, [])).rejects.toMatchObject({
+        code: "Protocol",
+      });
+    }
+
+    const badSig = new DelegateClient(
+      () => badSig.handleResponse(response({ ok: true, seq: 1, sig: "nope" })),
+      KEY_BYTES,
+      CODE_HASH_BYTES,
+      PARAMS_BYTES,
+    );
+    await expect(badSig.signAdjustment(1, [])).rejects.toMatchObject({
+      code: "Protocol",
+    });
   });
 
   it("rejects malformed signPayments arguments before sending", async () => {
@@ -485,6 +607,7 @@ describe("delegate transport", () => {
         contactsNextSeq: 4,
         parentNextSeq: 7,
         paymentsNextSeq: 6,
+        adjustmentsNextSeq: 1,
       },
       ...automationDefaults,
     });
@@ -496,6 +619,7 @@ describe("delegate transport", () => {
       contactsNextSeq: 5,
       parentNextSeq: 8,
       paymentsNextSeq: 10,
+      adjustmentsNextSeq: 12,
     };
     await expect(client.exportSecrets()).resolves.toEqual({
       seed: "cd".repeat(32),
@@ -503,11 +627,19 @@ describe("delegate transport", () => {
       contactsNextSeq: 5,
       parentNextSeq: 8,
       paymentsNextSeq: 10,
+      adjustmentsNextSeq: 12,
     });
 
     reply = { ok: true };
     await expect(
-      client.importSecrets("ef".repeat(32), [1, 1, 1, 1, 1, 1, 1, 1], 6, 9, 11),
+      client.importSecrets(
+        "ef".repeat(32),
+        [1, 1, 1, 1, 1, 1, 1, 1],
+        6,
+        9,
+        11,
+        13,
+      ),
     ).resolves.toBeUndefined();
     expect(sentPayload(sent)).toEqual({
       cmd: "import",
@@ -516,6 +648,7 @@ describe("delegate transport", () => {
       contactsNextSeq: 6,
       parentNextSeq: 9,
       paymentsNextSeq: 11,
+      adjustmentsNextSeq: 13,
     });
 
     // The default counters are 1 for callers that omit them.
@@ -524,6 +657,7 @@ describe("delegate transport", () => {
       contactsNextSeq: 1,
       parentNextSeq: 1,
       paymentsNextSeq: 1,
+      adjustmentsNextSeq: 1,
     });
   });
 
@@ -546,7 +680,7 @@ describe("delegate transport", () => {
 
   it("parses the extended v8 auto-advance status", async () => {
     const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
-    const legacy = LEGACY_CONTRACT_CODE_HASHES[0];
+    const legacy = LEGACY_CONTRACT_CODE_HASHES[1];
     let reply: object = {};
     let client!: DelegateClient;
     client = new DelegateClient(
@@ -643,7 +777,7 @@ describe("delegate transport", () => {
     );
 
     const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
-    const legacy = LEGACY_CONTRACT_CODE_HASHES[0];
+    const legacy = LEGACY_CONTRACT_CODE_HASHES[1];
     // v8 may acknowledge configuration with the full status shape; the client
     // must bind that to the configure/setAutoAdvance request, not to a status
     // request that is not in flight.
@@ -730,7 +864,7 @@ describe("delegate transport", () => {
     ).toBe(false);
     expect(
       isDelegateStatusStale(
-        { configured: true, matchedCodeHash: LEGACY_CONTRACT_CODE_HASHES[0] },
+        { configured: true, matchedCodeHash: LEGACY_CONTRACT_CODE_HASHES[1] },
         active,
       ),
     ).toBe(true);
@@ -738,7 +872,7 @@ describe("delegate transport", () => {
 
   it("configures the delegate on connect, after identity, with the active hash first", async () => {
     const { OnlineBoard } = await import("./board");
-    const active = "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT";
+    const active = "BLbDu5FZUdSfLrGejhuaWw5iMJBo3j3TVRyPv9rfJyMA";
     const pubkey = "ab".repeat(32);
     const sent: Record<string, unknown>[] = [];
 

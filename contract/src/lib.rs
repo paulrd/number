@@ -1,18 +1,21 @@
 //! `number-contract` — one board per owner, with eight number slots, a signed
-//! address book, at most one signed parent and at most one signed cooperative
-//! payment.
+//! address book, at most one signed parent, at most one signed cooperative
+//! payment and a signed issue/burn adjustment log.
 //!
 //! The contract is parameterised by the owner's raw 32-byte Ed25519 verifying
-//! key. Every non-empty (`seq > 0`) slot, contacts record, parent record and
-//! payments record carries an Ed25519 signature over the canonical bytes
-//! defined in `DESIGN.md` §2 and `DESIGN-payments.md`. State is a fixed-size
-//! array of eight slots plus one contacts record, one parent record and one
-//! payments record, so encoding is deterministic and the merge is a
+//! key. Every non-empty (`seq > 0`) slot, contacts record, parent record,
+//! payments record and adjustments record carries an Ed25519 signature over the
+//! canonical bytes defined in `DESIGN.md` §2, `DESIGN-payments.md` and
+//! `DESIGN-v4.1-v5.md` "Pass 2". State is a fixed-size array of eight slots plus
+//! one contacts record, one parent record, one payments record and one
+//! adjustments record, so encoding is deterministic and the merge is a
 //! component-wise maximum; there are no maps, caps or removals in state.
 //!
-//! The payments record is evidence, not proof: the contract checks its shape
-//! and signature but deliberately does not check tree topology, the LCA or the
-//! slot arithmetic. Those are UI protocol rules.
+//! The payments and adjustments records are evidence, not proof: the contract
+//! checks their shape and signatures but deliberately does not check tree
+//! topology, the LCA or the slot arithmetic. Those are UI protocol rules. The
+//! adjustments log is a child-facing hint, not a tamper-proof audit trail: a
+//! higher-seq record replaces the whole log.
 //!
 //! The contract never reads the host clock and never uses randomness.
 
@@ -50,11 +53,22 @@ pub const MAX_ADDRESS_DIGITS: usize = 32;
 /// Maximum route cursor value. A route has at most two 32-digit addresses.
 pub const MAX_PAYMENT_CURSOR: u8 = 64;
 
+/// Maximum number of entries in one adjustments log.
+pub const MAX_ADJUSTMENTS: usize = 32;
+
+/// Maximum length of an adjustment note in UTF-8 bytes.
+pub const MAX_ADJUSTMENT_NOTE_BYTES: usize = 128;
+
 /// State schema version written to (and required in) every wire object.
-pub const STATE_VERSION: u8 = 4;
+///
+/// v5 adds the `adjustments` record. The client upgrades a v4 state by adding
+/// `{"seq":0,"entries":[],"sig":null}` and setting `v:5`; slot, contacts,
+/// parent, payments and v2/v3/v4 signing bytes are unchanged, so every existing
+/// signature keeps validating.
+pub const STATE_VERSION: u8 = 5;
 
 /// Domain prefix of the canonical slot signing bytes. Unchanged from v2 so a v2
-/// state's signatures keep validating after the client upgrades it to v4;
+/// state's signatures keep validating after the client upgrades it to v5;
 /// changing this is a breaking state change; see `DESIGN.md` §2.
 pub const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
 
@@ -66,6 +80,9 @@ pub const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
 
 /// Domain prefix of the canonical payments signing bytes.
 pub const SIGNING_DOMAIN_PAYMENTS: &[u8] = b"number:v4:payments";
+
+/// Domain prefix of the canonical adjustments signing bytes (v5 only).
+pub const SIGNING_DOMAIN_ADJUSTMENTS: &[u8] = b"number:v5:adjustments";
 
 /// Whether `value` is exactly 64 lowercase hexadecimal characters (32 bytes).
 pub fn validate_contact(value: &str) -> bool {
@@ -229,6 +246,108 @@ impl Payments {
     }
 }
 
+/// One issue/burn adjustment to a slot's liability. Every field is covered by
+/// the adjustments signature. The log is a child-facing hint, not a
+/// tamper-proof audit trail.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Adjustment {
+    /// Slot index on this board, `0..=7`.
+    pub slot: u8,
+    /// The slot write this adjustment describes (`slot.seq`), always `> 0`.
+    #[serde(rename = "slotSeq")]
+    pub slot_seq: u64,
+    /// Positive issues, negative burns; never zero.
+    pub delta: i64,
+    /// The signed post-adjustment slot value; never negative.
+    #[serde(rename = "postValue")]
+    pub post_value: i64,
+    /// Optional short reason, at most [`MAX_ADJUSTMENT_NOTE_BYTES`] UTF-8 bytes.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Adjustment {
+    /// Whether every field is within the schema bounds and the implied
+    /// pre-value is non-negative and non-overflowing.
+    pub fn is_valid(&self) -> bool {
+        if usize::from(self.slot) >= SLOT_COUNT
+            || self.slot_seq == 0
+            || self.delta == 0
+            || self.post_value < 0
+        {
+            return false;
+        }
+        if self
+            .note
+            .as_deref()
+            .is_some_and(|note| note.len() > MAX_ADJUSTMENT_NOTE_BYTES)
+        {
+            return false;
+        }
+        let pre_value = if self.delta > 0 {
+            self.post_value.checked_sub(self.delta)
+        } else {
+            self.delta
+                .checked_neg()
+                .and_then(|magnitude| self.post_value.checked_add(magnitude))
+        };
+        pre_value.is_some_and(|pre| pre >= 0)
+    }
+}
+
+/// The signed issue/burn adjustment log. `seq == 0` is the empty record (no
+/// entries, no signature); `seq > 0` replaces the whole log.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Adjustments {
+    pub seq: u64,
+    /// Entries oldest first. Per slot, `slot_seq` strictly increases in list
+    /// order; at most [`MAX_ADJUSTMENTS`] entries.
+    pub entries: Vec<Adjustment>,
+    pub sig: Option<String>,
+}
+
+impl Adjustments {
+    /// The initial, empty adjustment log.
+    pub fn empty() -> Self {
+        Self {
+            seq: 0,
+            entries: Vec::new(),
+            sig: None,
+        }
+    }
+
+    /// Whether this record is valid under the owner `key`.
+    ///
+    /// Covers the seq-0 invariant, the entry count and field bounds, duplicate
+    /// `(slot, slot_seq)` rejection, per-slot increasing `slot_seq` in list
+    /// order and the Ed25519 signature over the canonical bytes.
+    pub fn is_valid(&self, key: &VerifyingKey) -> bool {
+        if self.seq == 0 {
+            return self.entries.is_empty() && self.sig.is_none();
+        }
+        if self.entries.len() > MAX_ADJUSTMENTS {
+            return false;
+        }
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !entry.is_valid() {
+                return false;
+            }
+            // Covers both duplicates and a decreasing slot_seq within a slot.
+            if self.entries[..index]
+                .iter()
+                .any(|other| other.slot == entry.slot && other.slot_seq >= entry.slot_seq)
+            {
+                return false;
+            }
+        }
+        let Some(signature) = self.sig.as_deref().and_then(parse_signature) else {
+            return false;
+        };
+        let bytes = adjustments_signing_bytes(self.seq, &self.entries);
+        key.verify_strict(&bytes, &signature).is_ok()
+    }
+}
+
 /// Whether `value` is an octal address: at most [`MAX_ADDRESS_DIGITS`] digits,
 /// each `0..=7`. The root address is the empty string.
 pub fn validate_address(value: &str) -> bool {
@@ -360,6 +479,42 @@ pub fn payments_signing_bytes(seq: u64, settled: &[String], entry: Option<&Payme
                 out.extend_from_slice(&signature_raw(&leg.sig));
             }
         }
+    }
+    out
+}
+
+/// Canonical adjustments signing bytes, hand-built exactly as specified in
+/// `DESIGN-v4.1-v5.md` "Pass 2".
+///
+/// ```text
+/// b"number:v5:adjustments"
+/// || seq: u64 little-endian
+/// || count: u32 LE
+/// || for each entry, in order:
+///      slot: u8
+///      || slot_seq: u64 LE
+///      || delta: i64 LE
+///      || post_value: i64 LE
+///      || note_len: u32 LE || note bytes
+/// ```
+///
+/// `None` notes encode as length 0. `seq == 0` is never signed.
+pub fn adjustments_signing_bytes(seq: u64, entries: &[Adjustment]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + entries.len() * 40);
+    out.extend_from_slice(SIGNING_DOMAIN_ADJUSTMENTS);
+    out.extend_from_slice(&seq.to_le_bytes());
+    let count =
+        u32::try_from(entries.len()).expect("adjustment count is bounded by MAX_ADJUSTMENTS");
+    out.extend_from_slice(&count.to_le_bytes());
+    for entry in entries {
+        out.push(entry.slot);
+        out.extend_from_slice(&entry.slot_seq.to_le_bytes());
+        out.extend_from_slice(&entry.delta.to_le_bytes());
+        out.extend_from_slice(&entry.post_value.to_le_bytes());
+        let note = entry.note.as_deref().unwrap_or_default().as_bytes();
+        let note_len = u32::try_from(note.len()).expect("note bounds keep lengths below u32::MAX");
+        out.extend_from_slice(&note_len.to_le_bytes());
+        out.extend_from_slice(note);
     }
     out
 }
@@ -562,17 +717,19 @@ impl Slot {
     }
 }
 
-/// Full contract state v4 (§2 plus `DESIGN-payments.md`).
+/// Full contract state v5 (§2 plus `DESIGN-payments.md` and the Pass 2
+/// adjustment log).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateV4 {
+pub struct StateV5 {
     pub v: u8,
     pub parent: Parent,
     pub contacts: Contacts,
     pub payments: Payments,
+    pub adjustments: Adjustments,
     pub slots: [Slot; SLOT_COUNT],
 }
 
-impl StateV4 {
+impl StateV5 {
     /// An all-empty board.
     pub fn empty() -> Self {
         Self {
@@ -580,6 +737,7 @@ impl StateV4 {
             parent: Parent::empty(),
             contacts: Contacts::empty(),
             payments: Payments::empty(),
+            adjustments: Adjustments::empty(),
             slots: std::array::from_fn(|_| Slot::empty()),
         }
     }
@@ -591,12 +749,16 @@ impl StateV4 {
 
     /// Encode state deterministically as JSON.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StateV4 serialization cannot fail")
+        serde_json::to_vec(self).expect("StateV5 serialization cannot fail")
     }
 
-    /// Validate version, parent, contacts, payments, slot count (enforced by
-    /// the array type), the seq-0 invariants, field bounds and every signature
-    /// under `key`.
+    /// Validate version, parent, contacts, payments, adjustments, slot count
+    /// (enforced by the array type), the seq-0 invariants, field bounds and
+    /// every signature under `key`.
+    ///
+    /// Merge-invariant only: adjustments are never compared with `slots` here.
+    /// The two records merge independently, so a merged state may legitimately
+    /// carry an adjustment whose referenced slot write was superseded.
     pub fn validate(&self, key: &VerifyingKey) -> Result<(), ContractError> {
         if self.v != STATE_VERSION {
             return Err(ContractError::InvalidState);
@@ -608,6 +770,9 @@ impl StateV4 {
             return Err(ContractError::InvalidState);
         }
         if !self.payments.is_valid(key) {
+            return Err(ContractError::InvalidState);
+        }
+        if !self.adjustments.is_valid(key) {
             return Err(ContractError::InvalidState);
         }
         for (index, slot) in self.slots.iter().enumerate() {
@@ -624,6 +789,7 @@ impl StateV4 {
         self.parent = merge_parent(&self.parent, &other.parent);
         self.contacts = merge_contacts(&self.contacts, &other.contacts);
         self.payments = merge_payments(&self.payments, &other.payments);
+        self.adjustments = merge_adjustments(&self.adjustments, &other.adjustments);
         for (index, other_slot) in other.slots.iter().enumerate() {
             self.slots[index] = merge_slot(&self.slots[index], other_slot);
         }
@@ -672,6 +838,22 @@ fn merge_payments(a: &Payments, b: &Payments) -> Payments {
         return b.clone();
     }
     if payments_signature_bytes(a) >= payments_signature_bytes(b) {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// Adjustments merge: higher `seq` wins; on equal `seq` the lexicographically
+/// greater signature bytes win. A higher-seq record replaces the whole log.
+fn merge_adjustments(a: &Adjustments, b: &Adjustments) -> Adjustments {
+    if a.seq > b.seq {
+        return a.clone();
+    }
+    if b.seq > a.seq {
+        return b.clone();
+    }
+    if adjustments_signature_bytes(a) >= adjustments_signature_bytes(b) {
         a.clone()
     } else {
         b.clone()
@@ -736,6 +918,19 @@ fn parent_signature_bytes(parent: &Parent) -> [u8; 64] {
 /// sig, which the validators reject before merging) compares as all-zero bytes.
 fn payments_signature_bytes(payments: &Payments) -> [u8; 64] {
     payments
+        .sig
+        .as_deref()
+        .and_then(|sig| {
+            let bytes = hex::decode(sig).ok()?;
+            bytes.try_into().ok()
+        })
+        .unwrap_or([0; 64])
+}
+
+/// The adjustments signature field as bytes. An empty record (and any malformed
+/// sig, which the validators reject before merging) compares as all-zero bytes.
+fn adjustments_signature_bytes(adjustments: &Adjustments) -> [u8; 64] {
+    adjustments
         .sig
         .as_deref()
         .and_then(|sig| {
@@ -868,20 +1063,22 @@ fn parse_signature(sig: &str) -> Option<Signature> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SlotSummary(pub u64, pub String);
 
-/// State summary (§2.6). One parent pair, one contacts pair, one payments pair
-/// plus exactly eight slot pairs; the digest is all-zero for an empty record.
+/// State summary (§2.6). One parent pair, one contacts pair, one payments pair,
+/// one adjustments pair plus exactly eight slot pairs; the digest is all-zero
+/// for an empty record.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub v: u8,
     pub parent: SlotSummary,
     pub contacts: SlotSummary,
     pub payments: SlotSummary,
+    pub adjustments: SlotSummary,
     pub slots: [SlotSummary; SLOT_COUNT],
 }
 
 impl Summary {
     /// Build the summary for `state`.
-    pub fn of(state: &StateV4) -> Self {
+    pub fn of(state: &StateV5) -> Self {
         let parent = if state.parent.seq == 0 {
             SlotSummary(0, hex::encode([0u8; 16]))
         } else {
@@ -910,6 +1107,15 @@ impl Summary {
             ));
             SlotSummary(state.payments.seq, hex::encode(digest))
         };
+        let adjustments = if state.adjustments.seq == 0 {
+            SlotSummary(0, hex::encode([0u8; 16]))
+        } else {
+            let digest = digest16(&adjustments_signing_bytes(
+                state.adjustments.seq,
+                &state.adjustments.entries,
+            ));
+            SlotSummary(state.adjustments.seq, hex::encode(digest))
+        };
         let slots = std::array::from_fn(|index| {
             let slot = &state.slots[index];
             if slot.seq == 0 {
@@ -924,6 +1130,7 @@ impl Summary {
             parent,
             contacts,
             payments,
+            adjustments,
             slots,
         }
     }
@@ -950,6 +1157,10 @@ impl Summary {
         }
         let payments_digest = summary_digest(&summary.payments.1)?;
         if summary.payments.0 == 0 && payments_digest != [0u8; 16] {
+            return Err(ContractError::InvalidDelta);
+        }
+        let adjustments_digest = summary_digest(&summary.adjustments.1)?;
+        if summary.adjustments.0 == 0 && adjustments_digest != [0u8; 16] {
             return Err(ContractError::InvalidDelta);
         }
         for slot in &summary.slots {
@@ -1005,16 +1216,17 @@ impl DeltaSlot {
     }
 }
 
-/// Validated delta payload: the optional parent, contacts and payments records
-/// plus changed slots.
+/// Validated delta payload: the optional parent, contacts, payments and
+/// adjustments records plus changed slots.
 type ValidatedDelta = (
     Option<Parent>,
     Option<Contacts>,
     Option<Payments>,
+    Option<Adjustments>,
     Vec<(u8, Slot)>,
 );
 
-/// State delta (§2.7, v4).
+/// State delta (§2.7, v5).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Delta {
     pub v: u8,
@@ -1027,6 +1239,9 @@ pub struct Delta {
     /// `null`/absent when the payments record is unchanged.
     #[serde(default)]
     pub payments: Option<Payments>,
+    /// `null`/absent when the adjustments record is unchanged.
+    #[serde(default)]
+    pub adjustments: Option<Adjustments>,
     pub slots: Vec<DeltaSlot>,
 }
 
@@ -1041,9 +1256,9 @@ impl Delta {
         serde_json::from_slice(bytes).map_err(|_| ContractError::InvalidDelta)
     }
 
-    /// Validate the contacts and payments records and every slot under `key`,
-    /// returning them for merging. Validation is all-or-nothing before anything
-    /// is applied.
+    /// Validate the parent, contacts, payments and adjustments records and
+    /// every slot under `key`, returning them for merging. Validation is
+    /// all-or-nothing before anything is applied.
     fn validated(&self, key: &VerifyingKey) -> Result<ValidatedDelta, ContractError> {
         if self.v != STATE_VERSION {
             return Err(ContractError::InvalidDelta);
@@ -1075,6 +1290,15 @@ impl Delta {
                 Some(payments.clone())
             }
         };
+        let adjustments = match &self.adjustments {
+            None => None,
+            Some(adjustments) => {
+                if !adjustments.is_valid(key) {
+                    return Err(ContractError::InvalidDelta);
+                }
+                Some(adjustments.clone())
+            }
+        };
         let mut slots = Vec::with_capacity(self.slots.len());
         for delta_slot in &self.slots {
             if usize::from(delta_slot.i) >= SLOT_COUNT {
@@ -1086,8 +1310,47 @@ impl Delta {
             }
             slots.push((delta_slot.i, slot));
         }
-        Ok((parent, contacts, payments, slots))
+        Ok((parent, contacts, payments, adjustments, slots))
     }
+}
+
+/// Merge-time provenance for one incoming delta.
+///
+/// Every adjustment entry that is not already in the current log must describe
+/// a slot write carried by the same delta: the slot sequence must match, the
+/// written value must equal `post_value`, and `post_value` must equal the
+/// pre-update slot value (0 for an empty slot) plus `delta`. This is not part of
+/// `validate`, because adjustments and slots merge independently.
+fn adjustments_provenance_holds(
+    current: &StateV5,
+    adjustments: &Adjustments,
+    slots: &[(u8, Slot)],
+) -> bool {
+    for entry in &adjustments.entries {
+        if current.adjustments.entries.contains(entry) {
+            continue;
+        }
+        let Some((_, slot)) = slots.iter().find(|(index, _)| *index == entry.slot) else {
+            return false;
+        };
+        if slot.seq != entry.slot_seq {
+            return false;
+        }
+        let Some(slot_entry) = slot.entry.as_ref() else {
+            return false;
+        };
+        if slot_entry.value != entry.post_value {
+            return false;
+        }
+        let old_value = current.slots[usize::from(entry.slot)]
+            .entry
+            .as_ref()
+            .map_or(0, |entry| entry.value);
+        if old_value.checked_add(entry.delta) != Some(entry.post_value) {
+            return false;
+        }
+    }
+    true
 }
 
 fn owner_key(parameters: &Parameters<'_>) -> Result<VerifyingKey, ContractError> {
@@ -1101,11 +1364,12 @@ fn owner_key(parameters: &Parameters<'_>) -> Result<VerifyingKey, ContractError>
 
 /// Staged, already-validated incoming update.
 enum Incoming {
-    Full(Box<StateV4>),
+    Full(Box<StateV5>),
     Delta {
         parent: Option<Parent>,
         contacts: Option<Contacts>,
         payments: Option<Box<Payments>>,
+        adjustments: Option<Box<Adjustments>>,
         slots: Vec<(u8, Slot)>,
     },
 }
@@ -1123,7 +1387,7 @@ impl ContractInterface for NumberContract {
         let Ok(key) = owner_key(&parameters) else {
             return Ok(ValidateResult::Invalid);
         };
-        let Ok(state) = StateV4::decode(state.as_ref()) else {
+        let Ok(state) = StateV5::decode(state.as_ref()) else {
             return Ok(ValidateResult::Invalid);
         };
         match state.validate(&key) {
@@ -1141,7 +1405,7 @@ impl ContractInterface for NumberContract {
             return Ok(UpdateModification::valid(state));
         }
         let key = owner_key(&parameters)?;
-        let mut current = StateV4::decode(state.as_ref())?;
+        let mut current = StateV5::decode(state.as_ref())?;
         current.validate(&key)?;
 
         // Stage and validate everything before mutating. A single invalid
@@ -1151,17 +1415,18 @@ impl ContractInterface for NumberContract {
         for item in &data {
             match item {
                 UpdateData::State(incoming) => {
-                    let incoming = StateV4::decode(incoming.as_ref())?;
+                    let incoming = StateV5::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                 }
                 UpdateData::Delta(delta) => {
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, payments, slots) = delta.validated(&key)?;
+                    let (parent, contacts, payments, adjustments, slots) = delta.validated(&key)?;
                     staged.push(Incoming::Delta {
                         parent,
                         contacts,
                         payments: payments.map(Box::new),
+                        adjustments: adjustments.map(Box::new),
                         slots,
                     });
                 }
@@ -1169,15 +1434,16 @@ impl ContractInterface for NumberContract {
                     state: incoming,
                     delta,
                 } => {
-                    let incoming = StateV4::decode(incoming.as_ref())?;
+                    let incoming = StateV5::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, payments, slots) = delta.validated(&key)?;
+                    let (parent, contacts, payments, adjustments, slots) = delta.validated(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                     staged.push(Incoming::Delta {
                         parent,
                         contacts,
                         payments: payments.map(Box::new),
+                        adjustments: adjustments.map(Box::new),
                         slots,
                     });
                 }
@@ -1193,8 +1459,18 @@ impl ContractInterface for NumberContract {
                     parent,
                     contacts,
                     payments,
+                    adjustments,
                     slots,
                 } => {
+                    // Provenance is a per-delta, merge-time rule. A full-state
+                    // update is the migration path and only validates
+                    // signatures/bounds. Entries already present in the current
+                    // log are history and need no slot write in this delta.
+                    if let Some(adjustments) = &adjustments {
+                        if !adjustments_provenance_holds(&current, adjustments, &slots) {
+                            return Err(ContractError::InvalidDelta);
+                        }
+                    }
                     if let Some(parent) = parent {
                         current.parent = merge_parent(&current.parent, &parent);
                     }
@@ -1203,6 +1479,9 @@ impl ContractInterface for NumberContract {
                     }
                     if let Some(payments) = payments {
                         current.payments = merge_payments(&current.payments, &payments);
+                    }
+                    if let Some(adjustments) = adjustments {
+                        current.adjustments = merge_adjustments(&current.adjustments, &adjustments);
                     }
                     for (index, slot) in slots {
                         let merged = merge_slot(&current.slots[usize::from(index)], &slot);
@@ -1219,7 +1498,7 @@ impl ContractInterface for NumberContract {
         _parameters: Parameters<'static>,
         state: State<'static>,
     ) -> Result<StateSummary<'static>, ContractError> {
-        let state = StateV4::decode(state.as_ref())?;
+        let state = StateV5::decode(state.as_ref())?;
         Ok(StateSummary::from(Summary::of(&state).to_bytes()))
     }
 
@@ -1228,7 +1507,7 @@ impl ContractInterface for NumberContract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        let state = StateV4::decode(state.as_ref())?;
+        let state = StateV5::decode(state.as_ref())?;
         // An empty summary is what a brand-new subscriber presents: it holds
         // nothing, so the full board is the delta. Treat an undecodable summary
         // the same way (send everything) rather than failing — a failed delta
@@ -1295,6 +1574,24 @@ impl ContractInterface for NumberContract {
             }
         };
 
+        let local_adjustments_digest = if state.adjustments.seq == 0 {
+            [0u8; 16]
+        } else {
+            digest16(&adjustments_signing_bytes(
+                state.adjustments.seq,
+                &state.adjustments.entries,
+            ))
+        };
+        let include_adjustments = match &summary {
+            None => state.adjustments.seq > 0,
+            Some(summary) => {
+                let remote_digest = summary_digest(&summary.adjustments.1)?;
+                state.adjustments.seq > summary.adjustments.0
+                    || (state.adjustments.seq == summary.adjustments.0
+                        && local_adjustments_digest != remote_digest)
+            }
+        };
+
         let mut slots = Vec::new();
         for (index, slot) in state.slots.iter().enumerate() {
             let include = match &summary {
@@ -1315,7 +1612,12 @@ impl ContractInterface for NumberContract {
             }
         }
 
-        if !include_parent && !include_contacts && !include_payments && slots.is_empty() {
+        if !include_parent
+            && !include_contacts
+            && !include_payments
+            && !include_adjustments
+            && slots.is_empty()
+        {
             // The unambiguous "converged" answer (§2.7).
             return Ok(StateDelta::from(vec![]));
         }
@@ -1333,6 +1635,11 @@ impl ContractInterface for NumberContract {
             },
             payments: if include_payments {
                 Some(state.payments.clone())
+            } else {
+                None
+            },
+            adjustments: if include_adjustments {
+                Some(state.adjustments.clone())
             } else {
                 None
             },
@@ -1416,6 +1723,15 @@ mod tests {
         hex::encode([tag; 16])
     }
 
+    fn signed_adjustments(key: &SigningKey, seq: u64, entries: Vec<Adjustment>) -> Adjustments {
+        let signature = key.sign(&adjustments_signing_bytes(seq, &entries));
+        Adjustments {
+            seq,
+            entries,
+            sig: Some(hex::encode(signature.to_bytes())),
+        }
+    }
+
     fn sample_leg(slot: u8, seq: u64, post_value: i64) -> PaymentLeg {
         PaymentLeg {
             slot,
@@ -1467,24 +1783,25 @@ mod tests {
         Parameters::from(key.verifying_key().to_bytes().to_vec())
     }
 
-    fn state_of(slots: Vec<Slot>, contacts: Contacts) -> StateV4 {
+    fn state_of(slots: Vec<Slot>, contacts: Contacts) -> StateV5 {
         let slots: [Slot; SLOT_COUNT] = slots
             .try_into()
             .expect("test helper always supplies eight slots");
-        StateV4 {
+        StateV5 {
             v: STATE_VERSION,
             parent: Parent::empty(),
             contacts,
             payments: Payments::empty(),
+            adjustments: Adjustments::empty(),
             slots,
         }
     }
 
-    fn state_with_slots(slots: Vec<Slot>) -> StateV4 {
+    fn state_with_slots(slots: Vec<Slot>) -> StateV5 {
         state_of(slots, Contacts::empty())
     }
 
-    fn merged(a: &StateV4, b: &StateV4) -> StateV4 {
+    fn merged(a: &StateV5, b: &StateV5) -> StateV5 {
         let mut result = a.clone();
         result.merge(b);
         result
@@ -1499,8 +1816,8 @@ mod tests {
         }
     }
 
-    fn populated_state(key: &SigningKey) -> StateV4 {
-        let mut state = StateV4::empty();
+    fn populated_state(key: &SigningKey) -> StateV5 {
+        let mut state = StateV5::empty();
         state.parent = signed_parent(key, 2, Some(CONTACT_22));
         state.contacts = signed_contacts(key, 1, vec![contact("Alice", CONTACT_11)]);
         state.slots[2] = signed_slot(key, 2, 4, Some(sample_entry()));
@@ -1643,15 +1960,15 @@ mod tests {
         );
     }
 
-    /// Migrations safety: the client upgrades a v2 state to v4 by adding an
-    /// empty parent and an empty payments record. The v2 slot/contacts signing
-    /// domains are unchanged, so the old signatures must still validate under a
-    /// v4 contract.
+    /// Migration safety: the client upgrades a v2 state to v5 by adding an empty
+    /// parent, an empty payments record and an empty adjustments record. The v2
+    /// slot/contacts signing domains are unchanged, so the old signatures must
+    /// still validate under a v5 contract.
     #[test]
-    fn v2_signed_slots_and_contacts_validate_with_an_empty_v4_parent() {
+    fn v2_signed_slots_and_contacts_validate_with_empty_v5_records() {
         let key = test_key();
         let verifying = key.verifying_key();
-        let mut state = StateV4::empty();
+        let mut state = StateV5::empty();
         // Produced by the v2 delegate for seed [7u8; 32]:
         // contacts seq 1 `Alice`, slot 3 seq 7 value 12.
         state.contacts = Contacts {
@@ -1676,8 +1993,10 @@ mod tests {
             ),
         };
 
-        assert_eq!(state.v, 4);
+        assert_eq!(state.v, 5);
         assert_eq!(state.parent, Parent::empty());
+        assert_eq!(state.payments, Payments::empty());
+        assert_eq!(state.adjustments, Adjustments::empty());
         assert!(state.validate(&verifying).is_ok());
         assert_eq!(
             NumberContract::validate_state(
@@ -2230,7 +2549,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV4::decode(updated.as_ref()).unwrap().parent,
+            StateV5::decode(updated.as_ref()).unwrap().parent,
             newer.parent
         );
 
@@ -2241,6 +2560,7 @@ mod tests {
             parent: Some(parent.clone()),
             contacts: None,
             payments: None,
+            adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
@@ -2250,7 +2570,7 @@ mod tests {
         )
         .unwrap()
         .unwrap_valid();
-        assert_eq!(StateV4::decode(updated.as_ref()).unwrap().parent, parent);
+        assert_eq!(StateV5::decode(updated.as_ref()).unwrap().parent, parent);
 
         // Stale parent updates lose the merge without an error.
         let stale = Delta {
@@ -2258,6 +2578,7 @@ mod tests {
             parent: Some(signed_parent(&key, 2, Some(CONTACT_22))),
             contacts: None,
             payments: None,
+            adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
@@ -2268,7 +2589,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV4::decode(updated.as_ref()).unwrap().parent,
+            StateV5::decode(updated.as_ref()).unwrap().parent,
             base.parent
         );
     }
@@ -2352,7 +2673,7 @@ mod tests {
     #[test]
     fn update_state_merges_full_state_slot_wise() {
         let key = test_key();
-        let empty = StateV4::empty();
+        let empty = StateV5::empty();
         let incoming = populated_state(&key);
         let updated = NumberContract::update_state(
             params(&key),
@@ -2368,7 +2689,7 @@ mod tests {
     fn update_state_rejects_invalid_update_atomically() {
         let key = test_key();
         let valid = populated_state(&key);
-        let mut invalid = StateV4::empty();
+        let mut invalid = StateV5::empty();
         // Slot 0 is valid, slot 1 is tampered; the whole update must fail and
         // must not half-apply slot 0.
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
@@ -2378,7 +2699,7 @@ mod tests {
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2390,14 +2711,14 @@ mod tests {
     #[test]
     fn update_state_rejects_invalid_contacts_atomically() {
         let key = test_key();
-        let mut invalid = StateV4::empty();
+        let mut invalid = StateV5::empty();
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
         invalid.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
         invalid.contacts.sig = Some(hex::encode([0u8; 64]));
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2414,6 +2735,7 @@ mod tests {
             parent: None,
             contacts: None,
             payments: None,
+            adjustments: None,
             slots: vec![
                 DeltaSlot::from_slot(0, &first),
                 DeltaSlot::from_slot(1, &second),
@@ -2421,7 +2743,7 @@ mod tests {
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2437,11 +2759,12 @@ mod tests {
             parent: None,
             contacts: Some(contacts),
             payments: None,
+            adjustments: None,
             slots: vec![],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2499,7 +2822,7 @@ mod tests {
         let key = test_key();
         let mut a = populated_state(&key);
         a.contacts = signed_contacts(&key, 5, vec![contact("Alice", CONTACT_11)]);
-        let mut b = StateV4::empty();
+        let mut b = StateV5::empty();
         b.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
         b.contacts = signed_contacts(&key, 2, vec![contact("Bob", CONTACT_22)]);
 
@@ -2513,7 +2836,7 @@ mod tests {
 
     // ---- summary and delta ------------------------------------------------
 
-    fn summarize(state: &StateV4) -> StateSummary<'static> {
+    fn summarize(state: &StateV5) -> StateSummary<'static> {
         NumberContract::summarize_state(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -2521,7 +2844,7 @@ mod tests {
         .unwrap()
     }
 
-    fn delta_from(state: &StateV4, summary: &StateSummary<'_>) -> StateDelta<'static> {
+    fn delta_from(state: &StateV5, summary: &StateSummary<'_>) -> StateDelta<'static> {
         NumberContract::get_state_delta(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -2532,8 +2855,8 @@ mod tests {
 
     #[test]
     fn initial_state_json_is_the_empty_board() {
-        let initial: StateV4 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
-        assert_eq!(initial, StateV4::empty());
+        let initial: StateV5 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
+        assert_eq!(initial, StateV5::empty());
     }
 
     #[test]
@@ -2552,6 +2875,10 @@ mod tests {
             summary["payments"],
             serde_json::json!([0, "00000000000000000000000000000000"])
         );
+        assert_eq!(
+            summary["adjustments"],
+            serde_json::json!([0, "00000000000000000000000000000000"])
+        );
         let pairs = summary["slots"].as_array().unwrap();
         assert_eq!(pairs.len(), SLOT_COUNT);
         assert_eq!(
@@ -2563,7 +2890,7 @@ mod tests {
         assert_eq!(digest.len(), 32);
         assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
 
-        let mut delta_state = StateV4::empty();
+        let mut delta_state = StateV5::empty();
         delta_state.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
         delta_state.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
         let delta = Delta {
@@ -2571,12 +2898,14 @@ mod tests {
             parent: None,
             contacts: Some(delta_state.contacts.clone()),
             payments: None,
+            adjustments: None,
             slots: vec![DeltaSlot::from_slot(2, &delta_state.slots[2])],
         };
         let decoded: serde_json::Value = serde_json::from_slice(&delta.to_bytes()).unwrap();
         assert_eq!(decoded["v"], STATE_VERSION);
         assert!(decoded["parent"].is_null());
         assert!(decoded["payments"].is_null());
+        assert!(decoded["adjustments"].is_null());
         assert_eq!(decoded["contacts"]["seq"], 3);
         assert_eq!(decoded["contacts"]["entries"][0]["label"], "Alice");
         assert_eq!(decoded["contacts"]["entries"][0]["userId"], CONTACT_11);
@@ -2608,7 +2937,7 @@ mod tests {
     #[test]
     fn delta_summary_round_trip() {
         let key = test_key();
-        let from = StateV4::empty();
+        let from = StateV5::empty();
         let to = populated_state(&key);
 
         let delta = delta_from(&to, &summarize(&from));
@@ -2633,7 +2962,7 @@ mod tests {
     #[test]
     fn contacts_only_delta_round_trips() {
         let key = test_key();
-        let mut before = StateV4::empty();
+        let mut before = StateV5::empty();
         before.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
         let mut after = before.clone();
         after.contacts = signed_contacts(
@@ -2660,7 +2989,7 @@ mod tests {
     #[test]
     fn summary_includes_parent_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV4::empty();
+        let empty = StateV5::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.parent.0, 0);
         assert_eq!(summary.parent.1, "00000000000000000000000000000000");
@@ -2679,7 +3008,7 @@ mod tests {
     #[test]
     fn parent_delta_round_trips_set_and_clear() {
         let key = test_key();
-        let before = StateV4::empty();
+        let before = StateV5::empty();
         let mut after = before.clone();
         after.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
@@ -2730,9 +3059,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_parent_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV4::empty();
+        let mut local = StateV5::empty();
         local.parent = signed_parent(&key, 3, Some(CONTACT_11));
-        let mut remote = StateV4::empty();
+        let mut remote = StateV5::empty();
         remote.parent = signed_parent(&key, 3, Some(CONTACT_22));
 
         let delta = delta_from(&local, &summarize(&remote));
@@ -2743,7 +3072,7 @@ mod tests {
     #[test]
     fn empty_summary_includes_parent() {
         let key = test_key();
-        let mut state = StateV4::empty();
+        let mut state = StateV5::empty();
         state.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
         let delta = delta_from(&state, &StateSummary::from(vec![]));
@@ -2771,9 +3100,9 @@ mod tests {
     #[test]
     fn get_state_delta_equals_seq_with_different_digest_heals() {
         let key = test_key();
-        let mut local = StateV4::empty();
+        let mut local = StateV5::empty();
         local.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
-        let mut remote_summary_state = StateV4::empty();
+        let mut remote_summary_state = StateV5::empty();
         // Same seq, different signed record (owner equivocation).
         remote_summary_state.contacts = signed_contacts(&key, 3, vec![contact("Bob", CONTACT_22)]);
 
@@ -2811,7 +3140,7 @@ mod tests {
 
         let synced = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::Delta(delta)],
         )
         .unwrap()
@@ -2837,7 +3166,7 @@ mod tests {
     #[test]
     fn tombstone_round_trips_through_delta() {
         let key = test_key();
-        let mut before = StateV4::empty();
+        let mut before = StateV5::empty();
         before.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
 
         let mut after = before.clone();
@@ -2931,11 +3260,12 @@ mod tests {
             parent: None,
             contacts: None,
             payments: None,
+            adjustments: None,
             slots: vec![DeltaSlot::from_slot(8, &slot)],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::empty().to_bytes()),
+            State::from(StateV5::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2956,24 +3286,35 @@ mod tests {
 
         for bad in [
             serde_json::json!({
-                "v": 4,
+                "v": 5,
                 "parent": [0, "11111111111111111111111111111111"],
                 "contacts": [0, "00000000000000000000000000000000"],
                 "payments": [0, "00000000000000000000000000000000"],
+                "adjustments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 4,
+                "v": 5,
                 "parent": [0, "00000000000000000000000000000000"],
                 "contacts": [0, "11111111111111111111111111111111"],
                 "payments": [0, "00000000000000000000000000000000"],
+                "adjustments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 4,
+                "v": 5,
                 "parent": [0, "00000000000000000000000000000000"],
                 "contacts": [0, "00000000000000000000000000000000"],
                 "payments": [0, "11111111111111111111111111111111"],
+                "adjustments": [0, "00000000000000000000000000000000"],
+                "slots": zero_slots.clone(),
+            }),
+            serde_json::json!({
+                "v": 5,
+                "parent": [0, "00000000000000000000000000000000"],
+                "contacts": [0, "00000000000000000000000000000000"],
+                "payments": [0, "00000000000000000000000000000000"],
+                "adjustments": [0, "11111111111111111111111111111111"],
                 "slots": zero_slots,
             }),
         ] {
@@ -3000,7 +3341,7 @@ mod tests {
             serde_json::from_str(r#"{"seq":1,"entry":null,"sig":null}"#).unwrap();
         assert!(decoded.settled.is_empty());
 
-        // The canonical v4 encoding always writes the list.
+        // The canonical encoding always writes the list.
         assert_eq!(
             serde_json::to_string(&Payments::empty()).unwrap(),
             r#"{"seq":0,"settled":[],"entry":null,"sig":null}"#
@@ -3325,7 +3666,7 @@ mod tests {
     #[test]
     fn payments_delta_round_trips_settled() {
         let key = test_key();
-        let before = StateV4::empty();
+        let before = StateV5::empty();
         let mut after = before.clone();
         after.payments = signed_payments_with_settled(
             &key,
@@ -3379,7 +3720,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV4::decode(updated.as_ref()).unwrap().payments,
+            StateV5::decode(updated.as_ref()).unwrap().payments,
             incoming
         );
 
@@ -3389,17 +3730,18 @@ mod tests {
             parent: None,
             contacts: None,
             payments: Some(delta_payments.clone()),
+            adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::decode(updated.as_ref()).unwrap().to_bytes()),
+            State::from(StateV5::decode(updated.as_ref()).unwrap().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         )
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV4::decode(updated.as_ref()).unwrap().payments,
+            StateV5::decode(updated.as_ref()).unwrap().payments,
             delta_payments
         );
 
@@ -3409,17 +3751,18 @@ mod tests {
             parent: None,
             contacts: None,
             payments: Some(signed_payments(&key, 2, Some(sample_payment()))),
+            adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
             params(&key),
-            State::from(StateV4::decode(updated.as_ref()).unwrap().to_bytes()),
+            State::from(StateV5::decode(updated.as_ref()).unwrap().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(stale.to_bytes()))],
         )
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV4::decode(updated.as_ref()).unwrap().payments,
+            StateV5::decode(updated.as_ref()).unwrap().payments,
             delta_payments
         );
     }
@@ -3427,7 +3770,7 @@ mod tests {
     #[test]
     fn summary_includes_payments_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV4::empty();
+        let empty = StateV5::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.payments.0, 0);
         assert_eq!(summary.payments.1, "0".repeat(32));
@@ -3452,7 +3795,7 @@ mod tests {
     #[test]
     fn payments_delta_round_trips_and_clear() {
         let key = test_key();
-        let before = StateV4::empty();
+        let before = StateV5::empty();
         let mut after = before.clone();
         after.payments = signed_payments(&key, 1, Some(sample_payment()));
 
@@ -3494,9 +3837,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_payments_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV4::empty();
+        let mut local = StateV5::empty();
         local.payments = signed_payments(&key, 3, Some(sample_payment()));
-        let mut remote = StateV4::empty();
+        let mut remote = StateV5::empty();
         remote.payments = signed_payments(&key, 3, Some(terminal_payment()));
 
         let delta = delta_from(&local, &summarize(&remote));
@@ -3507,7 +3850,7 @@ mod tests {
     #[test]
     fn empty_summary_includes_payments() {
         let key = test_key();
-        let mut state = StateV4::empty();
+        let mut state = StateV5::empty();
         state.payments = signed_payments(&key, 1, Some(sample_payment()));
 
         let delta = delta_from(&state, &StateSummary::from(vec![]));
@@ -3516,7 +3859,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_state_shape_is_not_accepted() {
+    fn older_state_shapes_are_not_accepted() {
         let key = test_key();
         let v3 = r#"{"v":3,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
         assert_eq!(
@@ -3531,18 +3874,731 @@ mod tests {
 
         // v4 without the payments field also fails to decode.
         let missing_payments = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
-        assert!(StateV4::decode(missing_payments.as_bytes()).is_err());
+        assert!(StateV5::decode(missing_payments.as_bytes()).is_err());
+
+        // A complete v4 state has no adjustments field and is rejected.
+        let v4 = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"payments":{"seq":0,"settled":[],"entry":null,"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
+        assert!(StateV5::decode(v4.as_bytes()).is_err());
+
+        // v5 without the adjustments field also fails to decode.
+        let missing_adjustments = r#"{"v":5,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"payments":{"seq":0,"settled":[],"entry":null,"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
+        assert!(StateV5::decode(missing_adjustments.as_bytes()).is_err());
     }
 
     #[test]
-    fn v4_empty_state_round_trips() {
+    fn summary_and_delta_reject_the_previous_version() {
         let key = test_key();
-        let empty = StateV4::empty();
-        let decoded = StateV4::decode(&empty.to_bytes()).unwrap();
+        let state = populated_state(&key);
+
+        let mut summary: serde_json::Value =
+            serde_json::from_slice(&Summary::of(&state).to_bytes()).unwrap();
+        summary["v"] = serde_json::json!(4);
+        assert!(Summary::decode(&serde_json::to_vec(&summary).unwrap()).is_err());
+
+        let mut delta: serde_json::Value = serde_json::from_slice(
+            &Delta {
+                v: STATE_VERSION,
+                parent: None,
+                contacts: Some(state.contacts.clone()),
+                payments: None,
+                adjustments: None,
+                slots: vec![],
+            }
+            .to_bytes(),
+        )
+        .unwrap();
+        delta["v"] = serde_json::json!(4);
+        let error = NumberContract::update_state(
+            params(&key),
+            State::from(StateV5::empty().to_bytes()),
+            vec![UpdateData::Delta(StateDelta::from(
+                serde_json::to_vec(&delta).unwrap(),
+            ))],
+        );
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn v5_empty_state_round_trips() {
+        let key = test_key();
+        let empty = StateV5::empty();
+        let decoded = StateV5::decode(&empty.to_bytes()).unwrap();
         assert_eq!(decoded, empty);
-        assert_eq!(decoded.v, 4);
+        assert_eq!(decoded.v, 5);
         assert_eq!(decoded.payments, Payments::empty());
+        assert_eq!(decoded.adjustments, Adjustments::empty());
         assert!(decoded.validate(&key.verifying_key()).is_ok());
+    }
+
+    /// The v4 -> v5 client upgrade only adds an empty adjustments record and
+    /// bumps `v`. Every v2/v3/v4 signature stays valid.
+    #[test]
+    fn v4_state_upgrades_to_v5_by_adding_an_empty_adjustments_record() {
+        let key = test_key();
+        let mut state = populated_state(&key);
+        state.payments = signed_payments(&key, 4, Some(sample_payment()));
+
+        let mut json: serde_json::Value = serde_json::from_slice(&state.to_bytes()).unwrap();
+        json.as_object_mut().unwrap().remove("adjustments");
+        json["v"] = serde_json::json!(4);
+        let v4_bytes = serde_json::to_vec(&json).unwrap();
+        assert!(StateV5::decode(&v4_bytes).is_err());
+
+        json["v"] = serde_json::json!(5);
+        json["adjustments"] = serde_json::json!({"seq": 0, "entries": [], "sig": null});
+        let upgraded = StateV5::decode(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(upgraded, state);
+        assert!(upgraded.validate(&key.verifying_key()).is_ok());
+    }
+
+    // ---- adjustments ------------------------------------------------------
+
+    fn sample_adjustment() -> Adjustment {
+        Adjustment {
+            slot: 2,
+            slot_seq: 4,
+            delta: 25,
+            post_value: 125,
+            note: Some("issue".into()),
+        }
+    }
+
+    fn entry_with_value(value: i64) -> Entry {
+        Entry {
+            value,
+            contact: CONTACT_11.into(),
+            unit: None,
+            note: None,
+        }
+    }
+
+    fn apply_delta(
+        key: &SigningKey,
+        state: &StateV5,
+        delta: Delta,
+    ) -> Result<StateV5, ContractError> {
+        NumberContract::update_state(
+            params(key),
+            State::from(state.to_bytes()),
+            vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
+        )
+        .map(|updated| StateV5::decode(updated.unwrap_valid().as_ref()).unwrap())
+    }
+
+    fn adjustments_delta(adjustments: Adjustments, slots: Vec<(u8, Slot)>) -> Delta {
+        Delta {
+            v: STATE_VERSION,
+            parent: None,
+            contacts: None,
+            payments: None,
+            adjustments: Some(adjustments),
+            slots: slots
+                .into_iter()
+                .map(|(index, slot)| DeltaSlot::from_slot(index, &slot))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn adjustment_wire_shape_matches_the_client_codec() {
+        let key = test_key();
+        let record = signed_adjustments(&key, 1, vec![sample_adjustment()]);
+        let json: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(json["entries"][0]["slot"], 2);
+        assert_eq!(json["entries"][0]["slotSeq"], 4);
+        assert_eq!(json["entries"][0]["delta"], 25);
+        assert_eq!(json["entries"][0]["postValue"], 125);
+        assert_eq!(json["entries"][0]["note"], "issue");
+        assert!(json["entries"][0].get("slot_seq").is_none());
+        assert!(json["entries"][0].get("post_value").is_none());
+
+        // The client's camelCase JSON decodes to the same record.
+        let decoded: Adjustments = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn golden_adjustments_signing_bytes_are_pinned() {
+        let entries = vec![
+            Adjustment {
+                slot: 1,
+                slot_seq: 4,
+                delta: 500,
+                post_value: 3750,
+                note: Some("issue".into()),
+            },
+            Adjustment {
+                slot: 3,
+                slot_seq: 5,
+                delta: -250,
+                post_value: 1000,
+                note: None,
+            },
+        ];
+        let bytes = adjustments_signing_bytes(6, &entries);
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76353a61646a7573746d656e7473060000000000000002000000010400000000000000f401000000000000a60e00000000000005000000697373756503050000000000000006ffffffffffffffe80300000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(digest16(&bytes)),
+            "77e51bf4156a440a0dd97456f350918a"
+        );
+
+        // A single entry with a null note signs note_len = 0.
+        let single = vec![Adjustment {
+            slot: 0,
+            slot_seq: 1,
+            delta: 7,
+            post_value: 7,
+            note: None,
+        }];
+        let bytes = adjustments_signing_bytes(1, &single);
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76353a61646a7573746d656e74730100000000000000010000000001000000000000000700000000000000070000000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(digest16(&bytes)),
+            "33a936e304f242accf347d520f5f616c"
+        );
+
+        // `seq == 0` is never signed, but the encoder stays deterministic.
+        let mut zero = SIGNING_DOMAIN_ADJUSTMENTS.to_vec();
+        zero.extend_from_slice(&0u64.to_le_bytes());
+        zero.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(adjustments_signing_bytes(0, &[]), zero);
+    }
+
+    #[test]
+    fn adjustments_seq_zero_requires_empty_entries_and_null_sig() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        assert!(Adjustments::empty().is_valid(&verifying));
+
+        let with_entry = Adjustments {
+            seq: 0,
+            entries: vec![sample_adjustment()],
+            sig: None,
+        };
+        assert!(!with_entry.is_valid(&verifying));
+
+        let stray_signature = Adjustments {
+            seq: 0,
+            entries: Vec::new(),
+            sig: Some(hex::encode([1u8; 64])),
+        };
+        assert!(!stray_signature.is_valid(&verifying));
+    }
+
+    #[test]
+    fn adjustment_bounds_are_enforced() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        assert!(signed_adjustments(&key, 1, vec![sample_adjustment()]).is_valid(&verifying));
+
+        for bad in [
+            Adjustment {
+                slot: 8,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                slot_seq: 0,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                delta: 0,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                post_value: -1,
+                ..sample_adjustment()
+            },
+            // Implied pre-value would be negative.
+            Adjustment {
+                delta: 5,
+                post_value: 4,
+                ..sample_adjustment()
+            },
+            // Implied pre-value would overflow.
+            Adjustment {
+                delta: -1,
+                post_value: i64::MAX,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                delta: i64::MIN,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                note: Some("n".repeat(MAX_ADJUSTMENT_NOTE_BYTES + 1)),
+                ..sample_adjustment()
+            },
+        ] {
+            assert!(
+                !signed_adjustments(&key, 1, vec![bad]).is_valid(&verifying),
+                "invalid adjustment must be rejected"
+            );
+        }
+
+        // Inclusive boundaries.
+        for good in [
+            Adjustment {
+                note: Some("n".repeat(MAX_ADJUSTMENT_NOTE_BYTES)),
+                ..sample_adjustment()
+            },
+            Adjustment {
+                delta: 1,
+                post_value: 1,
+                ..sample_adjustment()
+            },
+            Adjustment {
+                delta: -125,
+                post_value: 0,
+                ..sample_adjustment()
+            },
+        ] {
+            assert!(signed_adjustments(&key, 1, vec![good]).is_valid(&verifying));
+        }
+
+        // The entry count is capped at 32.
+        let entries: Vec<Adjustment> = (0..MAX_ADJUSTMENTS)
+            .map(|index| Adjustment {
+                slot: (index % SLOT_COUNT) as u8,
+                slot_seq: (index / SLOT_COUNT + 1) as u64,
+                delta: 1,
+                post_value: 1,
+                note: None,
+            })
+            .collect();
+        assert!(signed_adjustments(&key, 1, entries.clone()).is_valid(&verifying));
+        let mut too_many = entries;
+        too_many.push(Adjustment {
+            slot: 7,
+            slot_seq: 100,
+            delta: 1,
+            post_value: 1,
+            note: None,
+        });
+        assert!(!signed_adjustments(&key, 1, too_many).is_valid(&verifying));
+    }
+
+    #[test]
+    fn adjustments_reject_duplicate_and_decreasing_slot_seq() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        let duplicate = vec![
+            Adjustment {
+                slot: 1,
+                slot_seq: 3,
+                delta: 1,
+                post_value: 1,
+                note: None,
+            },
+            Adjustment {
+                slot: 1,
+                slot_seq: 3,
+                delta: 2,
+                post_value: 3,
+                note: None,
+            },
+        ];
+        assert!(!signed_adjustments(&key, 1, duplicate).is_valid(&verifying));
+
+        let decreasing = vec![
+            Adjustment {
+                slot: 1,
+                slot_seq: 3,
+                delta: 1,
+                post_value: 1,
+                note: None,
+            },
+            Adjustment {
+                slot: 1,
+                slot_seq: 2,
+                delta: 2,
+                post_value: 3,
+                note: None,
+            },
+        ];
+        assert!(!signed_adjustments(&key, 1, decreasing).is_valid(&verifying));
+
+        // Same slot_seq on different slots, and interleaved per-slot increase,
+        // are allowed.
+        let good = vec![
+            Adjustment {
+                slot: 1,
+                slot_seq: 3,
+                delta: 1,
+                post_value: 1,
+                note: None,
+            },
+            Adjustment {
+                slot: 2,
+                slot_seq: 3,
+                delta: 1,
+                post_value: 1,
+                note: None,
+            },
+            Adjustment {
+                slot: 1,
+                slot_seq: 4,
+                delta: 1,
+                post_value: 2,
+                note: None,
+            },
+        ];
+        assert!(signed_adjustments(&key, 1, good).is_valid(&verifying));
+    }
+
+    #[test]
+    fn adjustment_signature_covers_every_field() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        let record = signed_adjustments(&key, 2, vec![sample_adjustment()]);
+        assert!(record.is_valid(&verifying));
+
+        let mut changed_slot = record.clone();
+        changed_slot.entries[0].slot = 3;
+        assert!(!changed_slot.is_valid(&verifying));
+
+        let mut changed_seq = record.clone();
+        changed_seq.seq = 3;
+        assert!(!changed_seq.is_valid(&verifying));
+
+        let mut changed_slot_seq = record.clone();
+        changed_slot_seq.entries[0].slot_seq = 5;
+        assert!(!changed_slot_seq.is_valid(&verifying));
+
+        let mut changed_delta = record.clone();
+        changed_delta.entries[0].delta = 26;
+        assert!(!changed_delta.is_valid(&verifying));
+
+        let mut changed_post = record.clone();
+        changed_post.entries[0].post_value = 126;
+        assert!(!changed_post.is_valid(&verifying));
+
+        let mut changed_note = record.clone();
+        changed_note.entries[0].note = Some("burn".into());
+        assert!(!changed_note.is_valid(&verifying));
+
+        let mut changed_sig = record;
+        let mut sig = hex::decode(changed_sig.sig.as_ref().unwrap()).unwrap();
+        sig[0] ^= 1;
+        changed_sig.sig = Some(hex::encode(sig));
+        assert!(!changed_sig.is_valid(&verifying));
+    }
+
+    /// Build a board whose slot 2 is 100 at seq 3 and whose log says the next
+    /// write (seq 4) issued 25 to reach 125.
+    fn provenance_state(key: &SigningKey) -> StateV5 {
+        let mut state = StateV5::empty();
+        state.slots[2] = signed_slot(key, 2, 3, Some(entry_with_value(100)));
+        state.adjustments = signed_adjustments(key, 1, vec![sample_adjustment()]);
+        state
+    }
+
+    #[test]
+    fn provenance_accepts_the_matching_slot_write() {
+        let key = test_key();
+        let state = provenance_state(&key);
+        let written = signed_slot(&key, 2, 5, Some(entry_with_value(150)));
+        let next = signed_adjustments(
+            &key,
+            2,
+            vec![Adjustment {
+                slot: 2,
+                slot_seq: 5,
+                delta: 50,
+                post_value: 150,
+                note: Some("issue".into()),
+            }],
+        );
+        let delta = adjustments_delta(next.clone(), vec![(2, written)]);
+
+        let updated = apply_delta(&key, &state, delta.clone()).expect("matching write is valid");
+        assert_eq!(updated.slots[2].seq, 5);
+        assert_eq!(updated.slots[2].entry.as_ref().unwrap().value, 150);
+        assert_eq!(updated.adjustments, next);
+
+        // Re-applying the same delta is a no-op even though the entries are now
+        // history (they need no slot write the second time).
+        let again = apply_delta(&key, &updated, delta).unwrap();
+        assert_eq!(again.to_bytes(), updated.to_bytes());
+    }
+
+    #[test]
+    fn provenance_rejects_a_missing_slot_write() {
+        let key = test_key();
+        let state = provenance_state(&key);
+        let newer = signed_adjustments(
+            &key,
+            2,
+            vec![
+                sample_adjustment(),
+                Adjustment {
+                    slot: 2,
+                    slot_seq: 5,
+                    delta: 25,
+                    post_value: 150,
+                    note: None,
+                },
+            ],
+        );
+        let delta = adjustments_delta(newer, vec![]);
+        assert!(apply_delta(&key, &state, delta).is_err());
+    }
+
+    #[test]
+    fn provenance_rejects_a_mismatched_slot_write() {
+        let key = test_key();
+        let state = provenance_state(&key);
+        let next = |delta: i64, post_value: i64, slot_seq: u64| Adjustment {
+            slot: 2,
+            slot_seq,
+            delta,
+            post_value,
+            note: None,
+        };
+
+        // Wrong post value: the slot was written to 149, the log says 150.
+        let wrong_value = signed_slot(&key, 2, 5, Some(entry_with_value(149)));
+        let delta = adjustments_delta(
+            signed_adjustments(&key, 2, vec![next(50, 150, 5)]),
+            vec![(2, wrong_value)],
+        );
+        assert!(apply_delta(&key, &state, delta).is_err());
+
+        // Right value, wrong delta.
+        let written = signed_slot(&key, 2, 5, Some(entry_with_value(150)));
+        let delta = adjustments_delta(
+            signed_adjustments(&key, 2, vec![next(40, 150, 5)]),
+            vec![(2, written)],
+        );
+        assert!(apply_delta(&key, &state, delta).is_err());
+
+        // Right value and delta, wrong slot_seq.
+        let written = signed_slot(&key, 2, 5, Some(entry_with_value(150)));
+        let delta = adjustments_delta(
+            signed_adjustments(&key, 2, vec![next(50, 150, 4)]),
+            vec![(2, written)],
+        );
+        assert!(apply_delta(&key, &state, delta).is_err());
+
+        // Right slot write, but the pre-update value disagrees with the delta.
+        let mut drifted = state.clone();
+        drifted.slots[2] = signed_slot(&key, 2, 3, Some(entry_with_value(90)));
+        let written = signed_slot(&key, 2, 5, Some(entry_with_value(125)));
+        let delta = adjustments_delta(
+            signed_adjustments(&key, 2, vec![next(25, 125, 5)]),
+            vec![(2, written)],
+        );
+        assert!(apply_delta(&key, &drifted, delta).is_err());
+    }
+
+    #[test]
+    fn full_state_updates_skip_provenance() {
+        let key = test_key();
+        // A full state may carry an adjustment/slot mismatch: validation only
+        // checks signatures and bounds (the migration path).
+        let mut full = StateV5::empty();
+        full.slots[2] = signed_slot(&key, 2, 4, Some(entry_with_value(999)));
+        full.adjustments = signed_adjustments(&key, 1, vec![sample_adjustment()]);
+        assert!(full.validate(&key.verifying_key()).is_ok());
+
+        let updated = NumberContract::update_state(
+            params(&key),
+            State::from(StateV5::empty().to_bytes()),
+            vec![UpdateData::State(State::from(full.to_bytes()))],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(updated.as_ref(), full.to_bytes().as_slice());
+    }
+
+    #[test]
+    fn adjustments_merge_uses_seq_then_signature_bytes() {
+        let key = test_key();
+        let issued = signed_adjustments(&key, 1, vec![sample_adjustment()]);
+        let burned = signed_adjustments(
+            &key,
+            1,
+            vec![Adjustment {
+                delta: -25,
+                post_value: 75,
+                note: Some("burn".into()),
+                ..sample_adjustment()
+            }],
+        );
+        let expected =
+            if adjustments_signature_bytes(&issued) >= adjustments_signature_bytes(&burned) {
+                issued.clone()
+            } else {
+                burned.clone()
+            };
+        assert_eq!(merge_adjustments(&issued, &burned), expected);
+        assert_eq!(merge_adjustments(&burned, &issued), expected);
+        assert_eq!(merge_adjustments(&issued, &issued), issued);
+
+        // A higher seq replaces the whole log.
+        let newer = signed_adjustments(&key, 2, vec![]);
+        assert_eq!(merge_adjustments(&issued, &newer), newer);
+        assert_eq!(merge_adjustments(&newer, &issued), newer);
+        assert!(newer.entries.is_empty());
+
+        // An empty record loses to any signed record.
+        assert_eq!(merge_adjustments(&Adjustments::empty(), &issued), issued);
+    }
+
+    #[test]
+    fn update_state_merges_adjustments_from_delta() {
+        let key = test_key();
+        let state = provenance_state(&key);
+        let written = signed_slot(&key, 2, 4, Some(entry_with_value(125)));
+        let delta = adjustments_delta(state.adjustments.clone(), vec![(2, written)]);
+
+        let updated = apply_delta(&key, &state, delta).unwrap();
+        assert_eq!(updated.adjustments, state.adjustments);
+        assert_eq!(
+            StateV5::decode(
+                NumberContract::update_state(
+                    params(&key),
+                    State::from(state.to_bytes()),
+                    vec![UpdateData::State(State::from(updated.to_bytes()))],
+                )
+                .unwrap()
+                .unwrap_valid()
+                .as_ref()
+            )
+            .unwrap(),
+            updated
+        );
+    }
+
+    #[test]
+    fn summary_includes_adjustments_digest_and_zeros_when_empty() {
+        let key = test_key();
+        let empty = StateV5::empty();
+        let summary = Summary::of(&empty);
+        assert_eq!(summary.adjustments.0, 0);
+        assert_eq!(summary.adjustments.1, "0".repeat(32));
+
+        let state = provenance_state(&key);
+        let summary = Summary::of(&state);
+        assert_eq!(summary.adjustments.0, 1);
+        assert_eq!(
+            summary.adjustments.1,
+            hex::encode(digest16(&adjustments_signing_bytes(
+                1,
+                &state.adjustments.entries
+            )))
+        );
+
+        let decoded = Summary::decode(&summary.to_bytes()).unwrap();
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn adjustments_delta_round_trips() {
+        let key = test_key();
+        let mut before = StateV5::empty();
+        before.slots[2] = signed_slot(&key, 2, 3, Some(entry_with_value(100)));
+        let mut after = before.clone();
+        after.slots[2] = signed_slot(&key, 2, 4, Some(entry_with_value(125)));
+        after.adjustments = signed_adjustments(&key, 1, vec![sample_adjustment()]);
+
+        let delta = delta_from(&after, &summarize(&before));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.adjustments.as_ref(), Some(&after.adjustments));
+        assert_eq!(parsed.slots.len(), 1);
+
+        let synced = NumberContract::update_state(
+            params(&key),
+            State::from(before.to_bytes()),
+            vec![UpdateData::Delta(delta)],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(synced.as_ref(), after.to_bytes().as_slice());
+        assert_eq!(delta_from(&after, &summarize(&after)).size(), 0);
+    }
+
+    #[test]
+    fn get_state_delta_heals_equal_adjustments_seq_with_different_digest() {
+        let key = test_key();
+        let mut local = StateV5::empty();
+        local.adjustments = signed_adjustments(&key, 3, vec![sample_adjustment()]);
+        let mut remote = StateV5::empty();
+        remote.adjustments = signed_adjustments(
+            &key,
+            3,
+            vec![Adjustment {
+                delta: -25,
+                post_value: 75,
+                note: None,
+                ..sample_adjustment()
+            }],
+        );
+
+        let delta = delta_from(&local, &summarize(&remote));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.adjustments.as_ref(), Some(&local.adjustments));
+    }
+
+    #[test]
+    fn empty_summary_includes_adjustments() {
+        let key = test_key();
+        let state = provenance_state(&key);
+        let delta = delta_from(&state, &StateSummary::from(vec![]));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.adjustments.as_ref(), Some(&state.adjustments));
+    }
+
+    /// Adjustments and slots merge independently. A legitimate merge can leave an
+    /// adjustment whose referenced slot write was superseded by a newer one; the
+    /// merged state must still validate (merge-invariance).
+    #[test]
+    fn merged_states_stay_valid_with_an_adjustment_slot_mismatch() {
+        let key = test_key();
+        let mut a = StateV5::empty();
+        a.slots[0] = signed_slot(&key, 0, 2, Some(entry_with_value(100)));
+        a.adjustments = signed_adjustments(
+            &key,
+            2,
+            vec![Adjustment {
+                slot: 0,
+                slot_seq: 2,
+                delta: 100,
+                post_value: 100,
+                note: Some("issue".into()),
+            }],
+        );
+
+        let mut b = StateV5::empty();
+        b.slots[0] = signed_slot(&key, 0, 3, Some(entry_with_value(50)));
+        b.adjustments = signed_adjustments(
+            &key,
+            1,
+            vec![Adjustment {
+                slot: 0,
+                slot_seq: 3,
+                delta: 50,
+                post_value: 50,
+                note: None,
+            }],
+        );
+
+        assert!(a.validate(&key.verifying_key()).is_ok());
+        assert!(b.validate(&key.verifying_key()).is_ok());
+
+        let result = merged(&a, &b);
+        assert_eq!(result.adjustments, a.adjustments);
+        assert_eq!(result.slots[0], b.slots[0]);
+        assert!(result.validate(&key.verifying_key()).is_ok());
+        assert_eq!(result.to_bytes(), merged(&b, &a).to_bytes());
     }
 
     // ---- property tests ---------------------------------------------------
@@ -3660,14 +4716,64 @@ mod tests {
             })
     }
 
-    fn arb_state() -> impl Strategy<Value = StateV4> {
+    /// A valid `(delta, post_value)` pair with a non-negative implied pre-value.
+    fn arb_adjustment_amounts() -> impl Strategy<Value = (i64, i64)> {
+        (0i64..=100_000, 1i64..=1_000, any::<bool>()).prop_map(|(base, magnitude, issue)| {
+            if issue {
+                (magnitude, base + magnitude)
+            } else {
+                (-magnitude, base)
+            }
+        })
+    }
+
+    /// Generate 0..=8 valid adjustment entries, per-slot `slot_seq` increasing.
+    fn arb_adjustment_entries() -> impl Strategy<Value = Vec<Adjustment>> {
+        proptest::collection::vec(
+            (
+                0u8..SLOT_COUNT as u8,
+                arb_adjustment_amounts(),
+                prop::option::of(arb_ascii(MAX_ADJUSTMENT_NOTE_BYTES)),
+            ),
+            0..=8,
+        )
+        .prop_map(|specs| {
+            let mut counters = [0u64; SLOT_COUNT];
+            specs
+                .into_iter()
+                .map(|(slot, (delta, post_value), note)| {
+                    counters[usize::from(slot)] += 1;
+                    Adjustment {
+                        slot,
+                        slot_seq: counters[usize::from(slot)],
+                        delta,
+                        post_value,
+                        note,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    fn arb_adjustments() -> impl Strategy<Value = Adjustments> {
+        (0u64..=100, arb_adjustment_entries()).prop_map(|(seq, entries)| {
+            if seq == 0 {
+                Adjustments::empty()
+            } else {
+                signed_adjustments(&test_key(), seq, entries)
+            }
+        })
+    }
+
+    fn arb_state() -> impl Strategy<Value = StateV5> {
         (
             arb_parent(),
             arb_contacts(),
             arb_payments(),
+            arb_adjustments(),
             proptest::collection::vec(arb_slot_spec(), SLOT_COUNT),
         )
-            .prop_map(|(parent, contacts, payments, specs)| {
+            .prop_map(|(parent, contacts, payments, adjustments, specs)| {
                 let key = test_key();
                 let slots = std::array::from_fn(|index| match &specs[index] {
                     SlotSpec::Empty => Slot::empty(),
@@ -3676,11 +4782,12 @@ mod tests {
                         signed_slot(&key, index as u8, *seq, Some(entry.clone()))
                     }
                 });
-                StateV4 {
+                StateV5 {
                     v: STATE_VERSION,
                     parent,
                     contacts,
                     payments,
+                    adjustments,
                     slots,
                 }
             })
@@ -3715,7 +4822,7 @@ mod tests {
 
         #[test]
         fn merge_identity(a in arb_state()) {
-            let empty = StateV4::empty();
+            let empty = StateV5::empty();
             prop_assert_eq!(merged(&a, &empty).to_bytes(), a.to_bytes());
             prop_assert_eq!(merged(&empty, &a).to_bytes(), a.to_bytes());
         }
@@ -3764,12 +4871,43 @@ mod tests {
             prop_assert_eq!(result.parent, merge_parent(&a.parent, &b.parent));
             prop_assert_eq!(result.contacts, merge_contacts(&a.contacts, &b.contacts));
             prop_assert_eq!(result.payments, merge_payments(&a.payments, &b.payments));
+            prop_assert_eq!(
+                result.adjustments,
+                merge_adjustments(&a.adjustments, &b.adjustments)
+            );
             for index in 0..SLOT_COUNT {
                 prop_assert_eq!(
                     result.slots[index].to_owned(),
                     merge_slot(&a.slots[index], &b.slots[index])
                 );
             }
+        }
+
+        #[test]
+        fn adjustments_merge_is_commutative_and_associative(
+            a in arb_adjustments(),
+            b in arb_adjustments(),
+            c in arb_adjustments(),
+        ) {
+            let ab = merge_adjustments(&a, &b);
+            let ba = merge_adjustments(&b, &a);
+            prop_assert_eq!(ab.clone(), ba);
+            prop_assert_eq!(
+                merge_adjustments(&ab, &c),
+                merge_adjustments(&a, &merge_adjustments(&b, &c))
+            );
+            prop_assert_eq!(merge_adjustments(&a, &a), a.clone());
+            prop_assert!(a.is_valid(&test_key().verifying_key()));
+        }
+
+        /// An adjustment log and slots are generated independently, so merges
+        /// routinely pair an adjustment with a slot write that superseded it.
+        /// That mismatch must never make the merged state invalid.
+        #[test]
+        fn merged_adjustment_slot_mismatches_stay_valid(a in arb_state(), b in arb_state()) {
+            let key = test_key();
+            let result = merged(&a, &b);
+            prop_assert!(result.validate(&key.verifying_key()).is_ok());
         }
     }
 }

@@ -1,0 +1,38 @@
+number-contract v5 adjustments signing bytes — golden vector
+============================================================
+
+Domain: b"number:v5:adjustments" (SIGNING_DOMAIN_ADJUSTMENTS).
+Encoding: domain || seq:u64 LE || count:u32 LE
+|| for each entry, in order:
+     slot:u8 || slotSeq:u64 LE || delta:i64 LE || postValue:i64 LE
+     || note_len:u32 LE || note bytes (empty when the note is null).
+Entries are oldest first, at most 32, per slot `slotSeq` strictly increases in
+list order, and no `(slot, slotSeq)` pair repeats. `delta` is never zero,
+`postValue` is never negative, and the implied pre-value (postValue - delta) is
+non-negative and does not overflow. Note length is measured in UTF-8 bytes.
+Digest is BLAKE3(signing bytes)[0..16], lowercase hex.
+
+Case 1: seq = 6, two entries (issue then burn)
+Input entries JSON:
+[
+  { "slot": 1, "slotSeq": 4, "delta": 500, "postValue": 3750, "note": "issue" },
+  { "slot": 3, "slotSeq": 5, "delta": -250, "postValue": 1000, "note": null }
+]
+
+signing bytes hex:
+6e756d6265723a76353a61646a7573746d656e7473060000000000000002000000010400000000000000f401000000000000a60e00000000000005000000697373756503050000000000000006ffffffffffffffe80300000000000000000000
+
+digest16:
+77e51bf4156a440a0dd97456f350918a
+
+Case 2: seq = 1, one entry with a null note
+Input entries JSON:
+[
+  { "slot": 0, "slotSeq": 1, "delta": 7, "postValue": 7, "note": null }
+]
+
+signing bytes hex:
+6e756d6265723a76353a61646a7573746d656e74730100000000000000010000000001000000000000000700000000000000070000000000000000000000
+
+digest16:
+33a936e304f242accf347d520f5f616c

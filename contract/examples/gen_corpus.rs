@@ -32,8 +32,9 @@ use freenet_stdlib::prelude::{
     ContractInterface, Parameters, State, StateDelta, StateSummary, UpdateData,
 };
 use number_contract::{
-    Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent, Slot, StateV4, Summary,
-    contacts_signing_bytes, parent_signing_bytes, signing_bytes,
+    Adjustment, Adjustments, Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent,
+    Slot, StateV5, Summary, adjustments_signing_bytes, contacts_signing_bytes,
+    parent_signing_bytes, signing_bytes,
 };
 use serde::Serialize;
 
@@ -102,8 +103,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Base board: one value, one measured value, one cleared slot, the first
     // contact and a parent link. `s1` is the empty predecessor.
-    let s1 = StateV4::empty();
-    let mut s2 = StateV4::empty();
+    let s1 = StateV5::empty();
+    let mut s2 = StateV5::empty();
     s2.parent = signed_parent(&key, 1, Some(ALICE));
     s2.contacts = signed_contacts(&key, 1, vec![contact("Alice", ALICE)]);
     s2.slots[0] = signed(
@@ -144,6 +145,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         4,
         Some(entry(-41, ALICE, Some("kg"), Some("re-measured"))),
     );
+    // An issue/burn adjustment is two signed records in one delta: the ordinary
+    // slot entry and the `Adjustments` record naming that entry's seq. Slot 7 is
+    // empty in every other state, so the delta that carries this log also
+    // carries its pre-value (0) and the provenance rule holds from any base.
+    s3.slots[7] = signed(&key, 7, 100, Some(entry(200, ALICE, None, None)));
+    s3.adjustments = signed_adjustments(
+        &key,
+        1,
+        vec![Adjustment {
+            slot: 7,
+            slot_seq: 100,
+            delta: 200,
+            post_value: 200,
+            note: Some("issue".into()),
+        }],
+    );
 
     // Three independent updates to the SAME base `s2`: the concurrent-update
     // scenario `delta_permutation_invariance` is a law about. Two add a slot, one
@@ -157,9 +174,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     c.parent = signed_parent(&key, 2, None); // clear the parent
 
     // A second base with its own update, so transition provenance is not all one
-    // board.
+    // board. It replaces the whole adjustment log at seq 2 while keeping the
+    // seq-1 entry as history and adding a second adjustment + slot write.
     let mut s4 = s3.clone();
-    s4.slots[6] = signed(&key, 6, 2, Some(entry(-7, BOB, None, Some("second base"))));
+    s4.slots[6] = signed(&key, 6, 2, Some(entry(5, BOB, None, Some("second base"))));
+    s4.adjustments = signed_adjustments(
+        &key,
+        2,
+        vec![
+            Adjustment {
+                slot: 7,
+                slot_seq: 100,
+                delta: 200,
+                post_value: 200,
+                note: Some("issue".into()),
+            },
+            Adjustment {
+                slot: 6,
+                slot_seq: 2,
+                delta: 5,
+                post_value: 5,
+                note: Some("issue".into()),
+            },
+        ],
+    );
 
     let states = [&s1, &s2, &s3, &a, &b, &c, &s4];
     for state in states {
@@ -177,7 +215,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let da = delta(&verifying, &a, &summaries[1]); // peer is at s2
     let db = delta(&verifying, &b, &summaries[1]);
     let dc = delta(&verifying, &c, &summaries[1]);
-    let d4 = delta(&verifying, &s4, &summaries[2]); // peer is at s3
+    let d4 = delta(&verifying, &s4, &summaries[1]); // peer is at s2: carries the whole log
 
     let transitions = vec![
         step(&verifying, &s1, &s2, d1, summaries[0].clone()),
@@ -185,7 +223,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         step(&verifying, &s2, &a, da, summaries[1].clone()),
         step(&verifying, &s2, &b, db, summaries[1].clone()),
         step(&verifying, &s2, &c, dc, summaries[1].clone()),
-        step(&verifying, &s3, &s4, d4, summaries[2].clone()),
+        step(&verifying, &s2, &s4, d4, summaries[1].clone()),
     ];
 
     let bundle = ReplayBundle {
@@ -230,8 +268,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// actually produces, never a hand-written state.
 fn step(
     verifying: &VerifyingKey,
-    base: &StateV4,
-    expected: &StateV4,
+    base: &StateV5,
+    expected: &StateV5,
     delta: Vec<u8>,
     summary: Vec<u8>,
 ) -> Transition {
@@ -261,7 +299,7 @@ fn params(verifying: &VerifyingKey) -> Parameters<'static> {
     Parameters::from(verifying.to_bytes().to_vec())
 }
 
-fn delta(verifying: &VerifyingKey, sender: &StateV4, recipient_summary: &[u8]) -> Vec<u8> {
+fn delta(verifying: &VerifyingKey, sender: &StateV5, recipient_summary: &[u8]) -> Vec<u8> {
     NumberContract::get_state_delta(
         params(verifying),
         State::from(sender.to_bytes()),
@@ -272,7 +310,7 @@ fn delta(verifying: &VerifyingKey, sender: &StateV4, recipient_summary: &[u8]) -
     .to_vec()
 }
 
-fn apply(verifying: &VerifyingKey, state: &StateV4, delta: &[u8]) -> StateV4 {
+fn apply(verifying: &VerifyingKey, state: &StateV5, delta: &[u8]) -> StateV5 {
     let updated = NumberContract::update_state(
         params(verifying),
         State::from(state.to_bytes()),
@@ -280,7 +318,7 @@ fn apply(verifying: &VerifyingKey, state: &StateV4, delta: &[u8]) -> StateV4 {
     )
     .expect("corpus delta must be accepted")
     .unwrap_valid();
-    StateV4::decode(updated.as_ref()).expect("the contract emits decodable state")
+    StateV5::decode(updated.as_ref()).expect("the contract emits decodable state")
 }
 
 fn signed(key: &SigningKey, index: u8, seq: u64, entry: Option<Entry>) -> Slot {
@@ -304,6 +342,15 @@ fn signed_parent(key: &SigningKey, seq: u64, user_id: Option<&str>) -> Parent {
 fn signed_contacts(key: &SigningKey, seq: u64, entries: Vec<Contact>) -> Contacts {
     let signature = key.sign(&contacts_signing_bytes(seq, &entries));
     Contacts {
+        seq,
+        entries,
+        sig: Some(hex::encode(signature.to_bytes())),
+    }
+}
+
+fn signed_adjustments(key: &SigningKey, seq: u64, entries: Vec<Adjustment>) -> Adjustments {
+    let signature = key.sign(&adjustments_signing_bytes(seq, &entries));
+    Adjustments {
         seq,
         entries,
         sig: Some(hex::encode(signature.to_bytes())),

@@ -33,10 +33,12 @@ import {
   type ClientRequestT as ClientRequestTable,
 } from "@freenetorg/freenet-stdlib/client-request";
 import {
+  validateAdjustmentList,
   validateContactList,
   validateEntry,
   validatePaymentEntry,
   validateSettled,
+  type Adjustment,
   type Contact,
   type Entry,
 } from "./state";
@@ -83,6 +85,11 @@ export interface DelegateIdentity {
    * compatibility with delegates built before v4; normalize with `?? 1`.
    */
   paymentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v5 adjustments record, >= 1. Optional
+   * for compatibility with delegates built before v5; normalize with `?? 1`.
+   */
+  adjustmentsNextSeq?: number;
 }
 
 /** Default per-payment cap in hundredths (10,000.00); 0 disables the cap. */
@@ -155,6 +162,11 @@ export interface ExportedSecrets {
    * compatibility with exports from delegates built before v4; `?? 1`.
    */
   paymentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v5 adjustments record, >= 1. Optional
+   * for compatibility with exports from delegates built before v5; `?? 1`.
+   */
+  adjustmentsNextSeq?: number;
 }
 
 type ResponseRecord = Record<string, unknown>;
@@ -422,6 +434,7 @@ export class DelegateClient {
     contactsNextSeq = 1,
     parentNextSeq = 1,
     paymentsNextSeq = 1,
+    adjustmentsNextSeq = 1,
     timeoutMs = 5_000,
   ): Promise<void> {
     if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
@@ -435,6 +448,8 @@ export class DelegateClient {
     const validatedParentNextSeq = this.validateParentNextSeq(parentNextSeq);
     const validatedPaymentsNextSeq =
       this.validatePaymentsNextSeq(paymentsNextSeq);
+    const validatedAdjustmentsNextSeq =
+      this.validateAdjustmentsNextSeq(adjustmentsNextSeq);
     await this.request(
       "import",
       {
@@ -444,6 +459,7 @@ export class DelegateClient {
         contactsNextSeq: validatedContactsNextSeq,
         parentNextSeq: validatedParentNextSeq,
         paymentsNextSeq: validatedPaymentsNextSeq,
+        adjustmentsNextSeq: validatedAdjustmentsNextSeq,
       },
       timeoutMs,
     );
@@ -619,6 +635,60 @@ export class DelegateClient {
       );
     }
     return sig;
+  }
+
+  /**
+   * Sign the v5 issue/burn log at `seq`. `entries` is the whole log the
+   * signature covers (oldest first, at most 32). The delegate validates the
+   * same structural bounds and persists `seq + 1`. Reuses the `"sign"` pending
+   * kind because the board serialises writes; the response is `{seq, sig}`.
+   */
+  async signAdjustment(
+    seq: number,
+    entries: Adjustment[],
+    timeoutMs = 15_000,
+  ): Promise<{ seq: number; sig: string }> {
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
+    }
+    let validatedEntries: Adjustment[];
+    try {
+      validatedEntries = validateAdjustmentList(entries);
+    } catch (error) {
+      throw new DelegateError("Protocol", errorMessage(error));
+    }
+
+    const payload = await this.request(
+      "sign",
+      { cmd: "signAdjustment", seq, entries: validatedEntries },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signAdjustment was rejected",
+      );
+    }
+    const returnedSeq = payload.seq;
+    if (
+      typeof returnedSeq !== "number" ||
+      !Number.isSafeInteger(returnedSeq) ||
+      returnedSeq < seq
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate returned an invalid signed seq (${String(returnedSeq)}) for ${seq}.`,
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed signature (expected 128 lowercase hex characters).",
+      );
+    }
+    return { seq: returnedSeq, sig };
   }
 
   /** Feed an outbound DelegateResponse into the waiting request queue. */
@@ -809,6 +879,9 @@ export class DelegateClient {
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
       parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
       paymentsNextSeq: this.parsePaymentsNextSeq(payload.paymentsNextSeq),
+      adjustmentsNextSeq: this.parseAdjustmentsNextSeq(
+        payload.adjustmentsNextSeq,
+      ),
     };
   }
 
@@ -1079,6 +1152,9 @@ export class DelegateClient {
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
       parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
       paymentsNextSeq: this.parsePaymentsNextSeq(payload.paymentsNextSeq),
+      adjustmentsNextSeq: this.parseAdjustmentsNextSeq(
+        payload.adjustmentsNextSeq,
+      ),
     };
   }
 
@@ -1165,6 +1241,29 @@ export class DelegateClient {
       throw new DelegateError(
         "Protocol",
         "paymentsNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
+  }
+
+  /**
+   * A delegate built before v5 has no adjustments counter; default it to 1 so
+   * the migrated identity can still sign its first adjustment record.
+   */
+  private parseAdjustmentsNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validateAdjustmentsNextSeq(value);
+  }
+
+  private validateAdjustmentsNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "adjustmentsNextSeq must be a positive safe integer.",
       );
     }
     return value;

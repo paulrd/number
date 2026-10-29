@@ -1,4 +1,4 @@
-# number — design (v4)
+# number — design (v4/v5)
 
 A personal Freenet app: one board per user, holding exactly **8 slots** and an
 **address book**, arranged as a **tree of boards**. A board is a node; its 8
@@ -63,15 +63,63 @@ failure starts a reverse walk in which each actor that already signed undoes
 its own leg. The reverse walk never overwrites a later signed write: it reports
 `superseded`/`blocked` instead. The exact record, signing bytes, route table,
 statuses and reversal rules are in [DESIGN-payments.md](./DESIGN-payments.md).
-Discovery is deliberately manual — a board's inbox is its parent plus its eight
-children, read when the owner opens the board. There is no push channel, so a
-payment can wait indefinitely and must be shown as pending, not as delivered.
+Discovery is deliberately manual in the contract — a board's inbox is its
+parent plus its eight children, read when the owner opens the board. v4.1 adds
+a delegate that scans that inbox and can advance a forward leg while the
+owner's node runs (see "Background payments" below), but there is still no
+contract push: a payment can wait indefinitely and must be shown as pending,
+not as delivered.
 
 v2 boards migrate to v3: the slot and contacts signing bytes are unchanged, and
-the client adds an empty parent when it re-PUTs the old signed state. v1 boards
-remain unmigratable (their slot schema/signing bytes changed in v2). See §7
-"Migration". The owner identity is carried forward by the delegate's seed
-export/import path.
+the client adds an empty parent when it re-PUTs the old signed state. v4 adds
+the payments record; v5 adds the adjustments record. Both upgrades are
+client-side and keep every earlier slot/contacts/parent/payments signature.
+v1 boards remain unmigratable (their slot schema/signing bytes changed in v2).
+See §7 "Migration". The owner identity is carried forward by the delegate's
+seed export/import path.
+
+### Adjustments (v5)
+
+v5 adds a signed `adjustments` record (a bounded log, at most 32 entries) to a
+board. Each entry records an **issue** (positive `delta`) or **burn** (negative
+`delta`) of that board's liability to one child slot:
+`{slot, slotSeq, delta, postValue, note}`. The slot value is still an ordinary
+signed slot entry; the adjustment records the write that produced it. An issue
+raises what the board records it owes the child; a burn lowers it and can never
+take it below zero. The board owner signs both records, so a child can see the
+parent's signed history of liability changes without the parent being online
+to explain them.
+
+- Entries are oldest first, at most 32; the owner may rewrite/truncate the
+  whole record, so this is a child-facing provenance hint, not a tamper-proof
+  audit trail. Per-slot `slotSeq` strictly increases; `(slot, slotSeq)` is
+  unique.
+- Signing bytes: `b"number:v5:adjustments" || seq u64 LE || count u32 LE ||
+  per entry {slot u8 || slotSeq u64 LE || delta i64 LE || postValue i64 LE ||
+  note_len u32 LE || note bytes}`. Slot/contacts/parent/payments signing bytes
+  are unchanged; v2/v3/v4 signatures remain valid.
+- `validate_state` checks only bounds/signature/order and never compares the
+  log to the independently merged slots (that would break convergence).
+  `update_state` provenance: a **new** entry must name a slot write in the same
+  delta with matching `seq`, `postValue`, and `old + delta`.
+- `Adjustments` merges by max(seq), tie by lexicographically greater signature
+  bytes, like contacts/payments. Summary gains one `[seq, digest16]` pair;
+  delta gains an optional record. v4 upgrades by adding an empty record and
+  setting `v:5`; the UI registers the outgoing v4 code hash as migratable.
+
+### Background payments (v4.1, delegate)
+
+The delegate can advance forward payment legs while the node runs and no tab is
+open. It declares `lifecycle = [NodeStarted]`, `capabilities = [Background]`,
+`wakeups = [inbox = 300]`, subscribes to the owner's board, parent and slot
+contacts, and scans on notifications, wake-ups and node start. It signs only a
+forward leg addressed to the owner, carried by the route's previous actor, with
+that actor's payments signature and leg evidence verified against its own
+state; it rebuilds the leg from the owner's state and never copies a
+neighbour-supplied `next`/legs. Auto-advance defaults on once configured, with
+a per-payment cap (default 1,000,000 hundredths). It does not advance reverse
+legs. See [DESIGN-v4.1-v5.md](./DESIGN-v4.1-v5.md) for the config, scan state
+machine and the core#5600 / lossy-notification / 4-op-budget limits.
 
 Components:
 

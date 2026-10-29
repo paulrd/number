@@ -122,12 +122,20 @@ describe("migration registry", () => {
     }
   });
 
-  it("treats v2 as migratable and v1 as unmigratable", () => {
-    // v3 keeps the v2 slot/contacts signing bytes; the client only adds an
-    // empty parent. v1 changed the slot schema and cannot be re-PUT.
-    expect(LEGACY_CONTRACT_CODE_HASHES).toContain(
-      "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
+  it("treats v2, v3 and v4 as migratable and v1 as unmigratable", () => {
+    // v3 keeps the v2 slot/contacts signing bytes; v4 adds an empty payments
+    // record; v5 adds an empty adjustments record. Only v1 changed the slot
+    // schema and cannot be re-PUT.
+    expect(LEGACY_CONTRACT_CODE_HASHES[0]).toBe(
+      "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
     );
+    for (const migratable of [
+      "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
+      "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",
+      "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",
+    ]) {
+      expect(LEGACY_CONTRACT_CODE_HASHES).toContain(migratable);
+    }
     for (const v1 of [
       "6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX",
       "3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd",
