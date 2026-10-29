@@ -3,6 +3,7 @@ import type { BoardSnapshot } from "./board";
 import { emptyState, type Entry, type StateV3 } from "./state";
 import {
   childSlotIndex,
+  hasLiveChild,
   octalAddress,
   parentValueFor,
   type LinkDeps,
@@ -56,6 +57,30 @@ describe("childSlotIndex", () => {
     expect(childSlotIndex(parent.state, owner("a"))).toBe(0);
     expect(childSlotIndex(parent.state, owner("b"))).toBe(2);
     expect(childSlotIndex(parent.state, owner("c"))).toBeNull();
+  });
+});
+
+describe("hasLiveChild", () => {
+  it("is true when a slot child points back at the board", async () => {
+    const parent = board("parent", null, ["child"]);
+    const child = board("child", "parent");
+    await expect(hasLiveChild(parent, depsOf(parent, child))).resolves.toBe(true);
+  });
+
+  it("is false when the slot's board points somewhere else", async () => {
+    const parent = board("parent", null, ["child"]);
+    const child = board("child", "other");
+    await expect(hasLiveChild(parent, depsOf(parent, child))).resolves.toBe(false);
+  });
+
+  it("is false for a slot label with no readable child", async () => {
+    const parent = board("parent", null, ["child"]);
+    await expect(hasLiveChild(parent, depsOf(parent))).resolves.toBe(false);
+  });
+
+  it("is false with no slots", async () => {
+    const parent = board("parent", null);
+    await expect(hasLiveChild(parent, depsOf(parent))).resolves.toBe(false);
   });
 });
 

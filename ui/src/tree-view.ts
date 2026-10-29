@@ -153,6 +153,35 @@ export function hasChildSlot(state: StateV3, childId: string): boolean {
   return childSlotIndex(state, childId) !== null;
 }
 
+/**
+ * True when at least one slot names a child whose own parent link points back
+ * at `board`.
+ *
+ * A slot label alone is not an edge: the child must name this board, or the
+ * address walk (and therefore any payment route) does not pass through it. A
+ * board with a live child can be an intermediate on a payment path; a leaf
+ * cannot. Unreadable children are skipped (they cannot be routed through yet).
+ */
+export async function hasLiveChild(
+  board: BoardSnapshot,
+  deps: LinkDeps,
+): Promise<boolean> {
+  for (const slot of board.state.slots) {
+    const contact = slot.entry?.contact;
+    if (!contact || contact === board.ownerId) continue;
+    let child: BoardSnapshot | null = null;
+    try {
+      child = await deps.readBoard(contact);
+    } catch {
+      child = null;
+    }
+    if (child !== null && child.state.parent.userId === board.ownerId) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** The parent's signed slot for a child: the value it holds for that board. */
 export interface ParentValue {
   /** Zero-based slot index in the parent, i.e. the child's address digit. */

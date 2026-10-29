@@ -29,7 +29,7 @@ peer; the live test identity opens the v3 contract as a root board.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-DK_anGpc.js` |
+| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-CBpG3i3c.js` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -503,7 +503,7 @@ frame.
   `ContractNotification` cache, with a regression test.
 - Artifacts: contract `5YKH…` (unchanged), delegate `Fwgf…` / code `4ems…`;
   `5C2s…` is the registered legacy generation, so seeds and counters migrate.
-- Verification: contract 116, delegate 53, UI 195, 321 merge cases,
+- Verification: contract 116, delegate 53, UI 199, 321 merge cases,
   `make check-artifacts` OK, 9 offline e2e. Live smoke 2026-10-29 with B as the
   LCA: C `90.00`, D `110.00`, B audit `leg 2, slots 3, 1, lca`, C payment
   `Complete 10.00 along 03 → 01`; D restored to root afterwards.
@@ -543,7 +543,7 @@ the Atlas operator to crawl it.
   render it (the app correctly cannot self-grant; the prompt is node-authored).
   Evidence and repro: `reports/upstream-background-grant-prompt.md`.
 - Deployed 2026-10-29: all four nodes serve
-  `index-DK_anGpc.js` (the detection UI, the #23 delegate key and the #24 stuck state).
+  `index-CBpG3i3c.js` (the detection UI, the #23 delegate key, #24 stuck state and #26 route warning).
 
 ### #23 — A stale committed copy still beats the network
 
@@ -604,13 +604,22 @@ the Atlas operator to crawl it.
   node lacks the Background grant or has never scanned, payments through it
   stall silently. "Live" means the child's own parent link points back, not
   just that a slot labels it.
-- Next: detect that condition with the address walk and show "This board can
-  carry payments but won't auto-advance on this node", with the reinstall /
-  allow guidance from #22.
-- Optional tree-wide view: for a planned route, check every intermediate node's
-  `/permission/grants` + `lastScan > 0`. That check is operator-side (loopback
-  only); the app's sandboxed iframe cannot read another node's grants endpoint.
-  `ui/e2e/readiness.mjs` is the current per-node version.
+- Resolved:
+  - `hasLiveChild` (tree-view) follows each slot contact's parent link; an
+    unreadable child or a slot whose board points elsewhere is not an edge.
+    Four new tests cover the live back-link, elsewhere, unreadable and no-slot
+    cases (199 UI tests).
+  - Only when the delegate is configured and enabled but `lastScan` is 0 does
+    the UI check the own board's live children. With one, the badge reads
+    **Not advancing** and an in-panel alert says "This board can carry payments
+    but won't auto-advance on this node. Reinstall the component so the node
+    asks for background permission." The Details summary gets the attention
+    marker. Leaves keep the milder "No scans"; scanning boards are unchanged.
+- Deployed in `index-CBpG3i3c.js` to all four nodes; readiness is READY. The
+  warning itself was not live-reproduced because every node now scans; the
+  live-child logic is unit-tested and the render is built/typechecked.
+- The optional tree-wide view remains operator-side (`readiness.mjs`); the
+  app's sandboxed iframe cannot read another node's grants endpoint.
 
 ## Generation history
 
@@ -704,7 +713,7 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 - `8481cb1` don't call an unscanned delegate stale
 - `c57064f` background readiness check (all four nodes READY)
 - `130ec53` stale own-board refresh (#23); delegate `8G5M9…`
-- `5d88595` stuck payment status (#24); UI 195 tests
+- `5d88595` stuck payment status (#24); UI 199 tests
 - `bfc1141` rerunnable live smoke (#25)
 
 `published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code

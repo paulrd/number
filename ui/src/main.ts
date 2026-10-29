@@ -47,6 +47,7 @@ import {
   BoardCache,
   buildTrail,
   childLink,
+  hasLiveChild,
   MAX_TREE_DEPTH,
   octalAddress,
   parentLink,
@@ -111,6 +112,7 @@ const autoAdvanceAddress = byId<HTMLElement>("auto-advance-address");
 const autoAdvanceScan = byId<HTMLElement>("auto-advance-scan");
 const autoAdvanceSubs = byId<HTMLElement>("auto-advance-subs");
 const autoAdvanceStale = byId<HTMLParagraphElement>("auto-advance-stale");
+const autoAdvanceRouteAlert = byId<HTMLParagraphElement>("auto-advance-route-alert");
 const autoAdvanceLastError = byId<HTMLParagraphElement>("auto-advance-last-error");
 const autoAdvanceAudit = byId<HTMLUListElement>("auto-advance-audit");
 const autoAdvanceAuditEmpty = byId<HTMLParagraphElement>("auto-advance-audit-empty");
@@ -286,6 +288,13 @@ let autoAdvanceRefreshing = false;
 let autoAdvanceSaving = false;
 /** True while the user has unsaved edits; status repaints must not clobber them. */
 let autoAdvanceDirty = false;
+/**
+ * Whether the own board has a live child. null means "not checked yet"; the
+ * check runs only when the delegate reports no scans, because that is the only
+ * case where a child makes the missing grant operationally important.
+ */
+let ownLiveChild: boolean | null = null;
+let ownLiveChildRequest = 0;
 
 /** Session cache for remote boards' own names (the board cache holds states). */
 const nameCache = new Map<string, string | null>();
@@ -1315,6 +1324,8 @@ function renderControls(): void {
 }
 
 function renderAll(): void {
+  ownLiveChild = null;
+  ownLiveChildRequest += 1;
   renderIdentity();
   renderContractKey();
   renderBoard();
@@ -1719,12 +1730,28 @@ function setAutoAdvanceFact(element: HTMLElement, text: string, title = ""): voi
   else element.title = title;
 }
 
+/**
+ * Refresh whether this board has a live child. Only called when the delegate
+ * is configured and enabled but has never scanned, so a healthy node pays
+ * nothing for it. A stale reply is dropped if the board changed meanwhile.
+ */
+async function refreshOwnLiveChild(): Promise<void> {
+  const own = ownSnapshot();
+  if (own === null) return;
+  const request = ++ownLiveChildRequest;
+  const live = await hasLiveChild(own, linkDeps);
+  if (request !== ownLiveChildRequest) return;
+  ownLiveChild = live;
+  renderAutoAdvance();
+}
+
 function renderAutoAdvance(): void {
   const status = autoAdvanceStatus;
   const online = boardStatus === "ready";
   const available = delegateControls.available;
   const controllable = delegateControls.controllable;
   const neverScanned = status !== null && delegateNeverScanned(status);
+  if (neverScanned && ownLiveChild === null) void refreshOwnLiveChild();
 
   let reason: string | null = null;
   if (isOffline) {
@@ -1802,10 +1829,12 @@ function renderAutoAdvance(): void {
     badgeState = "not-configured";
     badgeTitle = "The local component has no owner address for this board.";
   } else if (neverScanned) {
-    badgeLabel = "No scans";
+    badgeLabel = ownLiveChild === true ? "Not advancing" : "No scans";
     badgeState = "stale";
     badgeTitle =
-      "The component is configured but no scan has run. If this lasts more than a minute, this node has not granted background permission; reinstall the component so the node asks again.";
+      ownLiveChild === true
+        ? "This board has a live child, so payments can route through it, but this node is not auto-advancing. Reinstall the component so the node asks for background permission."
+        : "The component is configured but no scan has run. If this lasts more than a minute, this node has not granted background permission; reinstall the component so the node asks again.";
   } else if (isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash)) {
     badgeLabel = "Stale";
     badgeState = "stale";
@@ -1905,14 +1934,22 @@ function renderAutoAdvance(): void {
   autoAdvanceStale.textContent = stale
     ? "The local component's contract build does not match this board. It cannot see this board's payments, so enabling auto-advance will not move anything until both are on the same build."
     : "";
-  detailsAttention.hidden = !stale;
-  if (stale) {
+  const routeAlert =
+    neverScanned && ownLiveChild === true
+      ? "This board can carry payments but won't auto-advance on this node. Reinstall the component so the node asks for background permission."
+      : "";
+  autoAdvanceRouteAlert.hidden = routeAlert === "";
+  autoAdvanceRouteAlert.textContent = routeAlert;
+  const attention = stale || routeAlert !== "";
+  detailsAttention.hidden = !attention;
+  if (attention) {
     detailsSummary.setAttribute(
       "aria-label",
       "Details, background payments need attention",
     );
-    detailsSummary.title =
-      "Background payments are using a different contract build than this board.";
+    detailsSummary.title = stale
+      ? "Background payments are using a different contract build than this board."
+      : "A board with a live child cannot auto-advance on this node.";
   } else {
     detailsSummary.removeAttribute("aria-label");
     detailsSummary.removeAttribute("title");
