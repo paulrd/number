@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_AMOUNT,
   DelegateClient,
   DelegateError,
+  delegateNeverScanned,
   isDelegateStatusStale,
   isMissingDelegateError,
   parseDelegatePayloads,
@@ -868,6 +869,21 @@ describe("delegate transport", () => {
         active,
       ),
     ).toBe(true);
+  });
+
+  it("flags an enabled delegate that has never completed a scan", () => {
+    expect(
+      delegateNeverScanned({ configured: true, autoAdvance: true, lastScan: 0 }),
+    ).toBe(true);
+    expect(
+      delegateNeverScanned({ configured: true, autoAdvance: true, lastScan: 1 }),
+    ).toBe(false);
+    expect(
+      delegateNeverScanned({ configured: true, autoAdvance: false, lastScan: 0 }),
+    ).toBe(false);
+    expect(
+      delegateNeverScanned({ configured: false, autoAdvance: true, lastScan: 0 }),
+    ).toBe(false);
   });
 
   it("configures the delegate on connect, after identity, with the active hash first", async () => {

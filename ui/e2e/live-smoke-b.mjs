@@ -77,6 +77,31 @@ async function waitUntil(label, predicate, timeoutMs, intervalMs = 500) {
   throw new Error(`timed out waiting for ${label}${last ? `: ${last}` : ""}`);
 }
 
+async function answerBackgroundPrompt(port, label, done) {
+  const origin = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 90_000;
+  while (!done() && Date.now() < deadline) {
+    let items = [];
+    try {
+      items = await (await fetch(`${origin}/permission/pending`)).json();
+    } catch {
+      // The node may be shutting down or the forward may hiccup; retry.
+    }
+    if (items.length > 0) {
+      const prompt = items[0];
+      await fetch(`${origin}/permission/${encodeURIComponent(prompt.nonce)}/respond`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin },
+        body: JSON.stringify({ index: 0 }),
+      });
+      console.log(`[${label}] answered the node permission prompt`);
+      return true;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
 async function openNode(browser, { port, name, allowCreate }) {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -98,8 +123,15 @@ async function openNode(browser, { port, name, allowCreate }) {
 
   if (await visible(app, "#delegate-install")) {
     console.log(`[${name}] installing the v8 delegate`);
+    // A fresh node asks for the node-enforced Background capability when the
+    // app-origin registration arrives. The 0.2.151 shell does not render that
+    // prompt, so answer it through the node's permission API instead.
+    let installed = false;
+    const answering = answerBackgroundPrompt(port, name, () => installed);
     await app.locator("#delegate-install-button").click();
     await waitGone(app, "#delegate-install", 180_000);
+    installed = true;
+    await answering;
   }
 
   if (await visible(app, "#identity-setup")) {

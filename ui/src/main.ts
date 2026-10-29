@@ -9,7 +9,7 @@ import {
 } from "./board";
 import { createContactsDialog } from "./contacts-dialog";
 import { createBoardNameDialog } from "./board-name-dialog";
-import { DelegateError, isDelegateStatusStale, type DelegateIdentity, type DelegateStatus } from "./delegate";
+import { DelegateError, delegateNeverScanned, isDelegateStatusStale, type DelegateIdentity, type DelegateStatus } from "./delegate";
 import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
@@ -1694,6 +1694,7 @@ function renderAutoAdvance(): void {
   const online = boardStatus === "ready";
   const available = delegateControls.available;
   const controllable = delegateControls.controllable;
+  const neverScanned = status !== null && delegateNeverScanned(status);
 
   let reason: string | null = null;
   if (isOffline) {
@@ -1775,6 +1776,11 @@ function renderAutoAdvance(): void {
     badgeState = "stale";
     badgeTitle =
       "The component's contract build does not match this board, so it cannot find this board's payments.";
+  } else if (neverScanned) {
+    badgeLabel = "No scans";
+    badgeState = "stale";
+    badgeTitle =
+      "The component is configured but no scan has run. If this lasts more than a minute, this node has not granted background permission; reinstall the component so the node asks again.";
   } else if (status.autoAdvance) {
     badgeLabel = "On";
     badgeState = "on";
@@ -1802,8 +1808,13 @@ function renderAutoAdvance(): void {
         ? "Not reported"
         : "Checking…"
       : status.configured
-        ? "Configured"
+        ? neverScanned
+          ? "Configured, no scans"
+          : "Configured"
         : "Not configured",
+    neverScanned
+      ? "No scan has run. If this lasts more than a minute, the node has not granted background permission."
+      : "",
   );
 
   if (status !== null && status.matchedCodeHash !== null) {
@@ -1836,7 +1847,13 @@ function renderAutoAdvance(): void {
   }
 
   const scan = formatScanCount(status === null ? null : status.lastScan);
-  setAutoAdvanceFact(autoAdvanceScan, scan.text, scan.title);
+  setAutoAdvanceFact(
+    autoAdvanceScan,
+    scan.text,
+    neverScanned
+      ? "No scan pass has completed. Background permission may not be granted."
+      : scan.title,
+  );
 
   if (status === null) {
     setAutoAdvanceFact(autoAdvanceSubs, "—");

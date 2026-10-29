@@ -149,6 +149,21 @@ export function isDelegateStatusStale(
   return status.matchedCodeHash !== activeCodeHash;
 }
 
+/**
+ * A configured, enabled delegate that has never completed a scan.
+ *
+ * This is the observable symptom of a missing node-enforced Background grant:
+ * the node never arms lifecycle events or wake-ups, so the component stays
+ * inert while its configuration looks healthy. It is also true for the first
+ * seconds after installation, before the first wake-up lands; the UI copy says
+ * "if this lasts" rather than claiming a failure.
+ */
+export function delegateNeverScanned(
+  status: Pick<DelegateStatus, "configured" | "autoAdvance" | "lastScan">,
+): boolean {
+  return status.configured && status.autoAdvance && status.lastScan === 0;
+}
+
 export interface ExportedSecrets {
   /** 32-byte Ed25519 seed as 64 lowercase hex characters. */
   seed: string;
