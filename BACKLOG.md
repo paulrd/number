@@ -699,6 +699,7 @@ The v4.1/v5 and delegate v8 work is pushed to `origin/main`:
 - `8481cb1` don't call an unscanned delegate stale
 - `c57064f` background readiness check (all four nodes READY)
 - `130ec53` stale own-board refresh (#23); delegate `8G5M9…`
+- `5d88595` stuck payment status (#24); UI 195 tests
 
 `published/` records the v5 contract (`5YKH…`) and delegate `Fwgf…` / code
 `4ems…`; `make check-artifacts` proves the bytes. The live four-node bed is
