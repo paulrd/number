@@ -146,6 +146,10 @@ export function isDelegateStatusStale(
   activeCodeHash: string,
 ): boolean {
   if (!status.configured) return false;
+  // `configure` clears the matched hash, and a delegate that has not scanned
+  // since then reports null. That is "unknown", not a mismatch; treating it as
+  // stale false-alarms on every page load until the next 5-minute scan.
+  if (status.matchedCodeHash === null) return false;
   return status.matchedCodeHash !== activeCodeHash;
 }
 

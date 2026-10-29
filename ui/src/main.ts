@@ -1771,16 +1771,16 @@ function renderAutoAdvance(): void {
     badgeLabel = "Not set up";
     badgeState = "not-configured";
     badgeTitle = "The local component has no owner address for this board.";
-  } else if (isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash)) {
-    badgeLabel = "Stale";
-    badgeState = "stale";
-    badgeTitle =
-      "The component's contract build does not match this board, so it cannot find this board's payments.";
   } else if (neverScanned) {
     badgeLabel = "No scans";
     badgeState = "stale";
     badgeTitle =
       "The component is configured but no scan has run. If this lasts more than a minute, this node has not granted background permission; reinstall the component so the node asks again.";
+  } else if (isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash)) {
+    badgeLabel = "Stale";
+    badgeState = "stale";
+    badgeTitle =
+      "The component's contract build does not match this board, so it cannot find this board's payments.";
   } else if (status.autoAdvance) {
     badgeLabel = "On";
     badgeState = "on";

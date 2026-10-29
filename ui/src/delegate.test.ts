@@ -863,6 +863,13 @@ describe("delegate transport", () => {
         active,
       ),
     ).toBe(false);
+    // configure clears the matched hash; null is "not scanned yet", not stale.
+    expect(
+      isDelegateStatusStale(
+        { configured: true, matchedCodeHash: null },
+        active,
+      ),
+    ).toBe(false);
     expect(
       isDelegateStatusStale(
         { configured: true, matchedCodeHash: LEGACY_CONTRACT_CODE_HASHES[1] },
