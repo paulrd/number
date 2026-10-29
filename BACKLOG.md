@@ -29,7 +29,7 @@ peer; the live test identity opens the v3 contract as a root board.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-CSNbBDyW.js` |
+| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-CRPLwp9S.js` |
 | Tooling | local `freenet` 0.2.151 (restarted), `fdev` 0.3.313; CI pin 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped at the last deploy; when started, run the 7510 website update to pick up the UI-only change |
@@ -538,8 +538,8 @@ the Atlas operator to crawl it.
 - **Upstream remains:** a node whose shell lacks the permission overlay gives
   the user an install that waits on an unrendered prompt. The node should
   render it (the app correctly cannot self-grant; the prompt is node-authored).
-- Deployed: the detection UI is committed but the live site still serves
-  `index-CSNbBDyW.js`; a `fdev website update` is pending.
+- Deployed 2026-10-29: all four nodes serve
+  `index-CRPLwp9S.js` (the detection UI).
 
 ### #23 — A stale committed copy still beats the network
 
