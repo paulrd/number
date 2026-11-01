@@ -32,7 +32,7 @@ five things and everything else is behind Advanced.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v6 + v9 + leaf-first UI, identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-4tx9bKN-.js`; version `1793557217` (2026-11-01) |
+| Live site | v6 + v9 + leaf-first UI with children and parent on the default view, identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-DASu5Zmd.js`; version `1793561053` (2026-11-01) |
 | Address book | private, in the delegate (`number.v9.contacts`, `{label,userId,address}`); the export is its backup. Not in contract state since v6 |
 | Tooling | local `freenet` 0.2.153 (`310e494`) and `fdev` 0.3.315; all four VPS nodes upgraded and restarted 2026-11-01 (previously 0.2.151 / 0.3.313, backups at `*.0.2.151.bak`); CI pin still 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
@@ -774,9 +774,14 @@ Added by the leaf-first pass; none block the current deployment.
 4. **A contact rename does not re-sign `childNames`.** The child keeps seeing
    the name signed with the slot until the parent saves the slot again. Copy
    says so; do not let a future UI imply otherwise.
-5. **`Send a payment…` in Advanced is not disabled for a pending parent** (the
-   default-view `Send payment` is). First press fails with the route error.
-6. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not.** State
+5. **The default-view `Send payment` is disabled for a pending parent** (and for
+   a root); the Advanced ledger no longer carries a duplicate send entry point,
+   so there is nothing left to enable there.
+6. **Auto-advance needs the node's Background capability.** The app cannot grant
+   it, so manual `Check for payments` remains whenever the delegate has not
+   scanned. Decision (2026-11-01): keep that fallback and the in-app off switch
+   rather than making a promise the node can refuse.
+7. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not.** State
    is strict for byte agreement; a peer can still add ignored delta keys.
 
 ## v6 / v9 migration notes

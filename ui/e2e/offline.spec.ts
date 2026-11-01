@@ -41,6 +41,16 @@ async function openSimple(page: Page): Promise<void> {
   await expect(page.locator("#advanced-view")).toBeHidden();
 }
 
+/** Set the own board's parent from the default surface. */
+async function setParent(page: Page, userId: string): Promise<void> {
+  await openSimple(page);
+  await page.locator("#parent-edit").click();
+  await expect(page.locator("#parent-dialog")).toBeVisible();
+  await page.locator("#parent-select").selectOption(userId);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-dialog")).toBeHidden();
+}
+
 /** Add a contact through the header address book and close it again. */
 async function addContact(
   page: Page,
@@ -116,7 +126,11 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.getByRole("heading", { level: 1, name: "Tally" })).toBeVisible();
   await expect(page.locator("#simple-view")).toBeVisible();
   await expect(page.locator("#advanced-view")).toBeHidden();
-  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#board-title-name")).toHaveText("My board");
+  await expect(page.locator("#board-title")).toContainText("Your Board Name:");
+  await expect(
+    page.getByRole("heading", { level: 2, name: /Your Board Name: My board/ }),
+  ).toBeVisible();
   await expect(page.locator("#simple-pay")).toBeDisabled();
   await expect(page.locator("#simple-pay-reason")).toContainText("no parent");
   await expect(page.locator("#simple-view")).not.toContainText(/slot/i);
@@ -366,7 +380,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
 
   await page.goto("/");
   await expect(page.locator("#simple-view")).toBeVisible();
-  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#board-title-name")).toHaveText("My board");
   await expect(page.locator("#parent-value-empty")).toContainText("no parent");
   await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
@@ -488,6 +502,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
 
   // Setting this board's parent to the child would close a loop, so it is
   // blocked before anything is signed.
+  await openSimple(page);
   await page.locator("#parent-edit").click();
   await page.locator("#parent-select").selectOption(MOCK_CHILD_ID);
   await page.locator("#parent-save").click();
@@ -497,6 +512,8 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   // A mutual link is Linked: the parent fixture has a slot pointing here.
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-dialog")).toBeHidden();
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
   await page.locator("#parent-open").click();
   await expect(page.locator("#board-meta")).toBeVisible();
@@ -521,7 +538,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
 
   // The default surface shows the value as given by the parent.
   await openSimple(page);
-  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#board-title-name")).toHaveText("My board");
   await expect(page.locator("#parent-value-title")).toContainText("Held by Parent board");
   await expect(page.locator("#parent-value")).toContainText("8.50");
   await expect(page.locator("#parent-value")).toContainText("kg");
@@ -556,9 +573,11 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#unconfirmed-list")).toContainText("Ghost");
 
   // Clearing the parent returns this board to a root.
+  await openSimple(page);
   await page.locator("#parent-clear").click();
   await expect(page.locator("#parent-name")).toHaveText("Root");
   await expect(page.locator("#parent-clear")).toBeHidden();
+  await expect(page.locator("#parent-edit")).toHaveText("Set parent…");
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -580,9 +599,8 @@ test("excludes a remote one-sided slot from the count and navigation", async ({
 
   // Own board -> Sibling is one-sided (Sibling names the Parent). Its pending
   // row can still be opened, then Sibling's mutual parent opens the Parent.
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_SIBLING_ID);
-  await page.locator("#parent-save").click();
+  await setParent(page, MOCK_SIBLING_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Pending");
   await page.locator("#parent-open").click();
   await expect(page.locator("#board-owner")).toContainText("Sibling board");
@@ -603,6 +621,125 @@ test("excludes a remote one-sided slot from the count and navigation", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
+test("shows only mutual children on the default surface", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+
+  // Slot 0 points at a board that names this board as its parent, so it is a
+  // mutual child. Slot 1 names the Parent fixture, which names no parent.
+  await saveDetails(page, 0, MOCK_CHILD_ID);
+  await saveDetails(page, 1, MOCK_PARENT_ID);
+  await page.waitForTimeout(300);
+
+  await openSimple(page);
+  const children = page.locator("#simple-children");
+  await expect(children).toBeVisible();
+  await expect(children.locator(".simple-child")).toHaveCount(1);
+  await expect(children).toContainText("Child");
+  await expect(children).toContainText("0.00");
+  await expect(children).not.toContainText("Parent");
+  await expect(children.locator("button")).toHaveCount(0);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("sets and clears a parent from the default surface", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+  await openSimple(page);
+  await expect(page.locator("#simple-parent #parent-edit")).toHaveText(
+    "Set parent…",
+  );
+  await expect(page.locator("#simple-parent #parent-clear")).toBeHidden();
+
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-dialog")).toBeHidden();
+
+  await expect(page.locator("#simple-parent-name")).toHaveText("Parent board");
+  await expect(page.locator("#parent-edit")).toHaveText("Change parent");
+  await expect(page.locator("#parent-clear")).toBeVisible();
+
+  // Advanced keeps one read-only summary, not a second set of controls.
+  await openAdvanced(page);
+  await expect(page.locator("#parent-name")).toHaveText("Parent board");
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await expect(page.locator("#advanced-view #parent-edit")).toHaveCount(0);
+  await expect(page.locator("#advanced-view #parent-clear")).toHaveCount(0);
+
+  await openSimple(page);
+  await page.locator("#parent-clear").click();
+  await expect(page.locator("#simple-parent-name")).toHaveText("Root");
+  await expect(page.locator("#parent-edit")).toHaveText("Set parent…");
+  await expect(page.locator("#parent-clear")).toBeHidden();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("hides Check for payments when background auto-advance is active", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.addInitScript(() => {
+    Object.assign(window, {
+      __TALLY_MOCK_DELEGATE__: {
+        hasSeed: true,
+        identity: null,
+        configured: true,
+        codeHashes: [],
+        matchedCodeHash: null,
+        address: "0",
+        autoAdvance: true,
+        maxAmount: 1_000_000,
+        subscriptions: [],
+        lastScan: 3,
+        lastError: null,
+        audit: [],
+      },
+    });
+  });
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#details-summary").click();
+  await expect(page.locator("#details")).toHaveAttribute("open", "");
+  await expect(page.locator("#auto-advance-badge")).toHaveText("On");
+
+  await expect(page.locator("#payment-check")).toBeHidden();
+  await expect(page.locator("#payment-note")).toHaveText(
+    "Your node signs your part as it arrives.",
+  );
+  await expect(page.locator("#payment-auto-note")).toBeVisible();
+  await expect(page.locator("#payment-open-ledger")).toHaveCount(0);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("keeps Check for payments when auto-advance is not active", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await expect(page.locator("#payment-check")).toBeVisible();
+  await expect(page.locator("#payment-note")).toHaveText(
+    "Payments move one board at a time. Each owner opens their board to sign their leg.",
+  );
+  await expect(page.locator("#payment-auto-note")).toBeHidden();
+  await expect(page.locator("#payment-open-ledger")).toHaveCount(0);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
 test("paints only the board-on-screen parent adjustments", async ({ page }) => {
   const errors = watchConsole(page);
 
@@ -615,9 +752,12 @@ test("paints only the board-on-screen parent adjustments", async ({ page }) => {
   await saveDetails(page, 0, MOCK_CHILD_ID);
   await adjust(page, 0, "issue", "3.25");
   await page.locator("#cancel-button").click();
+  await openSimple(page);
   await page.locator("#parent-edit").click();
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-dialog")).toBeHidden();
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
 
   // Child's parent is this board, so the log on screen must be this board's
@@ -805,9 +945,8 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await expect(page.locator("#editor")).toBeHidden();
   await expect(page.locator("#unconfirmed-list")).toContainText("Parent");
 
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
-  await page.locator("#parent-save").click();
+  await setParent(page, MOCK_PARENT_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
   // The parent row uses the parent board's own signed name, not the private
   // contact label ("Parent").
@@ -897,13 +1036,13 @@ test("advances a cooperative payment and offers a source payment", async ({
   await expect(page.locator(".slot .slot-value").nth(1)).toHaveText("2.50");
 
   // Become a source: set the parent and pay the sibling through it.
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
-  await page.locator("#parent-save").click();
+  await setParent(page, MOCK_PARENT_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  await expect(page.locator("#payment-open-ledger")).toBeEnabled();
+  await openSimple(page);
+  await expect(page.locator("#simple-pay")).toBeEnabled();
 
-  await page.locator("#payment-open-ledger").click();
+  await page.locator("#simple-pay").click();
   await expect(page.locator("#payment-dialog")).toBeVisible();
   await page.locator("#payment-direct > summary").click();
   await page.locator("#payment-address").fill("1");
@@ -915,9 +1054,11 @@ test("advances a cooperative payment and offers a source payment", async ({
   await page.locator("#payment-user").fill(MOCK_SIBLING_ID);
   await page.locator("#payment-submit").click();
   await expect(page.locator("#payment-dialog")).toBeHidden();
+  await openAdvanced(page);
   await expect(page.locator("#payment-status")).toContainText("Offered");
   await expect(page.locator("#payment-status")).toContainText("Parent");
-  await expect(page.locator("#payment-open-ledger")).toBeDisabled();
+  await openSimple(page);
+  await expect(page.locator("#simple-pay")).toBeDisabled();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -943,7 +1084,7 @@ test("defaults to the simple surface and hides slot wording and branding", async
   await expect(page.locator("#simple-contacts")).toBeEnabled();
   await expect(page.locator("#simple-receive-link")).toBeDisabled();
   await expect(page.locator("#simple-receive-reason")).toHaveText(
-    "A board with no parent cannot receive a payment yet. Set a parent under Advanced.",
+    "A board with no parent cannot receive a payment yet. Set a parent first.",
   );
 
   // The default surface never says "slot", and the banned branding phrases do
@@ -1004,11 +1145,10 @@ test("copies a receive-payment link with visible feedback", async ({ page }) => 
   await expect(page.locator("#simple-receive-link")).toBeDisabled();
   await openAdvanced(page);
   await addContact(page, "Parent", MOCK_PARENT_ID);
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
-  await page.locator("#parent-save").click();
+  await setParent(page, MOCK_PARENT_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  await page.locator("#view-toggle").click();
+  await openSimple(page);
   await expect(page.locator("#simple-view")).toBeVisible();
 
   await expect(page.locator("#simple-receive-link")).toBeEnabled();
@@ -1043,7 +1183,7 @@ test("refuses a receive link from a root or an unsettled board", async ({
   // Root: no parent means no address and no receive path.
   await expect(receive).toBeDisabled();
   await expect(reason).toHaveText(
-    "A board with no parent cannot receive a payment yet. Set a parent under Advanced.",
+    "A board with no parent cannot receive a payment yet. Set a parent first.",
   );
   await receive.evaluate((element) => (element as HTMLButtonElement).click());
   await page.waitForTimeout(50);
@@ -1056,11 +1196,10 @@ test("refuses a receive link from a root or an unsettled board", async ({
   // both explain the reason up front instead of failing on the first press.
   await openAdvanced(page);
   await addContact(page, "Sibling", MOCK_SIBLING_ID);
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_SIBLING_ID);
-  await page.locator("#parent-save").click();
+  await setParent(page, MOCK_SIBLING_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Pending");
-  await page.locator("#view-toggle").click();
+  await openSimple(page);
   await expect(page.locator("#simple-view")).toBeVisible();
 
   await expect(receive).toBeDisabled();
@@ -1069,7 +1208,7 @@ test("refuses a receive link from a root or an unsettled board", async ({
   );
   await expect(page.locator("#simple-pay")).toBeDisabled();
   await expect(page.locator("#simple-pay-reason")).toHaveText(
-    "A board on the path has not confirmed its parent yet. Open Advanced to finish your parent link.",
+    "A board on the path has not confirmed its parent yet. Check your parent link.",
   );
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
@@ -1084,14 +1223,14 @@ test("chooses a payment recipient from the address book", async ({ page }) => {
   await addContact(page, "Sibling", MOCK_SIBLING_ID, "1");
   await addContact(page, "Parent", MOCK_PARENT_ID);
 
-  // A source needs a parent; once linked the ledger's entry point is enabled.
-  await page.locator("#parent-edit").click();
-  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
-  await page.locator("#parent-save").click();
+  // A source needs a parent; once linked the default surface can send.
+  await setParent(page, MOCK_PARENT_ID);
+  await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  await expect(page.locator("#payment-open-ledger")).toBeEnabled();
+  await openSimple(page);
+  await expect(page.locator("#simple-pay")).toBeEnabled();
 
-  await page.locator("#payment-open-ledger").click();
+  await page.locator("#simple-pay").click();
   await expect(page.locator("#payment-dialog")).toBeVisible();
   await expect(page.locator("#payment-recipient")).toBeFocused();
   await expect(page.locator("#payment-recipient option").first()).toHaveText(
@@ -1130,8 +1269,10 @@ test("chooses a payment recipient from the address book", async ({ page }) => {
   await page.locator("#payment-amount").fill("1.00");
   await page.locator("#payment-submit").click();
   await expect(page.locator("#payment-dialog")).toBeHidden();
+  await openAdvanced(page);
   await expect(page.locator("#payment-status")).toContainText("Offered");
   await expect(page.locator("#payment-status")).toContainText("1.00 along 0 → 1");
+  await page.waitForTimeout(300);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(

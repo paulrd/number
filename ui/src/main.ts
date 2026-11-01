@@ -153,6 +153,7 @@ const breadcrumbs = byId<HTMLElement>("breadcrumbs");
 const breadcrumbList = byId<HTMLOListElement>("breadcrumb-list");
 const breadcrumbWarning = byId<HTMLParagraphElement>("breadcrumb-warning");
 const boardTitle = byId<HTMLHeadingElement>("board-title");
+const boardTitleName = byId<HTMLElement>("board-title-name");
 const boardMode = byId<HTMLParagraphElement>("board-mode");
 const boardAddress = byId<HTMLElement>("board-address");
 const boardAddressValue = byId<HTMLElement>("board-address-value");
@@ -191,6 +192,9 @@ const simpleReceiveReason = byId<HTMLElement>("simple-receive-reason");
 const simpleReceiveStatus = byId<HTMLElement>("simple-receive-status");
 const simplePaymentWaiting = byId<HTMLElement>("simple-payment-waiting");
 const simplePaymentReview = byId<HTMLButtonElement>("simple-payment-review");
+const simpleChildren = byId<HTMLElement>("simple-children");
+const simpleChildrenList = byId<HTMLUListElement>("simple-children-list");
+const simpleParentName = byId<HTMLElement>("simple-parent-name");
 const childSlotsTitle = byId<HTMLElement>("child-slots-title");
 const childSlotsEmpty = byId<HTMLElement>("child-slots-empty");
 const addChildSlot = byId<HTMLButtonElement>("add-child-slot");
@@ -241,7 +245,8 @@ const srStatus = byId<HTMLParagraphElement>("sr-status");
 
 const paymentsSection = byId<HTMLElement>("payments");
 const paymentCheck = byId<HTMLButtonElement>("payment-check");
-const paymentOpen = byId<HTMLButtonElement>("payment-open-ledger");
+const paymentNote = byId<HTMLParagraphElement>("payment-note");
+const paymentAutoNote = byId<HTMLElement>("payment-auto-note");
 const paymentStatus = byId<HTMLElement>("payment-status");
 const paymentStatusBadge = byId<HTMLElement>("payment-status-badge");
 const paymentStatusTitle = byId<HTMLElement>("payment-status-title");
@@ -727,6 +732,7 @@ function renderBoard(): void {
       slotView.action.textContent = "Waiting for the board.";
     }
     renderChildSlotsMeta();
+    renderSimpleChildren();
     renderUnconfirmed();
     return;
   }
@@ -831,7 +837,49 @@ function renderBoard(): void {
   });
 
   renderChildSlotsMeta();
+  renderSimpleChildren();
   renderUnconfirmed();
+}
+
+/**
+ * The default surface's read-only child list. It mirrors only the mutual slots
+ * the Advanced grid already shows: the slot exists here and the child names
+ * this board as its parent. A one-sided slot never appears.
+ */
+function renderSimpleChildren(): void {
+  const current = view;
+  if (
+    current === null ||
+    slotExistenceOwner !== current.ownerId
+  ) {
+    simpleChildren.hidden = true;
+    simpleChildrenList.replaceChildren();
+    return;
+  }
+
+  const rows: HTMLLIElement[] = [];
+  current.state.slots.forEach((slot, index) => {
+    const entry = slot.entry;
+    if (entry === null || slotExistence.get(index) !== true) return;
+
+    const row = createElement("li", "simple-child");
+    const name =
+      parentGivenName(current, entry.contact) ??
+      cachedSelfName(entry.contact) ??
+      unknownLabel(entry.contact);
+    const label = createElement("span", "simple-child-name", name);
+    label.title = entry.contact;
+    const value = createElement(
+      "span",
+      "simple-child-value",
+      `${formatCents(entry.value)}${entry.unit ? ` ${entry.unit}` : ""}`,
+    );
+    row.append(label, value);
+    rows.push(row);
+  });
+
+  simpleChildrenList.replaceChildren(...rows);
+  simpleChildren.hidden = rows.length === 0;
 }
 
 /**
@@ -1113,7 +1161,7 @@ function renderBoardHeader(): void {
  */
 function renderBoardTitle(): void {
   if (view !== null) return;
-  boardTitle.textContent = "Your board";
+  boardTitleName.textContent = "Your board";
   boardTitle.removeAttribute("title");
 }
 
@@ -1377,7 +1425,7 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
     ownParentLinkState = "root";
     renderSimpleActions();
     parentValueTitle.textContent = "No parent yet";
-    boardTitle.textContent = own.state.selfName.name ?? "Your board";
+    boardTitleName.textContent = own.state.selfName.name ?? "—";
     boardTitle.removeAttribute("title");
     parentValueEmpty.textContent = parentEmptyExplanation("root", "");
     parentValueEmpty.hidden = false;
@@ -1408,7 +1456,7 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
       ? parentGivenName(info.snapshot, own.ownerId)
       : null;
   const ownName = own.state.selfName.name;
-  boardTitle.textContent = given ?? ownName ?? "Your board";
+  boardTitleName.textContent = given ?? ownName ?? "—";
   boardTitle.title =
     given !== null
       ? ownName !== null && ownName !== given
@@ -1503,7 +1551,7 @@ function renderParentValue(): void {
     ownParentLinkState = null;
     parentValueBox.dataset.state = "loading";
     parentValueTitle.textContent = "Held by your parent";
-    boardTitle.textContent = "Your board";
+    boardTitleName.textContent = "Your board";
     boardTitle.removeAttribute("title");
     parentValueEmpty.textContent = "Reading your board…";
     parentValueEmpty.hidden = false;
@@ -1537,6 +1585,8 @@ function renderParentRow(): void {
     parentOpen.hidden = true;
     parentEdit.hidden = true;
     parentClear.hidden = true;
+    simpleParentName.textContent = "—";
+    simpleParentName.removeAttribute("title");
     return;
   }
 
@@ -1544,7 +1594,9 @@ function renderParentRow(): void {
   const parentId = current.state.parent.userId;
   parentEdit.hidden = !isOwn;
   parentEdit.disabled = busy;
-  parentEdit.textContent = parentId === null ? "Set parent…" : "Change";
+  // Until the link is checked, "Set parent…" is the honest label: it never
+  // claims a mutual parent that the asynchronous check has not confirmed.
+  parentEdit.textContent = "Set parent…";
   parentClear.hidden = !isOwn || parentId === null;
   parentClear.disabled = busy;
 
@@ -1559,6 +1611,8 @@ function renderParentRow(): void {
       "Set a parent to record a liability above this board and to receive payments through it.";
     parentNote.hidden = false;
     parentOpen.hidden = true;
+    simpleParentName.textContent = "Root";
+    simpleParentName.title = "This board has no parent.";
     return;
   }
 
@@ -1571,6 +1625,8 @@ function renderParentRow(): void {
   parentStatus.title = "Checking the parent board.";
   parentNote.hidden = true;
   parentOpen.hidden = true;
+  simpleParentName.textContent = parentName.textContent;
+  simpleParentName.title = parentId;
 
   const initialLabel = parentName.textContent;
   const board = isOwn ? (ownSnapshot() ?? current) : current;
@@ -1584,6 +1640,11 @@ function renderParentRow(): void {
     if (selfName !== null && initialLabel === unknownLabel(parentId)) {
       parentName.textContent = selfName;
     }
+    simpleParentName.textContent = parentName.textContent ?? "";
+    // The simple surface offers "Change parent" only for a live mutual link;
+    // every other state needs the same "Set parent…" entry point a root does.
+    parentEdit.textContent =
+      info.state === "linked" ? "Change parent" : "Set parent…";
     const legacyParent = info.snapshot?.legacy === true;
     parentNote.hidden = !legacyParent;
     parentNote.title = LEGACY_PARENT_TITLE;
@@ -1734,12 +1795,12 @@ function renderSimpleActions(): void {
   if (!ownBoard || !ready) payReason = "Waiting for your board.";
   else if (isRoot) {
     payReason =
-      "A board with no parent has nothing to pay from. Set a parent under Advanced.";
+      "A board with no parent has nothing to pay from. Set a parent first.";
   } else if (ownParentLinkState === null) {
     payReason = "Checking your parent link…";
   } else if (ownParentLinkState !== "linked") {
     payReason =
-      "A board on the path has not confirmed its parent yet. Open Advanced to finish your parent link.";
+      "A board on the path has not confirmed its parent yet. Check your parent link.";
   } else if (paymentBlockedReason !== null) {
     payReason = paymentBlockedReason;
   }
@@ -1755,7 +1816,7 @@ function renderSimpleActions(): void {
   else if (ownIdentity === null) linkReason = "Waiting for your identity.";
   else if (isRoot) {
     linkReason =
-      "A board with no parent cannot receive a payment yet. Set a parent under Advanced.";
+      "A board with no parent cannot receive a payment yet. Set a parent first.";
   } else if (
     ownReceiveAddress === null ||
     ownReceiveAddressOwner !== ownIdentity.pubkey
@@ -2095,7 +2156,6 @@ async function renderPayments(): Promise<void> {
   paymentsSection.hidden = false;
   const own = ownSnapshot() ?? current;
   const entry = own.state.payments.entry;
-  const isRoot = own.state.parent.userId === null;
 
   let display = entry;
   if (entry !== null) {
@@ -2130,14 +2190,6 @@ async function renderPayments(): Promise<void> {
   paymentClear.title = stuck
     ? "Clear this board's stuck payment record; the network copy is already settled."
     : "Clear this board's payment record.";
-  paymentOpen.disabled = busy || navigating || active || stuck || isRoot;
-  paymentOpen.title = stuck
-    ? "Clear this board's stuck payment record before starting another payment."
-    : active
-      ? "This board already has a payment in progress."
-      : isRoot
-        ? "A root has no parent edge to debit, so it cannot send a payment."
-        : "Send a payment along the board tree.";
   paymentBlockedReason =
     active || stuck
       ? "A payment is already in progress. Review it under Advanced."
@@ -2186,11 +2238,12 @@ const AUTO_ADVANCE_AUDIT_LIMIT = 5;
 function createDelegateControls(source: BoardBackend) {
   return {
     get available(): boolean {
+      // The offline mock only exposes a delegate when a test seeds one.
+      if (isOffline) return source.delegateStatus != null;
       return (
-        !isOffline &&
-        (typeof source.refreshDelegateStatus === "function" ||
-          typeof source.setAutoAdvance === "function" ||
-          source.delegateStatus !== undefined)
+        typeof source.refreshDelegateStatus === "function" ||
+        typeof source.setAutoAdvance === "function" ||
+        source.delegateStatus !== undefined
       );
     },
     get controllable(): boolean {
@@ -2290,21 +2343,40 @@ async function refreshOwnLiveChild(): Promise<void> {
   renderAutoAdvance();
 }
 
+/**
+ * Auto-advance is operationally active only when the component is configured,
+ * the switch is on, and a scan has actually completed. `lastScan` is the
+ * available proxy for the node having granted background permission.
+ */
+function autoAdvanceIsActive(status: DelegateStatus | null): boolean {
+  return (
+    status !== null &&
+    status.configured &&
+    status.autoAdvance &&
+    status.lastScan > 0
+  );
+}
+
 function renderAutoAdvance(): void {
   const status = autoAdvanceStatus;
-  const online = boardStatus === "ready";
   const available = delegateControls.available;
+  const online = boardStatus === "ready" || (isOffline && available);
   const controllable = delegateControls.controllable;
+  const active = autoAdvanceIsActive(status);
   const neverScanned = status !== null && delegateNeverScanned(status);
   if (neverScanned && ownLiveChild === null) void refreshOwnLiveChild();
 
+  paymentCheck.hidden = active;
+  paymentNote.textContent = active
+    ? "Your node signs your part as it arrives."
+    : "Payments move one board at a time. Each owner opens their board to sign their leg.";
+  paymentAutoNote.hidden = !active;
+
   let reason: string | null = null;
-  if (isOffline) {
-    reason =
-      "The offline preview has no local component, so background payments are unavailable here.";
-  } else if (!available) {
-    reason =
-      "This build cannot read the local component's payment status, so these controls are off.";
+  if (!available) {
+    reason = isOffline
+      ? "The offline preview has no local component, so background payments are unavailable here."
+      : "This build cannot read the local component's payment status, so these controls are off.";
   } else if (!online) {
     reason =
       boardStatus === "disconnected"
@@ -2345,7 +2417,7 @@ function renderAutoAdvance(): void {
     status === null && autoAdvanceRefreshError !== null ? "warning" : "muted";
 
   autoAdvanceRefresh.disabled =
-    isOffline || !available || autoAdvanceRefreshing || autoAdvanceSaving;
+    !available || autoAdvanceRefreshing || autoAdvanceSaving;
   autoAdvanceRefresh.title = autoAdvanceRefreshing
     ? "Refreshing…"
     : autoAdvanceRefresh.disabled
@@ -2355,14 +2427,12 @@ function renderAutoAdvance(): void {
   let badgeLabel = "Checking…";
   let badgeState = "checking";
   let badgeTitle = "Waiting for the local component.";
-  if (isOffline) {
+  if (!available) {
     badgeLabel = "Unavailable";
     badgeState = "unavailable";
-    badgeTitle = "The offline preview does not run the local component.";
-  } else if (!available) {
-    badgeLabel = "Unavailable";
-    badgeState = "unavailable";
-    badgeTitle = "This build has no background payment status.";
+    badgeTitle = isOffline
+      ? "The offline preview does not run the local component."
+      : "This build has no background payment status.";
   } else if (!autoAdvanceStatusReceived) {
     badgeTitle = "No status has arrived yet.";
   } else if (status === null) {
@@ -2570,7 +2640,7 @@ function renderAutoAdvance(): void {
 }
 
 async function refreshAutoAdvanceStatus(announceResult = false): Promise<void> {
-  if (isOffline || !delegateControls.available) {
+  if (!delegateControls.available) {
     autoAdvanceStatusReceived = true;
     autoAdvanceRefreshError = null;
     autoAdvanceStatus = null;
@@ -4337,7 +4407,6 @@ window.addEventListener("popstate", () => {
   if (mode !== viewMode) setViewMode(mode, { history: false, focus: true });
   else if (mode === "simple") pushedAdvancedEntry = false;
 });
-paymentOpen.addEventListener("click", openPaymentDialog);
 paymentRecipient.addEventListener("change", updatePaymentRecipient);
 paymentAddressBook.addEventListener("click", () => {
   addingForParent = false;

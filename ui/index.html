@@ -22,11 +22,9 @@
     <div class="app">
       <header class="app-header">
         <div class="title-block">
-          <p class="eyebrow">Personal Freenet board</p>
           <div class="wordmark-row">
             <h1 class="wordmark">Tally</h1>
           </div>
-          <p class="tagline">One owner. One board. Every change signed.</p>
         </div>
 
         <div class="header-actions">
@@ -65,20 +63,60 @@
           class="simple-view"
           aria-labelledby="board-title"
         >
-          <article id="parent-value" class="record-card">
-            <p id="parent-value-title" class="record-eyebrow">Held by your parent</p>
-            <h2 id="board-title" class="record-title" tabindex="-1">Your board</h2>
-            <p id="parent-value-figure" class="record-figure" hidden>
-              <span class="sr-only">Value: </span>
-              <span id="parent-value-amount" class="record-amount">—</span>
-              <span id="parent-value-unit" class="record-unit" hidden></span>
-            </p>
-            <p id="parent-value-recorded" class="record-recorded" hidden></p>
-            <p id="parent-value-note" class="record-note" hidden></p>
-            <p id="parent-value-empty" class="record-empty" hidden></p>
-            <span id="parent-value-board" class="sr-only"></span>
-            <span id="parent-value-state" class="sr-only" hidden></span>
-          </article>
+          <div class="record-sheet">
+            <article id="parent-value" class="record-card">
+              <p id="parent-value-title" class="record-eyebrow">Held by your parent</p>
+              <h2 id="board-title" class="record-title" tabindex="-1">
+                <span class="board-title-label">Your Board Name: </span><span id="board-title-name">Your board</span>
+              </h2>
+              <p id="parent-value-figure" class="record-figure" hidden>
+                <span class="sr-only">Value: </span>
+                <span id="parent-value-amount" class="record-amount">—</span>
+                <span id="parent-value-unit" class="record-unit" hidden></span>
+              </p>
+              <p id="parent-value-recorded" class="record-recorded" hidden></p>
+              <p id="parent-value-note" class="record-note" hidden></p>
+              <p id="parent-value-empty" class="record-empty" hidden></p>
+              <span id="parent-value-board" class="sr-only"></span>
+              <span id="parent-value-state" class="sr-only" hidden></span>
+            </article>
+
+            <div
+              id="simple-children"
+              class="simple-children"
+              aria-labelledby="simple-children-title"
+              hidden
+            >
+              <h3 id="simple-children-title" class="simple-children-title">Children</h3>
+              <ul id="simple-children-list" class="simple-children-list"></ul>
+            </div>
+          </div>
+
+          <div id="simple-parent" class="simple-parent">
+            <div class="simple-parent-main">
+              <span class="simple-parent-label">Parent</span>
+              <span id="simple-parent-name" class="simple-parent-name">Root</span>
+            </div>
+            <div class="simple-parent-actions">
+              <button
+                id="parent-edit"
+                class="meta-action"
+                type="button"
+                aria-haspopup="dialog"
+                aria-controls="parent-dialog"
+              >
+                Set parent…
+              </button>
+              <button
+                id="parent-clear"
+                class="meta-action meta-action--danger"
+                type="button"
+                hidden
+              >
+                Clear parent
+              </button>
+            </div>
+          </div>
 
           <p id="simple-payment-waiting" class="simple-payment-waiting" hidden>
             A payment is waiting for your signature.
@@ -235,24 +273,6 @@
                   <div class="meta-actions">
                     <button id="parent-open" class="meta-action" type="button" hidden>
                       Open parent
-                    </button>
-                    <button
-                      id="parent-edit"
-                      class="meta-action"
-                      type="button"
-                      aria-haspopup="dialog"
-                      aria-controls="parent-dialog"
-                      hidden
-                    >
-                      Set parent…
-                    </button>
-                    <button
-                      id="parent-clear"
-                      class="meta-action meta-action--danger"
-                      type="button"
-                      hidden
-                    >
-                      Clear parent
                     </button>
                   </div>
                   <p id="parent-note" class="meta-note" hidden>
@@ -497,10 +517,10 @@
               </div>
               <div class="payments-actions">
                 <button id="payment-check" class="meta-action" type="button">Check for payments</button>
-                <button id="payment-open-ledger" class="button button--small button--primary" type="button" aria-haspopup="dialog" aria-controls="payment-dialog">Send a payment…</button>
               </div>
             </div>
             <p id="payment-note" class="payment-note">Payments move one board at a time. Each owner opens their board to sign their leg.</p>
+            <p id="payment-auto-note" class="payment-note payment-auto-note" hidden>Auto-advance is on.</p>
             <div id="payment-status" class="payment-status" hidden>
               <span id="payment-status-badge" class="state-badge" role="status"></span>
               <div class="payment-status-copy">

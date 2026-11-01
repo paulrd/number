@@ -169,3 +169,41 @@ with empty initial text. Targets ≥44 px; the action stack is full width below
 `92233720368547758.07` cannot force horizontal scroll. Reuse the existing palette,
 `.button` variants, dialog focus behaviour and `@media (prefers-reduced-motion)`
 guard; no new dependencies, fonts or images.
+
+## Revision 2 (2026-11-01) — children and the parent on the default view
+
+Supersedes the corresponding points above.
+
+- **Header:** the `Personal Freenet board` eyebrow and the `One owner. One board.
+  Every change signed.` tagline are gone. The header is the wordmark, the view
+  toggle, and nothing else.
+- **Board name label:** the card title is prefixed with a literal, quiet label
+  `Your Board Name:` above the name (the words stay inside the `h2`, so the
+  accessible heading still reads `Your Board Name: <name>`). An unnamed board
+  renders `Your Board Name: —`.
+- **Children:** the default view lists the children a board actually has —
+  rows of name + value + unit, read-only, sharing one sheet with the parent
+  card. A child appears only under the existing mutual rule; a one-sided slot
+  never appears here. The block is hidden when there are none. Authoring
+  (add / edit / clear) and the `Unconfirmed slots` block stay in Advanced.
+- **Parent:** setting, changing and clearing the parent now happen on the
+  default view. Root/pending states show `Set parent…` as the primary action
+  (it is the leaf user's onboarding step); a linked board shows the parent's
+  name with `Change parent` / `Clear parent`. Advanced keeps only a read-only
+  parent summary plus `Open parent`.
+- **Auto-advance:** manual payment controls are conditional on the delegate
+  actually auto-advancing (`configured && autoAdvance && lastScan > 0`).
+  When it is active, `Check for payments` and the duplicate `Send a payment…`
+  entry are absent and the block says the node signs your part as it arrives.
+  When it is not (no delegate, switched off, or a node that never granted the
+  Background capability), `Check for payments` and the manual sentence remain:
+  without the grant there is no automatic signing, and hiding the control would
+  strand a leg. The app cannot grant Background itself — the node decides — so
+  this fallback is permanent, not transitional.
+- **Ids:** the default-view actions are `#simple-pay`, `#simple-contacts`,
+  `#simple-receive-link`; the parent controls are `#parent-edit` /
+  `#parent-clear`, reachable from the default view. `#payment-open-ledger` and
+  `#payment-open` no longer exist.
+- **Copy rule:** the banned phrases remain `8 slots` / `Eight slots` outside
+  Advanced. The word `slot` may appear on the default view now that children
+  are listed there; the old "no `slot` in `#simple-view`" assertion is retired.

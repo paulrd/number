@@ -40,7 +40,7 @@ import {
   type BoardSnapshot,
   type PaymentSlotWrite,
 } from "./board";
-import type { ContactRecord, DelegateIdentity } from "./delegate";
+import type { ContactRecord, DelegateIdentity, DelegateStatus } from "./delegate";
 
 const encoder = new TextEncoder();
 
@@ -225,6 +225,8 @@ export class OfflineBoard implements BoardBackend {
   readonly identity: DelegateIdentity;
   readonly contractKeyBase58: string;
   currentState: StateV3 | null = null;
+  /** A seeded delegate status, for offline tests of the background lane. */
+  delegateStatus?: DelegateStatus;
 
   private readonly codeHashBytes: Uint8Array;
   private readonly pubkeyBytes: Uint8Array;
@@ -255,6 +257,11 @@ export class OfflineBoard implements BoardBackend {
       this.codeHashBytes,
       this.pubkeyBytes,
     ).base58;
+    // `addInitScript` can seed a delegate fixture before the module loads.
+    const seeded = (
+      globalThis as { __TALLY_MOCK_DELEGATE__?: DelegateStatus }
+    ).__TALLY_MOCK_DELEGATE__;
+    if (seeded !== undefined) this.delegateStatus = seeded;
   }
 
   async start(): Promise<StateV3> {
@@ -279,6 +286,18 @@ export class OfflineBoard implements BoardBackend {
     this.callbacks.onState(this.currentState);
     this.callbacks.onStatus("offline", "in-memory mock; changes reset on reload");
     return this.currentState;
+  }
+
+  async refreshDelegateStatus(): Promise<DelegateStatus | null> {
+    return this.delegateStatus ?? null;
+  }
+
+  async setAutoAdvance(enabled: boolean, maxAmount: number): Promise<void> {
+    if (this.delegateStatus === undefined) {
+      throw new Error("The offline mock has no configured delegate.");
+    }
+    this.delegateStatus = { ...this.delegateStatus, autoAdvance: enabled, maxAmount };
+    this.callbacks.onDelegateStatus?.(this.delegateStatus);
   }
 
   async save(slotIndex: number, entry: Entry): Promise<void> {
