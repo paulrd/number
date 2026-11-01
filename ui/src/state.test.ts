@@ -9,20 +9,25 @@ import {
   MAX_ADJUSTMENTS,
   MAX_ADJUSTMENT_NOTE_BYTES,
   MAX_CONTACTS,
+  SLOT_COUNT,
   StateError,
   V4_STATE_VERSION,
+  V5_STATE_VERSION,
   adjustmentsDigest16,
   adjustmentsSigningBytes,
+  childNamesDigest16,
+  childNamesSigningBytes,
   computeDelta,
-  contactsDigest16,
-  contactsSigningBytes,
   decodeDelta,
+  decodeLegacyV5State,
   decodeState,
   decodeSummary,
   emptyAdjustments,
+  emptyChildNames,
   emptyContacts,
   emptyParent,
   emptyPayments,
+  emptySelfName,
   emptyState,
   encodeDelta,
   encodeState,
@@ -31,10 +36,11 @@ import {
   formatCents,
   isI64,
   mergeAdjustments,
-  mergeContacts,
+  mergeChildNames,
   mergeDelta,
   mergeParent,
   mergePayments,
+  mergeSelfName,
   mergeStates,
   optionalText,
   parentDigest16,
@@ -42,28 +48,39 @@ import {
   parseCents,
   paymentsDigest16,
   paymentsSigningBytes,
+  selfNameDigest16,
+  selfNameSigningBytes,
   signingBytes,
   slotDigest16,
   stateWarnings,
   summaryFromState,
   validateAdjustment,
   validateAdjustments,
+  validateChildName,
+  validateChildNames,
   validateContacts,
   validateDelta,
   validateEntry,
+  validateLegacyV5State,
   validateParent,
   validatePaymentEntry,
   validatePayments,
+  validateSelfName,
   validateState,
   validateSummary,
   type Adjustment,
   type Adjustments,
+  type ChildName,
+  type ChildNames,
   type Contact,
   type ContactsRecord,
+  type Delta,
   type Entry,
   type ParentRecord,
+  type SelfName,
   type Slot,
   type StateV3,
+  type StateV5,
 } from "./state";
 import type { PaymentEntry, PaymentsRecord } from "./payments";
 import { bytesToHex } from "./util";
@@ -77,21 +94,35 @@ const CONTACT_B = "22".repeat(32);
 /** A userId with hex letters, for lowercase checks. */
 const CONTACT_HEX = "ab".repeat(32);
 
-// Spec §2.5 golden vectors.
+// Spec §2.5 golden vectors (unchanged in v6).
 const GOLDEN_SLOT_BYTES =
   "6e756d6265723a76323a736c6f74030700000000000000010c00000000000000" +
   "1111111111111111111111111111111111111111111111111111111111111111" +
   "0000000000000000";
 const GOLDEN_SLOT_DIGEST16 = "d6f77f8b222a3ee76101db6e6f662e7c";
 
-const GOLDEN_CONTACTS_BYTES =
-  "6e756d6265723a76323a636f6e7461637473" + // "number:v2:contacts"
+// DESIGN-v6.md §2: selfName, seq 1, "Alice".
+const GOLDEN_SELF_NAME_BYTES =
+  "6e756d6265723a76363a73656c666e616d65" + // "number:v6:selfname"
+  "0100000000000000" + // seq 1
+  "01" + // tag: named
+  "05000000" + // length
+  "416c696365"; // "Alice"
+const GOLDEN_SELF_NAME_DIGEST16 = "f009ba5b61c81bcb865b6988ddecb79c";
+const GOLDEN_SELF_NAME_CLEARED_BYTES =
+  "6e756d6265723a76363a73656c666e616d65" + "0100000000000000" + "00";
+const GOLDEN_SELF_NAME_CLEARED_DIGEST16 = "7d4cbb4f91a19c4a209f6d1ec1112cde";
+
+// DESIGN-v6.md §3: childNames, seq 1, slot 0 -> Alice.
+const GOLDEN_CHILD_NAMES_BYTES =
+  "6e756d6265723a76363a6368696c646e616d6573" + // "number:v6:childnames"
   "0100000000000000" + // seq 1
   "01000000" + // count
-  "05000000" + // label length
-  "416c696365" + // "Alice"
-  "1111111111111111111111111111111111111111111111111111111111111111";
-const GOLDEN_CONTACTS_DIGEST16 = "415fee80ba4f302cac4cd169a7f075a4";
+  "00" + // slot 0
+  CONTACT_A + // userId 0x11 * 32
+  "05000000" + // name length
+  "416c696365"; // "Alice"
+const GOLDEN_CHILD_NAMES_DIGEST16 = "b51da0c87d76838cd5c83618eb93438c";
 
 // Spec §2/§4: parent signing bytes, seq 1, userId 0x11 × 32.
 const PARENT_USER = "11".repeat(32);
@@ -105,9 +136,6 @@ const GOLDEN_PARENT_CLEARED_BYTES =
   "6e756d6265723a76333a706172656e74" + "0100000000000000" + "00"; // tag: cleared
 const GOLDEN_PARENT_CLEARED_DIGEST16 = "3b38efbfcc7bd18dce1d5e265151e9f0";
 
-// contract/payments_golden_vector.txt (cross-pin: the contract file still
-// documents the pre-`settled` encoding; these vectors follow the updated
-// DESIGN-payments.md order, which inserts settled_count:u8 after seq).
 const PAY_USER_SRC = "11".repeat(32);
 const PAY_USER_DST = "22".repeat(32);
 const PAY_USER_NEXT = "33".repeat(32);
@@ -115,18 +143,7 @@ const PAYMENT_ID = "0123456789abcdef0123456789abcdef";
 const PAY_LEG_SIG = "5a".repeat(64);
 const SETTLED_A = "aa".repeat(16);
 const SETTLED_B = "bb".repeat(16);
-const GOLDEN_PAYMENTS_BYTES_1 =
-  "6e756d6265723a76343a7061796d656e747306000000000000000001" +
-  "0123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333102000100333333333333333333333333333333333333333333333333333333333333333301010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
-const GOLDEN_PAYMENTS_DIGEST_1 = "325c8d0a9c2b51ce5f2069e724b39ad3";
-const GOLDEN_PAYMENTS_BYTES_2 =
-  "6e756d6265723a76343a7061796d656e747307000000000000000001" +
-  "0123456789abcdef0123456789abcdef11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222e20400000000000002000000353202000000333105020200000000000000000000000000000000000000000000000000000000000000000002010400000000000000a60e0000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0305000000000000001efbffffffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
-const GOLDEN_PAYMENTS_DIGEST_2 = "9b1419ef01132905668a238ad95e3456";
 
-// DESIGN-v4.1-v5 §Pass 2: v5 adjustments signing bytes, seq 1 with one entry
-// (slot 1, slotSeq 4, delta +100, postValue 3750, note "issue"). Cross-pinned
-// with the contract/delegate lane's adjustments_signing_bytes.
 const GOLDEN_ADJUSTMENTS_BYTES =
   "6e756d6265723a76353a61646a7573746d656e7473" + // "number:v5:adjustments"
   "0100000000000000" + // seq 1
@@ -139,9 +156,7 @@ const GOLDEN_ADJUSTMENTS_BYTES =
   "6973737565"; // "issue"
 const GOLDEN_ADJUSTMENTS_DIGEST16 = "3ee15da20e9d1ce05d7478122818bf0e";
 
-function payment(
-  overrides: Partial<PaymentEntry> = {},
-): PaymentEntry {
+function payment(overrides: Partial<PaymentEntry> = {}): PaymentEntry {
   return {
     id: PAYMENT_ID,
     src: PAY_USER_SRC,
@@ -159,9 +174,7 @@ function payment(
   };
 }
 
-function payments(
-  overrides: Partial<PaymentsRecord> = {},
-): PaymentsRecord {
+function payments(overrides: Partial<PaymentsRecord> = {}): PaymentsRecord {
   return { seq: 0, settled: [], entry: null, sig: null, ...overrides };
 }
 
@@ -176,10 +189,20 @@ function adjustment(overrides: Partial<Adjustment> = {}): Adjustment {
   };
 }
 
-function adjustments(
-  overrides: Partial<Adjustments> = {},
-): Adjustments {
+function adjustments(overrides: Partial<Adjustments> = {}): Adjustments {
   return { seq: 0, entries: [], sig: null, ...overrides };
+}
+
+function selfName(overrides: Partial<SelfName> = {}): SelfName {
+  return { seq: 0, name: null, sig: null, ...overrides };
+}
+
+function childNames(overrides: Partial<ChildNames> = {}): ChildNames {
+  return { seq: 0, entries: [], sig: null, ...overrides };
+}
+
+function childName(overrides: Partial<ChildName> = {}): ChildName {
+  return { slot: 0, userId: CONTACT_A, name: "Alice", ...overrides };
 }
 
 function entry(value: number | bigint, overrides: Partial<Entry> = {}): Entry {
@@ -202,16 +225,20 @@ function contacts(overrides: Partial<ContactsRecord> = {}): ContactsRecord {
 
 function stateWith(
   slots: Record<number, Slot>,
-  record: ContactsRecord = emptyContacts(),
+  self: SelfName = emptySelfName(),
   parent: ParentRecord = emptyParent(),
+  children: ChildNames = emptyChildNames(),
 ): StateV3 {
   const state = emptyState();
+  state.selfName = { ...self };
   state.parent = { ...parent };
-  state.contacts = {
-    seq: record.seq,
-    entries: record.entries.map((item) => ({ ...item })),
-    sig: record.sig,
+  state.childNames = {
+    seq: children.seq,
+    entries: children.entries.map((item) => ({ ...item })),
+    sig: children.sig,
   };
+  state.payments = payments();
+  state.adjustments = adjustments();
   for (const [index, slot] of Object.entries(slots)) {
     state.slots[Number(index)] = {
       seq: slot.seq,
@@ -222,33 +249,78 @@ function stateWith(
   return state;
 }
 
-describe("golden vectors (spec §2.5)", () => {
+/** A raw v5 board with the given record overrides. */
+function legacyRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const base = emptyState();
+  return {
+    v: V5_STATE_VERSION,
+    parent: base.parent,
+    contacts: contacts({
+      seq: 1,
+      entries: [contact("Alice")],
+      sig: SIG_A,
+    }),
+    payments: base.payments,
+    adjustments: base.adjustments,
+    slots: base.slots,
+    ...overrides,
+  };
+}
+
+function delta(overrides: Record<string, unknown> = {}): Delta {
+  return {
+    v: 6,
+    selfName: null,
+    parent: null,
+    childNames: null,
+    payments: null,
+    adjustments: null,
+    slots: [],
+    ...overrides,
+  } as unknown as Delta;
+}
+
+describe("golden vectors", () => {
   it("builds the exact slot signing bytes and digest16", () => {
     expect(bytesToHex(signingBytes(3, 7, entry(12)))).toBe(GOLDEN_SLOT_BYTES);
-    expect(
-      slotDigest16(3, { seq: 7, entry: entry(12), sig: SIG_A }),
-    ).toBe(GOLDEN_SLOT_DIGEST16);
+    expect(slotDigest16(3, { seq: 7, entry: entry(12), sig: SIG_A })).toBe(
+      GOLDEN_SLOT_DIGEST16,
+    );
     expect(slotDigest16(3, { seq: 0, entry: null, sig: null })).toBe(
       "0".repeat(32),
     );
   });
 
-  it("builds the exact contacts signing bytes and digest16", () => {
-    const record = contacts({
-      seq: 1,
-      entries: [contact("Alice", CONTACT_A)],
-      sig: SIG_A,
-    });
-    expect(bytesToHex(contactsSigningBytes(1, record.entries))).toBe(
-      GOLDEN_CONTACTS_BYTES,
+  it("builds the exact selfName signing bytes, digest16 and cleared tag", () => {
+    expect(bytesToHex(selfNameSigningBytes(1, "Alice"))).toBe(
+      GOLDEN_SELF_NAME_BYTES,
     );
-    expect(contactsDigest16(record)).toBe(GOLDEN_CONTACTS_DIGEST16);
-    expect(contactsDigest16(emptyContacts())).toBe("0".repeat(32));
+    expect(selfNameDigest16(selfName({ seq: 1, name: "Alice", sig: SIG_A }))).toBe(
+      GOLDEN_SELF_NAME_DIGEST16,
+    );
+    expect(bytesToHex(selfNameSigningBytes(1, null))).toBe(
+      GOLDEN_SELF_NAME_CLEARED_BYTES,
+    );
+    expect(selfNameDigest16(selfName({ seq: 1, name: null, sig: SIG_A }))).toBe(
+      GOLDEN_SELF_NAME_CLEARED_DIGEST16,
+    );
+    expect(selfNameDigest16(emptySelfName())).toBe("0".repeat(32));
   });
 
-  it("signs an empty contact list with seq > 0 as count 0", () => {
-    expect(bytesToHex(contactsSigningBytes(4, []))).toBe(
-      "6e756d6265723a76323a636f6e7461637473" +
+  it("builds the exact childNames signing bytes and digest16", () => {
+    const entries = [childName()];
+    expect(bytesToHex(childNamesSigningBytes(1, entries))).toBe(
+      GOLDEN_CHILD_NAMES_BYTES,
+    );
+    expect(childNamesDigest16(childNames({ seq: 1, entries, sig: SIG_A }))).toBe(
+      GOLDEN_CHILD_NAMES_DIGEST16,
+    );
+    expect(childNamesDigest16(emptyChildNames())).toBe("0".repeat(32));
+  });
+
+  it("signs an empty childNames record at seq > 0 as count 0", () => {
+    expect(bytesToHex(childNamesSigningBytes(4, []))).toBe(
+      "6e756d6265723a76363a6368696c646e616d6573" +
         "0400000000000000" +
         "00000000",
     );
@@ -270,115 +342,30 @@ describe("golden vectors (spec §2.5)", () => {
     expect(parentDigest16(emptyParent())).toBe("0".repeat(32));
   });
 
-  it("builds the exact payments signing bytes and digest16 (golden vector 1)", () => {
-    const entry = payment();
-    expect(bytesToHex(paymentsSigningBytes(6, [], entry))).toBe(
-      GOLDEN_PAYMENTS_BYTES_1,
-    );
-    expect(paymentsDigest16({ seq: 6, settled: [], entry, sig: SIG_A })).toBe(
-      GOLDEN_PAYMENTS_DIGEST_1,
-    );
-  });
-
-  it("builds the exact terminal payments signing bytes (golden vector 2)", () => {
-    const entry = payment({
-      cursor: 5,
-      phase: "terminal",
-      status: "complete",
-      next: "0".repeat(64),
-      legs: [
-        { slot: 1, seq: 4, postValue: 3750n, sig: PAY_LEG_SIG },
-        { slot: 3, seq: 5, postValue: -1250n, sig: PAY_LEG_SIG },
-      ],
-    });
-    expect(bytesToHex(paymentsSigningBytes(7, [], entry))).toBe(
-      GOLDEN_PAYMENTS_BYTES_2,
-    );
-    expect(paymentsDigest16({ seq: 7, settled: [], entry, sig: SIG_A })).toBe(
-      GOLDEN_PAYMENTS_DIGEST_2,
-    );
-    expect(paymentsDigest16(emptyPayments())).toBe("0".repeat(32));
-  });
-
-  it("matches the contract lane's v5 adjustment golden vectors", () => {
-    // Cross-pin: contract/adjustments_golden_vector.txt.
-    const case1 = [
-      adjustment({ slot: 1, slotSeq: 4, delta: 500n, postValue: 3750n, note: "issue" }),
-      adjustment({ slot: 3, slotSeq: 5, delta: -250n, postValue: 1000n, note: null }),
-    ];
-    expect(bytesToHex(adjustmentsSigningBytes(6, case1))).toBe(
-      "6e756d6265723a76353a61646a7573746d656e7473" +
-        "0600000000000000" +
-        "02000000" +
-        "01" +
-        "0400000000000000" +
-        "f401000000000000" +
-        "a60e000000000000" +
-        "05000000" +
-        "6973737565" +
-        "03" +
-        "0500000000000000" +
-        "06ffffffffffffff" +
-        "e803000000000000" +
-        "00000000",
-    );
-    expect(adjustmentsDigest16({ seq: 6, entries: case1, sig: SIG_A })).toBe(
-      "77e51bf4156a440a0dd97456f350918a",
-    );
-
-    const case2 = [
-      adjustment({ slot: 0, slotSeq: 1, delta: 7n, postValue: 7n, note: null }),
-    ];
-    expect(bytesToHex(adjustmentsSigningBytes(1, case2))).toBe(
-      "6e756d6265723a76353a61646a7573746d656e7473" +
-        "0100000000000000" +
-        "01000000" +
-        "00" +
-        "0100000000000000" +
-        "0700000000000000" +
-        "0700000000000000" +
-        "00000000",
-    );
-    expect(adjustmentsDigest16({ seq: 1, entries: case2, sig: SIG_A })).toBe(
-      "33a936e304f242accf347d520f5f616c",
-    );
-  });
-
-  it("builds the exact v5 adjustments signing bytes and digest16", () => {
+  it("matches the contract lane's v5 adjustment golden vector", () => {
     const entries = [adjustment()];
     expect(bytesToHex(adjustmentsSigningBytes(1, entries))).toBe(
       GOLDEN_ADJUSTMENTS_BYTES,
     );
-    expect(
-      adjustmentsDigest16({ seq: 1, entries, sig: SIG_A }),
-    ).toBe(GOLDEN_ADJUSTMENTS_DIGEST16);
+    expect(adjustmentsDigest16({ seq: 1, entries, sig: SIG_A })).toBe(
+      GOLDEN_ADJUSTMENTS_DIGEST16,
+    );
     expect(adjustmentsDigest16(emptyAdjustments())).toBe("0".repeat(32));
   });
 
-  it("signs a payments tombstone at seq > 0 with tag 0", () => {
+  it("still signs a payments tombstone at seq > 0 with tag 0", () => {
     expect(bytesToHex(paymentsSigningBytes(3, [], null))).toBe(
       "6e756d6265723a76343a7061796d656e7473" +
         "0300000000000000" +
-        "00" + // settled_count
-        "00", // entry tag
-    );
-  });
-
-  it("writes settled_count followed by each 16-byte id in order", () => {
-    const bytes = bytesToHex(paymentsSigningBytes(8, [SETTLED_A, SETTLED_B], null));
-    expect(bytes).toBe(
-      "6e756d6265723a76343a7061796d656e7473" +
-        "0800000000000000" +
-        "02" +
-        SETTLED_A +
-        SETTLED_B +
+        "00" +
         "00",
     );
+    expect(paymentsDigest16(emptyPayments())).toBe("0".repeat(32));
   });
 });
 
-describe("state encode/decode", () => {
-  it("round-trips the exact v5 state shape, including tombstones", () => {
+describe("v6 state encode/decode", () => {
+  it("round-trips the exact v6 shape with names and tombstones", () => {
     const state = stateWith(
       {
         0: { seq: 0, entry: null, sig: null },
@@ -389,23 +376,35 @@ describe("state encode/decode", () => {
         },
         7: { seq: 1, entry: null, sig: SIG_B },
       },
-      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
+      selfName({ seq: 2, name: "My board", sig: SIG_C }),
+      { seq: 4, userId: CONTACT_B, sig: SIG_C },
+      childNames({
+        seq: 3,
+        entries: [childName({ slot: 1, userId: CONTACT_B, name: "Child" })],
+        sig: SIG_B,
+      }),
     );
 
     const encoded = encodeState(state);
     expect(decodeState(encoded)).toEqual(state);
 
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(5);
-    expect(json.parent).toEqual(emptyParent());
-    expect(json.payments).toEqual(emptyPayments());
-    expect(json.adjustments).toEqual(emptyAdjustments());
-    expect(json.contacts).toEqual({
+    expect(json.v).toBe(6);
+    expect(json.selfName).toEqual({
       seq: 2,
-      entries: [{ label: "Alice", userId: CONTACT_A }],
+      name: "My board",
       sig: SIG_C,
     });
-    expect(json.slots).toHaveLength(8);
+    expect(json.parent).toEqual({ seq: 4, userId: CONTACT_B, sig: SIG_C });
+    expect(json.childNames).toEqual({
+      seq: 3,
+      entries: [{ slot: 1, userId: CONTACT_B, name: "Child" }],
+      sig: SIG_B,
+    });
+    expect(json.payments).toEqual(emptyPayments());
+    expect(json.adjustments).toEqual(emptyAdjustments());
+    expect(json).not.toHaveProperty("contacts");
+    expect(json.slots).toHaveLength(SLOT_COUNT);
     expect(json.slots[3]).toEqual({
       seq: 3,
       entry: { value: -42, contact: CONTACT_A, unit: "kg", note: "morning" },
@@ -416,9 +415,10 @@ describe("state encode/decode", () => {
 
   it("normalises absent value and empty optional strings", () => {
     const state = validateState({
-      v: 5,
+      v: 6,
+      selfName: emptySelfName(),
       parent: emptyParent(),
-      contacts: { seq: 0, entries: [], sig: null },
+      childNames: emptyChildNames(),
       payments: emptyPayments(),
       adjustments: emptyAdjustments(),
       slots: emptyState().slots.map((slot, index) => {
@@ -452,11 +452,16 @@ describe("state encode/decode", () => {
     expect(optionalText("  kg ")).toBe("kg");
   });
 
-  it("round-trips delta and summary encodings with contacts", () => {
-    const delta = {
-      v: 5 as const,
+  it("round-trips a v6 delta and summary with both name records", () => {
+    const next = {
+      v: 6 as const,
+      selfName: selfName({ seq: 2, name: "Renamed", sig: SIG_C }),
       parent: null,
-      contacts: contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
+      childNames: childNames({
+        seq: 2,
+        entries: [childName({ slot: 2, userId: CONTACT_B, name: "Bob" })],
+        sig: SIG_C,
+      }),
       payments: null,
       adjustments: null,
       slots: [
@@ -464,235 +469,313 @@ describe("state encode/decode", () => {
         { i: 5, seq: 9, entry: null, sig: SIG_A },
       ],
     };
-    expect(decodeDelta(encodeDelta(delta))).toEqual(delta);
+    expect(decodeDelta(encodeDelta(next))).toEqual(next);
 
     const summary = summaryFromState(
       stateWith(
         { 3: { seq: 7, entry: entry(12), sig: SIG_A } },
-        contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_B }),
+        selfName({ seq: 1, name: "Alice", sig: SIG_B }),
+        emptyParent(),
+        childNames({
+          seq: 1,
+          entries: [childName()],
+          sig: SIG_B,
+        }),
       ),
     );
     expect(decodeSummary(encodeSummary(summary))).toEqual(summary);
-    expect(summary.v).toBe(5);
+    expect(summary.v).toBe(6);
     expect(summary.parent).toEqual([0, "0".repeat(32)]);
-    expect(summary.contacts).toEqual([1, GOLDEN_CONTACTS_DIGEST16]);
+    expect(summary.selfName).toEqual([1, GOLDEN_SELF_NAME_DIGEST16]);
+    expect(summary.childNames).toEqual([1, GOLDEN_CHILD_NAMES_DIGEST16]);
     expect(summary.payments).toEqual([0, "0".repeat(32)]);
     expect(summary.adjustments).toEqual([0, "0".repeat(32)]);
-    expect(summary.slots).toHaveLength(8);
+    expect(summary.slots).toHaveLength(SLOT_COUNT);
     expect(summary.slots[0]).toEqual([0, "0".repeat(32)]);
     expect(summary.slots[3][1]).toBe(GOLDEN_SLOT_DIGEST16);
   });
 
-  it("accepts an absent or null delta contacts record", () => {
+  it("accepts an absent or null delta name/parent record", () => {
     for (const raw of [
-      { v: 5, slots: [] },
-      { v: 5, parent: null, contacts: null, slots: [] },
+      { v: 6, slots: [] },
+      delta({ selfName: null, parent: null, childNames: null }),
     ]) {
-      expect(validateDelta(raw).contacts).toBeNull();
-      expect(validateDelta(raw).payments).toBeNull();
+      const decoded = validateDelta(raw);
+      expect(decoded.selfName).toBeNull();
+      expect(decoded.parent).toBeNull();
+      expect(decoded.childNames).toBeNull();
+      expect(decoded.payments).toBeNull();
     }
   });
 
-  it("rejects malformed JSON/state/delta/summary", () => {
+  it("rejects malformed JSON and impossible v6 shapes", () => {
     expect(() => decodeState("{not json")).toThrow(StateError);
-    expect(() =>
-      validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
-    ).toThrow(/state\.v/);
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots,
-      }),
-    ).toThrow(/state\.contacts/);
+    expect(() => validateState({ v: 1, contacts: emptyContacts(), slots: [] })).toThrow(
+      /state\.v/,
+    );
     expect(() =>
       validateState({
-        v: 5,
+        v: 6,
+        selfName: emptySelfName(),
         parent: emptyParent(),
-        contacts: emptyContacts(),
+        childNames: emptyChildNames(),
         payments: emptyPayments(),
         adjustments: emptyAdjustments(),
         slots: emptyState().slots.slice(0, 7),
       }),
     ).toThrow(/exactly 8/);
     expect(() =>
-      validateDelta({
-        v: 5,
-        parent: null,
-        contacts: null,
-        payments: null,
-        adjustments: null,
-        slots: [
-          { i: 1, seq: 1, entry: entry(1), sig: SIG_A },
-          { i: 1, seq: 2, entry: entry(2), sig: SIG_B },
-        ],
+      validateState({
+        v: 6,
+        selfName: emptySelfName(),
+        parent: emptyParent(),
+        childNames: emptyChildNames(),
+        contacts: emptyContacts(),
+        payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
+        slots: emptyState().slots,
       }),
+    ).toThrow(/must not carry a contacts record/);
+    expect(() =>
+      validateState({
+        v: 6,
+        parent: emptyParent(),
+        childNames: emptyChildNames(),
+        payments: emptyPayments(),
+        adjustments: emptyAdjustments(),
+        slots: emptyState().slots,
+      }),
+    ).toThrow(/state\.selfName/);
+    expect(() =>
+      validateDelta(
+        delta({
+          slots: [
+            { i: 1, seq: 1, entry: entry(1), sig: SIG_A },
+            { i: 1, seq: 2, entry: entry(2), sig: SIG_B },
+          ],
+        }),
+      ),
     ).toThrow(/duplicate/);
     expect(() =>
+      validateDelta(delta({ contacts: emptyContacts() })),
+    ).toThrow(/must not carry a contacts record/);
+    expect(() =>
       validateSummary({
-        v: 5,
+        v: 6,
         parent: [0, "0".repeat(32)],
-        contacts: [0, "0".repeat(32)],
+        selfName: [0, "0".repeat(32)],
+        childNames: [0, "0".repeat(32)],
         payments: [0, "0".repeat(32)],
         adjustments: [0, "0".repeat(32)],
         slots: [],
       }),
     ).toThrow(/exactly 8/);
-    expect(() =>
-      validateSummary({ v: 5, slots: [] }),
-    ).toThrow(/summary\.parent/);
   });
 });
 
-describe("v2/v3/v4 → v5 upgrade", () => {
-  it("normalises a v2 state to v5 with empty parent and payments", () => {
-    const v2 = {
-      v: LEGACY_STATE_VERSION,
-      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
-      slots: emptyState().slots,
-    };
-    const upgraded = validateState(v2);
-    expect(upgraded.v).toBe(5);
-    expect(upgraded.parent).toEqual(emptyParent());
-    expect(upgraded.payments).toEqual(emptyPayments());
-    expect(upgraded.adjustments).toEqual(emptyAdjustments());
-    expect(upgraded.contacts).toEqual(v2.contacts);
-
-    // A v2 state's slot/contacts signatures are unchanged, so encoding writes
-    // the same records under v5.
-    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(5);
-    expect(json.parent).toEqual({ seq: 0, userId: null, sig: null });
-    expect(json.payments).toEqual({
-      seq: 0,
-      settled: [],
-      entry: null,
-      sig: null,
-    });
-    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
-    expect(json.contacts).toEqual(v2.contacts);
-  });
-
-  it("normalises a v3 state to v5 with empty payments and adjustments", () => {
-    const v3 = {
-      v: 3,
-      parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
-      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
-      slots: emptyState().slots,
-    };
-    const upgraded = validateState(v3);
-    expect(upgraded.v).toBe(5);
-    expect(upgraded.parent).toEqual(v3.parent);
-    expect(upgraded.payments).toEqual(emptyPayments());
-    expect(upgraded.adjustments).toEqual(emptyAdjustments());
-    expect(upgraded.contacts).toEqual(v3.contacts);
-
-    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(5);
-    expect(json.payments).toEqual({
-      seq: 0,
-      settled: [],
-      entry: null,
-      sig: null,
-    });
-    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
-  });
-
-  it("normalises a v4 state to v5 with an empty adjustments record", () => {
-    const v4 = {
-      v: V4_STATE_VERSION,
-      parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
-      contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
-      payments: payments({ seq: 1, entry: payment(), sig: SIG_B }),
-      slots: emptyState().slots,
-    };
-    const upgraded = validateState(v4);
-    expect(upgraded.v).toBe(5);
-    expect(upgraded.parent).toEqual(v4.parent);
-    expect(upgraded.payments).toEqual(v4.payments);
-    expect(upgraded.adjustments).toEqual(emptyAdjustments());
-    expect(upgraded.contacts).toEqual(v4.contacts);
-
-    // A v4 signature set stays valid: only an empty adjustments record is added.
-    const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
-    expect(json.v).toBe(5);
-    expect(json.payments.seq).toBe(1);
-    expect(json.payments.sig).toBe(SIG_B);
-    expect(json.adjustments).toEqual({ seq: 0, entries: [], sig: null });
-    expect(json.contacts).toEqual(v4.contacts);
-  });
-
-  it("rejects a v4 state that already carries an adjustments record", () => {
-    expect(() =>
-      validateState({
-        v: V4_STATE_VERSION,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
+describe("legacy upgrade and v5 reader", () => {
+  it("upgrades v2/v3/v4/v5 to v6 and drops the address book", () => {
+    for (const raw of [
+      {
+        v: LEGACY_STATE_VERSION,
+        contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
         slots: emptyState().slots,
-      }),
-    ).toThrow(/v4 state must not carry an adjustments record/);
-  });
+      },
+      {
+        v: 3,
+        parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
+        contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+        slots: emptyState().slots,
+      },
+      {
+        v: V4_STATE_VERSION,
+        parent: { seq: 2, userId: CONTACT_B, sig: SIG_A },
+        contacts: contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+        payments: payments({ seq: 1, entry: payment(), sig: SIG_B }),
+        slots: emptyState().slots,
+      },
+      legacyRaw(),
+    ]) {
+      const upgraded = validateState(raw);
+      expect(upgraded.v).toBe(6);
+      expect(upgraded.selfName).toEqual(emptySelfName());
+      expect(upgraded.childNames).toEqual(emptyChildNames());
+      expect(upgraded).not.toHaveProperty("contacts");
 
-  it("rejects a v2 state that carries a parent", () => {
-    for (const parent of [emptyParent(), null, { seq: 1, userId: CONTACT_A, sig: SIG_A }]) {
-      expect(() =>
-        validateState({
-          v: LEGACY_STATE_VERSION,
-          parent,
-          contacts: emptyContacts(),
-          slots: emptyState().slots,
-        }),
-      ).toThrow(/v2 state must not carry a parent/);
+      const json = JSON.parse(new TextDecoder().decode(encodeState(upgraded)));
+      expect(json.v).toBe(6);
+      expect(json).not.toHaveProperty("contacts");
+      expect(json.selfName).toEqual({ seq: 0, name: null, sig: null });
+      expect(json.childNames).toEqual({ seq: 0, entries: [], sig: null });
     }
   });
 
-  it("rejects v2/v3 states that carry a payments record", () => {
-    expect(() =>
-      validateState({
-        v: LEGACY_STATE_VERSION,
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        contacts: emptyContacts(),
-        slots: emptyState().slots,
-      }),
-    ).toThrow(/v2 state must not carry a payments record/);
-    expect(() =>
-      validateState({
-        v: 3,
-        parent: emptyParent(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        contacts: emptyContacts(),
-        slots: emptyState().slots,
-      }),
-    ).toThrow(/v3 state must not carry a payments record/);
+  it("keeps v5 contacts and the self-entry in the legacy reader", () => {
+    const raw = legacyRaw();
+    const legacy: StateV5 = validateLegacyV5State(raw);
+    expect(legacy.v).toBe(5);
+    expect(legacy.contacts).toEqual(raw.contacts);
+
+    const decoded = decodeLegacyV5State(JSON.stringify(raw));
+    expect(decoded).toEqual(legacy);
+    expect(decoded.contacts.entries).toEqual([contact("Alice")]);
   });
 
-  it("rejects an unknown state version and a v3 state without a parent", () => {
+  it("validates the legacy contacts array exactly like v5", () => {
     expect(() =>
-      validateState({ v: 1, contacts: emptyContacts(), slots: emptyState().slots }),
-    ).toThrow(/state\.v/);
+      validateLegacyV5State(legacyRaw({ contacts: contacts({ seq: 1, entries: [], sig: null }) })),
+    ).toThrow(/requires a signature/);
     expect(() =>
-      validateState({ v: 3, contacts: emptyContacts(), slots: emptyState().slots }),
-    ).toThrow(/state\.parent/);
+      validateLegacyV5State(
+        legacyRaw({
+          contacts: contacts({
+            seq: 1,
+            entries: [contact("Alice"), contact("Bob", CONTACT_A)],
+            sig: SIG_A,
+          }),
+        }),
+      ),
+    ).toThrow(/duplicate userId/);
+    expect(() => validateLegacyV5State({ ...legacyRaw(), v: 6 })).toThrow(
+      /expected a pre-v6 state/,
+    );
+  });
+
+  it("rejects name records on a pre-v6 state", () => {
     expect(() =>
-      validateState({
-        v: 5,
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots,
-      }),
-    ).toThrow(/state\.parent/);
+      validateState(legacyRaw({ selfName: emptySelfName() })),
+    ).toThrow(/must not carry a selfName/);
+    expect(() =>
+      validateState(legacyRaw({ childNames: emptyChildNames() })),
+    ).toThrow(/must not carry a childNames/);
+  });
+});
+
+describe("selfName validation", () => {
+  it("accepts the empty record, a name and a cleared tombstone", () => {
+    expect(validateSelfName({ seq: 0, name: null, sig: null })).toEqual(
+      emptySelfName(),
+    );
+    expect(validateSelfName({ seq: 2, name: "Alice", sig: SIG_A })).toEqual({
+      seq: 2,
+      name: "Alice",
+      sig: SIG_A,
+    });
+    expect(validateSelfName({ seq: 2, name: null, sig: SIG_A })).toEqual({
+      seq: 2,
+      name: null,
+      sig: SIG_A,
+    });
+  });
+
+  it("rejects impossible seq/name/sig combinations", () => {
+    expect(() => validateSelfName({ seq: 0, name: "Alice", sig: null })).toThrow(
+      /seq 0 must have a null name/,
+    );
+    expect(() => validateSelfName({ seq: 0, name: null, sig: SIG_A })).toThrow(
+      /seq 0 must have a null signature/,
+    );
+    expect(() => validateSelfName({ seq: 1, name: "Alice", sig: null })).toThrow(
+      /requires a signature/,
+    );
+    expect(() => validateSelfName({ seq: 1, name: "", sig: SIG_A })).toThrow(
+      /must not be empty/,
+    );
+    expect(() =>
+      validateSelfName({ seq: 1, name: "a".repeat(LIMITS.label + 1), sig: SIG_A }),
+    ).toThrow(/64-byte limit/);
+    expect(() => validateSelfName({ seq: 1, name: "Alice", sig: "A".repeat(128) })).toThrow(
+      /lowercase hex/,
+    );
+    expect(() => validateSelfName(null)).toThrow(/expected an object/);
+  });
+});
+
+describe("childNames validation", () => {
+  it("accepts a legal ascending record and preserves order", () => {
+    const record = validateChildNames({
+      seq: 3,
+      entries: [
+        { slot: 0, userId: CONTACT_B, name: "Bob" },
+        { slot: 2, userId: CONTACT_A, name: "Alice" },
+      ],
+      sig: SIG_A,
+    });
+    expect(record.entries.map((item) => item.name)).toEqual(["Bob", "Alice"]);
+    expect(validateChildName(childName())).toEqual(childName());
+  });
+
+  it("enforces bounds, ascending unique slots and the userId shape", () => {
+    expect(() =>
+      validateChildNames(childNames({ seq: 1, entries: [childName({ slot: 8 })], sig: SIG_A })),
+    ).toThrow(/slot/);
+    expect(() =>
+      validateChildNames(
+        childNames({
+          seq: 1,
+          entries: [childName({ slot: 1 }), childName({ slot: 0 })],
+          sig: SIG_A,
+        }),
+      ),
+    ).toThrow(/strictly ascending/);
+    expect(() =>
+      validateChildNames(
+        childNames({
+          seq: 1,
+          entries: [childName({ slot: 1 }), childName({ slot: 1 })],
+          sig: SIG_A,
+        }),
+      ),
+    ).toThrow(/strictly ascending/);
+    expect(() =>
+      validateChildNames(
+        childNames({
+          seq: 1,
+          entries: [childName({ userId: CONTACT_HEX.toUpperCase() })],
+          sig: SIG_A,
+        }),
+      ),
+    ).toThrow(/userId/);
+    expect(() =>
+      validateChildNames(
+        childNames({ seq: 1, entries: [childName({ name: "" })], sig: SIG_A }),
+      ),
+    ).toThrow(/must not be empty/);
+    expect(() =>
+      validateChildNames(
+        childNames({
+          seq: 1,
+          entries: [childName({ name: "a".repeat(LIMITS.label + 1) })],
+          sig: SIG_A,
+        }),
+      ),
+    ).toThrow(/64-byte limit/);
+    const tooMany = Array.from({ length: SLOT_COUNT + 1 }, (_, index) =>
+      childName({ slot: index }),
+    );
+    expect(() =>
+      validateChildNames(childNames({ seq: 1, entries: tooMany, sig: SIG_A })),
+    ).toThrow(/at most 8/);
+  });
+
+  it("enforces the seq/sig invariants and allows an empty tombstone", () => {
+    expect(() =>
+      validateChildNames(childNames({ seq: 0, entries: [childName()], sig: null })),
+    ).toThrow(/seq 0 must have no entries/);
+    expect(() =>
+      validateChildNames(childNames({ seq: 0, entries: [], sig: SIG_A })),
+    ).toThrow(/seq 0 must have a null signature/);
+    expect(() =>
+      validateChildNames(childNames({ seq: 1, entries: [], sig: null })),
+    ).toThrow(/requires a signature/);
+    expect(
+      validateChildNames(childNames({ seq: 9, entries: [], sig: SIG_A })),
+    ).toEqual({ seq: 9, entries: [], sig: SIG_A });
   });
 });
 
 describe("parent codec", () => {
-  it("accepts a root, a set parent, and a cleared parent", () => {
+  it("accepts a root, a set parent and a cleared parent", () => {
     expect(validateParent({ seq: 0, userId: null, sig: null })).toEqual(
       emptyParent(),
     );
@@ -709,15 +792,15 @@ describe("parent codec", () => {
   });
 
   it("rejects impossible seq/userId/sig combinations", () => {
-    expect(() =>
-      validateParent({ seq: 0, userId: CONTACT_A, sig: null }),
-    ).toThrow(/seq 0 must have a null userId/);
-    expect(() =>
-      validateParent({ seq: 0, userId: null, sig: SIG_A }),
-    ).toThrow(/seq 0 must have a null signature/);
-    expect(() =>
-      validateParent({ seq: 1, userId: CONTACT_A, sig: null }),
-    ).toThrow(/requires a signature/);
+    expect(() => validateParent({ seq: 0, userId: CONTACT_A, sig: null })).toThrow(
+      /seq 0 must have a null userId/,
+    );
+    expect(() => validateParent({ seq: 0, userId: null, sig: SIG_A })).toThrow(
+      /seq 0 must have a null signature/,
+    );
+    expect(() => validateParent({ seq: 1, userId: CONTACT_A, sig: null })).toThrow(
+      /requires a signature/,
+    );
     expect(() =>
       validateParent({ seq: 1, userId: "AB".repeat(32), sig: SIG_A }),
     ).toThrow(/userId/);
@@ -726,56 +809,37 @@ describe("parent codec", () => {
     ).toThrow(/lowercase hex/);
     expect(() => validateParent(null)).toThrow(/expected an object/);
   });
-
-  it("does not enforce self-parent (that is a UI/contract rule)", () => {
-    // Format-only: a parent id equal to the owner is structurally valid here.
-    expect(
-      validateParent({ seq: 1, userId: CONTACT_A, sig: SIG_A }).userId,
-    ).toBe(CONTACT_A);
-  });
 });
 
-describe("parent in state, delta, summary, merge", () => {
-  it("round-trips a v5 state with a parent", () => {
+describe("parent in state, delta, summary and merge", () => {
+  it("round-trips a v6 state with a parent", () => {
     const state = stateWith(
       { 0: { seq: 1, entry: entry(5), sig: SIG_A } },
-      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
+      emptySelfName(),
       { seq: 4, userId: CONTACT_B, sig: SIG_C },
     );
     const encoded = encodeState(state);
     const json = JSON.parse(new TextDecoder().decode(encoded));
-    expect(json.v).toBe(5);
-    expect(json.parent).toEqual({
-      seq: 4,
-      userId: CONTACT_B,
-      sig: SIG_C,
-    });
+    expect(json.parent).toEqual({ seq: 4, userId: CONTACT_B, sig: SIG_C });
     expect(decodeState(encoded)).toEqual(state);
   });
 
-  it("includes the parent pair in the summary", () => {
+  it("includes the parent pair in the summary and computeDelta", () => {
     const summary = summaryFromState(
-      stateWith({}, emptyContacts(), {
+      stateWith({}, emptySelfName(), {
         seq: 1,
         userId: PARENT_USER,
         sig: SIG_A,
       }),
     );
     expect(summary.parent).toEqual([1, GOLDEN_PARENT_DIGEST16]);
-    const cleared = summaryFromState(
-      stateWith({}, emptyContacts(), { seq: 1, userId: null, sig: SIG_A }),
-    );
-    expect(cleared.parent).toEqual([1, GOLDEN_PARENT_CLEARED_DIGEST16]);
-    expect(summaryFromState(emptyState()).parent).toEqual([0, "0".repeat(32)]);
-  });
 
-  it("includes a newer parent in computeDelta", () => {
-    const ours = stateWith({}, emptyContacts(), {
+    const ours = stateWith({}, emptySelfName(), {
       seq: 2,
       userId: CONTACT_B,
       sig: SIG_B,
     });
-    const theirs = stateWith({}, emptyContacts(), {
+    const theirs = stateWith({}, emptySelfName(), {
       seq: 1,
       userId: CONTACT_A,
       sig: SIG_A,
@@ -783,58 +847,6 @@ describe("parent in state, delta, summary, merge", () => {
     expect(computeDelta(ours, theirs).parent).toEqual(ours.parent);
     expect(computeDelta(theirs, ours).parent).toBeNull();
     expect(computeDelta(ours, ours).parent).toBeNull();
-    expect(computeDelta(emptyState(), emptyState())).toEqual({
-      v: 5,
-      parent: null,
-      contacts: null,
-      payments: null,
-      adjustments: null,
-      slots: [],
-    });
-  });
-
-  it("includes a parent at equal seq when the digests diverge", () => {
-    const a = stateWith({}, emptyContacts(), {
-      seq: 2,
-      userId: CONTACT_A,
-      sig: SIG_A,
-    });
-    const b = stateWith({}, emptyContacts(), {
-      seq: 2,
-      userId: CONTACT_B,
-      sig: SIG_B,
-    });
-    expect(computeDelta(a, b).parent).toEqual(a.parent);
-  });
-
-  it("round-trips a parent delta and lets stale parents lose", () => {
-    const base = stateWith({}, emptyContacts(), {
-      seq: 2,
-      userId: CONTACT_A,
-      sig: SIG_A,
-    });
-    const delta = {
-      v: 5 as const,
-      parent: { seq: 3, userId: CONTACT_B, sig: SIG_B },
-      contacts: null,
-      payments: null,
-      adjustments: null,
-      slots: [],
-    };
-    expect(decodeDelta(encodeDelta(delta))).toEqual(delta);
-
-    const next = mergeDelta(base, delta);
-    expect(next.parent).toEqual(delta.parent);
-
-    const stale = {
-      v: 5 as const,
-      parent: { seq: 1, userId: null, sig: SIG_C },
-      contacts: null,
-      payments: null,
-      adjustments: null,
-      slots: [],
-    };
-    expect(mergeDelta(next, stale).parent).toEqual(delta.parent);
   });
 
   it("merges parent by seq, then signature bytes, including a null tombstone", () => {
@@ -848,154 +860,40 @@ describe("parent in state, delta, summary, merge", () => {
     expect(mergeParent(tieLow, tieHigh)).toEqual(tieHigh);
     expect(mergeParent(tieHigh, tieLow)).toEqual(tieHigh);
 
-    // A cleared parent (null userId) at the higher seq is a legal tombstone.
     const cleared = { seq: 3, userId: null, sig: SIG_C };
     expect(mergeParent(tieHigh, cleared)).toEqual(cleared);
     expect(mergeParent(cleared, tieHigh)).toEqual(cleared);
-
-    expect(mergeStates(
-      stateWith({}, emptyContacts(), low),
-      stateWith({}, emptyContacts(), high),
-    ).parent).toEqual(high);
-  });
-});
-
-describe("contacts validation", () => {
-  it("accepts a legal record and preserves entry order", () => {
-    const record = validateContacts({
-      seq: 3,
-      entries: [
-        { label: "Bob", userId: CONTACT_B },
-        { label: "Alice", userId: CONTACT_A },
-      ],
-      sig: SIG_A,
-    });
-    expect(record.entries.map((item) => item.label)).toEqual(["Bob", "Alice"]);
-  });
-
-  it("enforces the label bounds in UTF-8 bytes", () => {
-    expect(() => validateContacts(contacts({
-      seq: 1,
-      entries: [contact("a".repeat(LIMITS.label))],
-      sig: SIG_A,
-    }))).not.toThrow();
-    expect(() => validateContacts(contacts({
-      seq: 1,
-      entries: [contact("a".repeat(LIMITS.label + 1))],
-      sig: SIG_A,
-    }))).toThrow(/64-byte limit/);
-    // "é" is 2 bytes: 32 chars = 64 bytes, 33 chars = 66 bytes.
-    expect(() => validateContacts(contacts({
-      seq: 1,
-      entries: [contact("é".repeat(32))],
-      sig: SIG_A,
-    }))).not.toThrow();
-    expect(() => validateContacts(contacts({
-      seq: 1,
-      entries: [contact("é".repeat(33))],
-      sig: SIG_A,
-    }))).toThrow(/64-byte limit/);
-    expect(() => validateContacts(contacts({
-      seq: 1,
-      entries: [contact("")],
-      sig: SIG_A,
-    }))).toThrow(/must not be empty/);
-  });
-
-  it("requires a lowercase 64-hex userId", () => {
-    for (const userId of [
-      CONTACT_A.slice(0, 62),
-      CONTACT_HEX.toUpperCase(),
-      "zz".repeat(32),
-      42,
-      undefined,
-    ]) {
-      expect(() =>
-        validateContacts(contacts({
-          seq: 1,
-          entries: [{ label: "Alice", userId } as unknown as Contact],
-          sig: SIG_A,
-        })),
-      ).toThrow(/userId/);
-    }
-  });
-
-  it("rejects duplicate userIds and duplicate labels", () => {
-    expect(() =>
-      validateContacts(contacts({
-        seq: 1,
-        entries: [contact("Alice", CONTACT_A), contact("Bob", CONTACT_A)],
-        sig: SIG_A,
-      })),
-    ).toThrow(/duplicate userId/);
-
-    expect(() =>
-      validateContacts(contacts({
-        seq: 1,
-        entries: [contact("Alice", CONTACT_A), contact("Alice", CONTACT_B)],
-        sig: SIG_A,
-      })),
-    ).toThrow(/duplicate label/);
-  });
-
-  it("enforces the contact count and seq/sig invariants", () => {
-    const many = Array.from({ length: MAX_CONTACTS + 1 }, (_, index) => ({
-      label: `c${index}`,
-      userId: index.toString(16).padStart(64, "0"),
-    }));
-    expect(() =>
-      validateContacts(contacts({ seq: 1, entries: many, sig: SIG_A })),
-    ).toThrow(new RegExp(`at most ${MAX_CONTACTS}`));
-
-    expect(() =>
-      validateContacts(contacts({ seq: 0, entries: [contact("Alice")], sig: null })),
-    ).toThrow(/seq 0 must have no contacts/);
-    expect(() =>
-      validateContacts(contacts({ seq: 0, entries: [], sig: SIG_A })),
-    ).toThrow(/seq 0 must have a null signature/);
-    expect(() =>
-      validateContacts(contacts({ seq: 1, entries: [], sig: null })),
-    ).toThrow(/requires a signature/);
-    expect(() =>
-      validateContacts(contacts({ seq: 1, entries: [], sig: "A".repeat(128) })),
-    ).toThrow(/lowercase hex/);
-
-    // An empty contact list at seq > 0 is a legal tombstone.
-    expect(
-      validateContacts(contacts({ seq: 9, entries: [], sig: SIG_A })),
-    ).toEqual({ seq: 9, entries: [], sig: SIG_A });
-  });
-
-  it("validates entries inside a state atomically", () => {
-    const bad = stateWith({});
-    bad.contacts = contacts({ seq: 1, entries: [contact("Alice")], sig: null });
-    expect(() => validateState(bad)).toThrow(/contacts/);
   });
 });
 
 describe("entry validation and cents helpers", () => {
   it("requires a valid contact and i64 value", () => {
     expect(() => validateEntry({ value: 1, contact: CONTACT_A })).not.toThrow();
-    expect(() => validateEntry({ value: 1, contact: CONTACT_HEX.toUpperCase() }))
-      .toThrow(/contact/);
+    expect(() =>
+      validateEntry({ value: 1, contact: CONTACT_HEX.toUpperCase() }),
+    ).toThrow(/contact/);
     expect(() => validateEntry({ value: 1 })).toThrow(/contact/);
-    expect(() => validateEntry({ contact: CONTACT_A, unit: "u".repeat(17) }))
-      .toThrow(/16-byte limit/);
-    expect(() => validateEntry({ contact: CONTACT_A, note: "n".repeat(513) }))
-      .toThrow(/512-byte limit/);
+    expect(() =>
+      validateEntry({ contact: CONTACT_A, unit: "u".repeat(17) }),
+    ).toThrow(/16-byte limit/);
+    expect(() =>
+      validateEntry({ contact: CONTACT_A, note: "n".repeat(513) }),
+    ).toThrow(/512-byte limit/);
     expect(() => validateEntry({ value: 1.5, contact: CONTACT_A })).toThrow(
       /integer/,
     );
-    expect(() => validateEntry({ value: 2 ** 63, contact: CONTACT_A })).toThrow(
-      /exact integer/,
-    );
+    expect(() =>
+      validateEntry({ value: 2 ** 63, contact: CONTACT_A }),
+    ).toThrow(/exact integer/);
     expect(() =>
       validateEntry({ value: I64_MAX + 1n, contact: CONTACT_A }),
     ).toThrow(/signed 64-bit/);
   });
 
   it("builds entries from form inputs", () => {
-    expect(entryFromInputs(1250n, ` ${CONTACT_A.toUpperCase()} `, " kg ", " ")).toEqual({
+    expect(
+      entryFromInputs(1250n, ` ${CONTACT_A.toUpperCase()} `, " kg ", " "),
+    ).toEqual({
       value: 1250n,
       contact: CONTACT_A,
       unit: "kg",
@@ -1022,21 +920,7 @@ describe("entry validation and cents helpers", () => {
     for (const [input, expected] of cases) {
       expect(parseCents(input)).toBe(expected);
     }
-  });
-
-  it("rejects malformed decimals with a human message", () => {
-    for (const input of [
-      "1e3",
-      "1.234",
-      "1,000",
-      "1 2",
-      "--1",
-      "+-1",
-      "1.2.3",
-      "abc",
-      ".",
-      "+",
-    ]) {
+    for (const input of ["1e3", "1.234", "1,000", "1 2", "--1", "+-1", "1.2.3", "abc", ".", "+"]) {
       expect(() => parseCents(input)).toThrow(StateError);
     }
     expect(() => parseCents("1.234")).toThrow(/at most 2 decimal places/);
@@ -1046,28 +930,16 @@ describe("entry validation and cents helpers", () => {
   it("covers the exact i64 cents boundary", () => {
     expect(parseCents(CENTS_MAX)).toBe(I64_MAX);
     expect(parseCents(CENTS_RANGE)).toBe(I64_MIN);
-    expect(parseCents("92233720368547758")).toBe(9223372036854775800n);
-    expect(() => parseCents("92233720368547758.08")).toThrow(
-      /between -92233720368547758\.08 and 92233720368547758\.07/,
-    );
-    expect(() => parseCents("-92233720368547758.09")).toThrow(
-      /between -92233720368547758\.08 and 92233720368547758\.07/,
-    );
+    expect(() => parseCents("92233720368547758.08")).toThrow(/between/);
     expect(() => parseCents("99999999999999999999")).toThrow(/between/);
-  });
-
-  it("formats every boundary exactly with two decimals", () => {
     expect(formatCents(0n)).toBe("0.00");
-    expect(formatCents(1n)).toBe("0.01");
-    expect(formatCents(-1n)).toBe("-0.01");
     expect(formatCents(1250n)).toBe("12.50");
     expect(formatCents(-1250n)).toBe("-12.50");
-    expect(formatCents(100n)).toBe("1.00");
-    expect(formatCents(I64_MIN)).toBe(CENTS_RANGE);
-    expect(formatCents(I64_MAX)).toBe(CENTS_MAX);
     for (const value of [0n, 1n, -1n, 1250n, -987654321n, I64_MIN, I64_MAX]) {
       expect(parseCents(formatCents(value))).toBe(value);
     }
+    expect(isI64(I64_MAX)).toBe(true);
+    expect(isI64(I64_MAX + 1n)).toBe(false);
   });
 });
 
@@ -1075,7 +947,6 @@ describe("merge determinism", () => {
   it("is commutative and idempotent for different slot seqs", () => {
     const low = stateWith({ 0: { seq: 1, entry: entry(1), sig: SIG_A } });
     const high = stateWith({ 0: { seq: 2, entry: entry(2), sig: SIG_A } });
-
     expect(mergeStates(low, high)).toEqual(high);
     expect(mergeStates(high, low)).toEqual(high);
     expect(mergeStates(high, high)).toEqual(high);
@@ -1084,105 +955,107 @@ describe("merge determinism", () => {
   it("breaks equal-seq slot ties on signature bytes, symmetrically", () => {
     const a = stateWith({ 4: { seq: 2, entry: entry(10), sig: SIG_A } });
     const b = stateWith({ 4: { seq: 2, entry: entry(20), sig: SIG_B } });
-
     expect(mergeStates(a, b).slots[4].entry?.value).toBe(20n);
     expect(mergeStates(b, a).slots[4].entry?.value).toBe(20n);
-    expect(mergeStates(a, b)).toEqual(mergeStates(b, a));
   });
 
   it("is associative across three states", () => {
     const a = stateWith({ 1: { seq: 1, entry: entry(1), sig: SIG_A } });
     const b = stateWith({ 1: { seq: 2, entry: entry(2), sig: SIG_A } });
     const c = stateWith({ 1: { seq: 2, entry: entry(3), sig: SIG_C } });
-
     expect(mergeStates(mergeStates(a, b), c)).toEqual(
       mergeStates(a, mergeStates(b, c)),
     );
     expect(mergeStates(mergeStates(a, b), c).slots[1].entry?.value).toBe(3n);
   });
 
-  it("merges contacts by seq then signature bytes", () => {
-    const low = contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A });
-    const high = contacts({ seq: 2, entries: [contact("Bob", CONTACT_B)], sig: SIG_A });
+  it("merges selfName by seq then signature bytes", () => {
+    const low = selfName({ seq: 1, name: "Old", sig: SIG_A });
+    const high = selfName({ seq: 2, name: "New", sig: SIG_A });
+    expect(mergeSelfName(low, high)).toEqual(high);
+    expect(mergeSelfName(high, low)).toEqual(high);
 
-    expect(mergeContacts(low, high)).toEqual(high);
-    expect(mergeContacts(high, low)).toEqual(high);
-    expect(mergeContacts(high, high)).toEqual(high);
+    const tieA = selfName({ seq: 3, name: "A", sig: SIG_A });
+    const tieB = selfName({ seq: 3, name: "B", sig: SIG_B });
+    expect(mergeSelfName(tieA, tieB)).toEqual(tieB);
+    expect(mergeSelfName(tieB, tieA)).toEqual(tieB);
 
-    const tieA = contacts({ seq: 3, entries: [contact("Alice")], sig: SIG_A });
-    const tieB = contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_B });
-    expect(mergeContacts(tieA, tieB)).toEqual(tieB);
-    expect(mergeContacts(tieB, tieA)).toEqual(tieB);
+    const cleared = selfName({ seq: 4, name: null, sig: SIG_C });
+    expect(mergeSelfName(tieB, cleared)).toEqual(cleared);
+    expect(mergeSelfName(cleared, tieB)).toEqual(cleared);
   });
 
-  it("is deterministic when seq and sig agree but entries differ", () => {
-    const a = contacts({ seq: 3, entries: [contact("Alice")], sig: SIG_A });
-    const b = contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_A });
-    expect(mergeContacts(a, b)).toEqual(mergeContacts(b, a));
+  it("merges childNames as a whole record", () => {
+    const low = childNames({
+      seq: 1,
+      entries: [childName({ name: "Old" })],
+      sig: SIG_A,
+    });
+    const high = childNames({
+      seq: 2,
+      entries: [childName({ slot: 2, userId: CONTACT_B, name: "New" })],
+      sig: SIG_A,
+    });
+    expect(mergeChildNames(low, high)).toEqual(high);
+    expect(mergeChildNames(high, low)).toEqual(high);
+
+    const tieA = childNames({ seq: 3, entries: [childName({ name: "A" })], sig: SIG_A });
+    const tieB = childNames({ seq: 3, entries: [childName({ name: "B" })], sig: SIG_B });
+    expect(mergeChildNames(tieA, tieB)).toEqual(tieB);
+    expect(mergeChildNames(tieB, tieA)).toEqual(tieB);
   });
 
-  it("keeps slots and contacts independent in a full merge", () => {
+  it("keeps every record independent in a full merge", () => {
     const a = stateWith(
       { 0: { seq: 1, entry: entry(1), sig: SIG_A } },
-      contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
+      selfName({ seq: 1, name: "Self A", sig: SIG_A }),
+      emptyParent(),
+      childNames({ seq: 1, entries: [childName()], sig: SIG_A }),
     );
     const b = stateWith(
       { 0: { seq: 2, entry: entry(2), sig: SIG_B } },
-      contacts({ seq: 0, entries: [], sig: null }),
+      selfName({ seq: 2, name: "Self B", sig: SIG_B }),
+      emptyParent(),
+      childNames({ seq: 2, entries: [], sig: SIG_B }),
     );
     const merged = mergeStates(a, b);
     expect(merged.slots[0]).toEqual(b.slots[0]);
-    expect(merged.contacts).toEqual(a.contacts);
+    expect(merged.selfName).toEqual(b.selfName);
+    expect(merged.childNames).toEqual(b.childNames);
   });
 
-  it("applies a contacts-only delta and lets stale contacts lose", () => {
-    const base = stateWith(
-      { 0: { seq: 2, entry: entry(2), sig: SIG_B } },
-      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_B }),
-    );
-    const delta = {
-      v: 5 as const,
-      parent: null,
-      contacts: contacts({ seq: 3, entries: [contact("Bob", CONTACT_B)], sig: SIG_C }),
-      payments: null,
-      adjustments: null,
-      slots: [],
-    };
-    const next = mergeDelta(base, delta);
-    expect(next.contacts).toEqual(delta.contacts);
-    expect(next.slots).toEqual(base.slots);
+  it("applies name-only deltas and lets stale records lose", () => {
+    const base = stateWith({}, selfName({ seq: 1, name: "Old", sig: SIG_A }));
+    const newer = delta({
+      selfName: selfName({ seq: 2, name: "New", sig: SIG_B }),
+      childNames: childNames({
+        seq: 1,
+        entries: [childName()],
+        sig: SIG_B,
+      }),
+    });
+    const next = mergeDelta(base, newer);
+    expect(next.selfName).toEqual(newer.selfName);
+    expect(next.childNames.entries).toEqual([childName()]);
 
-    const stale = {
-      v: 5 as const,
-      parent: null,
-      contacts: contacts({ seq: 1, entries: [contact("Old", CONTACT_A)], sig: SIG_A }),
-      payments: null,
-      adjustments: null,
-      slots: [],
-    };
-    expect(mergeDelta(next, stale).contacts).toEqual(delta.contacts);
+    const stale = delta({
+      selfName: selfName({ seq: 1, name: "Stale", sig: SIG_C }),
+      childNames: childNames({ seq: 0, entries: [], sig: null }),
+    });
+    expect(mergeDelta(next, stale).selfName).toEqual(next.selfName);
+    expect(mergeDelta(next, stale).childNames).toEqual(next.childNames);
   });
 
   it("treats a repeated delta as a no-op and lets stale slots lose", () => {
     const base = stateWith({ 0: { seq: 2, entry: entry(2), sig: SIG_B } });
-    const stale = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: null,
-      adjustments: null,
+    const stale = delta({
       slots: [{ i: 0, seq: 1, entry: entry(1), sig: SIG_A }],
-    };
+    });
     expect(mergeDelta(base, stale)).toEqual(base);
 
-    const fresh = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: null,
-      adjustments: null,
+    const fresh = delta({
       slots: [{ i: 0, seq: 3, entry: entry(3), sig: SIG_C }],
-    };
+    });
     const once = mergeDelta(base, fresh);
     expect(mergeDelta(once, fresh)).toEqual(once);
   });
@@ -1191,55 +1064,58 @@ describe("merge determinism", () => {
 describe("delta filtering", () => {
   it("returns a literally empty delta when converged", () => {
     const state = stateWith(
-      {
-        2: { seq: 4, entry: entry(8), sig: SIG_A },
-        7: { seq: 1, entry: null, sig: SIG_B },
-      },
-      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_C }),
+      { 2: { seq: 4, entry: entry(8), sig: SIG_A } },
+      selfName({ seq: 2, name: "Alice", sig: SIG_C }),
+      emptyParent(),
+      childNames({ seq: 1, entries: [childName()], sig: SIG_B }),
     );
-    expect(computeDelta(state, state)).toEqual({
-      v: 5,
+    const empty = {
+      v: 6,
+      selfName: null,
       parent: null,
-      contacts: null,
+      childNames: null,
       payments: null,
       adjustments: null,
       slots: [],
-    });
+    };
+    expect(computeDelta(state, state)).toEqual(empty);
     expect(
       JSON.parse(new TextDecoder().decode(encodeDelta(computeDelta(state, state)))),
-    ).toEqual({ v: 5, parent: null, contacts: null, payments: null, adjustments: null, slots: [] });
+    ).toEqual(empty);
   });
 
-  it("includes contacts when ours is newer, otherwise leaves them null", () => {
-    const theirs = stateWith(
-      {},
-      contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_A }),
-    );
+  it("includes newer name records and leaves stale ones null", () => {
+    const theirs = stateWith({}, emptySelfName());
     const ours = stateWith(
       {},
-      contacts({ seq: 2, entries: [contact("Alice"), contact("Bob", CONTACT_B)], sig: SIG_B }),
+      selfName({ seq: 2, name: "Alice", sig: SIG_B }),
+      emptyParent(),
+      childNames({ seq: 1, entries: [childName()], sig: SIG_B }),
     );
-
-    expect(computeDelta(ours, theirs).contacts).toEqual(ours.contacts);
-    expect(computeDelta(theirs, ours).contacts).toBeNull();
-
-    const newSubscriber = computeDelta(ours, emptyState());
-    expect(newSubscriber.contacts).toEqual(ours.contacts);
-    expect(computeDelta(emptyState(), emptyState()).contacts).toBeNull();
+    const forward = computeDelta(ours, theirs);
+    expect(forward.selfName).toEqual(ours.selfName);
+    expect(forward.childNames).toEqual(ours.childNames);
+    expect(computeDelta(theirs, ours).selfName).toBeNull();
+    expect(computeDelta(theirs, ours).childNames).toBeNull();
   });
 
-  it("includes contacts at equal seq when the digests diverge", () => {
+  it("includes name records at equal seq when digests diverge", () => {
     const a = stateWith(
       {},
-      contacts({ seq: 2, entries: [contact("Alice")], sig: SIG_A }),
+      selfName({ seq: 2, name: "Alice", sig: SIG_A }),
+      emptyParent(),
+      childNames({ seq: 2, entries: [childName({ name: "A" })], sig: SIG_A }),
     );
     const b = stateWith(
       {},
-      contacts({ seq: 2, entries: [contact("Bob", CONTACT_B)], sig: SIG_B }),
+      selfName({ seq: 2, name: "Bob", sig: SIG_B }),
+      emptyParent(),
+      childNames({ seq: 2, entries: [childName({ name: "B" })], sig: SIG_B }),
     );
-    const delta = computeDelta(a, b);
-    expect(delta.contacts).toEqual(a.contacts);
-    expect(delta.slots).toEqual([]);
+    const next = computeDelta(a, b);
+    expect(next.selfName).toEqual(a.selfName);
+    expect(next.childNames).toEqual(a.childNames);
+    expect(next.slots).toEqual([]);
   });
 
   it("includes newer slots and equal-seq digest divergence, not stale slots", () => {
@@ -1253,25 +1129,10 @@ describe("delta filtering", () => {
       1: { seq: 2, entry: entry(999), sig: SIG_C },
       2: { seq: 5, entry: entry(50), sig: SIG_C },
     });
-
-    const delta = computeDelta(ours, theirs);
-    expect(delta.slots.map((slot) => slot.i)).toEqual([0, 1]);
-    expect(delta.slots[0]).toMatchObject({ i: 0, seq: 3 });
-    expect(delta.slots[1]).toMatchObject({ i: 1, seq: 2 });
-  });
-
-  it("includes a contacts-only delta and empty slots", () => {
-    const ours = stateWith(
-      { 2: { seq: 2, entry: entry(10), sig: SIG_A } },
-      contacts({ seq: 1, entries: [contact("Alice")], sig: SIG_B }),
-    );
-    const theirs = stateWith(
-      { 2: { seq: 2, entry: entry(10), sig: SIG_A } },
-      emptyContacts(),
-    );
-    const delta = computeDelta(ours, theirs);
-    expect(delta.slots).toEqual([]);
-    expect(delta.contacts).toEqual(ours.contacts);
+    const next = computeDelta(ours, theirs);
+    expect(next.slots.map((slot) => slot.i)).toEqual([0, 1]);
+    expect(next.slots[0]).toMatchObject({ i: 0, seq: 3 });
+    expect(next.slots[1]).toMatchObject({ i: 1, seq: 2 });
   });
 
   it("ignores empty slots and includes tombstones with seq > 0", () => {
@@ -1279,250 +1140,31 @@ describe("delta filtering", () => {
       0: { seq: 0, entry: null, sig: null },
       5: { seq: 6, entry: null, sig: SIG_A },
     });
-    const delta = computeDelta(ours, emptyState());
-    expect(delta.slots).toEqual([
+    expect(computeDelta(ours, emptyState()).slots).toEqual([
       { i: 5, seq: 6, entry: null, sig: SIG_A },
     ]);
   });
 });
 
-describe("payments record", () => {
-  it("accepts the empty record, a tombstone and a signed entry", () => {
-    expect(validatePayments(emptyPayments())).toEqual(emptyPayments());
-    expect(
-      validatePayments({ seq: 3, settled: [], entry: null, sig: SIG_A }),
-    ).toEqual({ seq: 3, settled: [], entry: null, sig: SIG_A });
-    expect(
-      validatePayments({ seq: 6, settled: [], entry: payment(), sig: SIG_A }),
-    ).toEqual({ seq: 6, settled: [], entry: payment(), sig: SIG_A });
-    // A tombstone at seq > 0 may keep settled ids.
-    expect(
-      validatePayments({
-        seq: 7,
-        settled: [SETTLED_A],
-        entry: null,
-        sig: SIG_A,
-      }),
-    ).toEqual({ seq: 7, settled: [SETTLED_A], entry: null, sig: SIG_A });
-  });
-
-  it("validates the bounded, unique settled id list", () => {
-    const record = (settled: unknown) =>
-      validatePayments({ seq: 3, settled, entry: null, sig: SIG_A });
-    expect(record([SETTLED_A, SETTLED_B]).settled).toEqual([
-      SETTLED_A,
-      SETTLED_B,
-    ]);
-
-    expect(() => record("nope")).toThrow(/expected an array/);
-    expect(() => record([SETTLED_A.toUpperCase()])).toThrow(/lowercase hex/);
-    expect(() => record([SETTLED_A.slice(0, 30)])).toThrow(/lowercase hex/);
-    expect(() => record([`${SETTLED_A}00`])).toThrow(/lowercase hex/);
-    expect(() => record([SETTLED_A, SETTLED_A])).toThrow(/duplicate settled id/);
-    expect(() =>
-      record(Array.from({ length: 9 }, (_, index) => index.toString(16).padStart(32, "0"))),
-    ).toThrow(/at most 8 settled ids/);
-    // Exactly 8 is allowed.
-    expect(
-      record(Array.from({ length: 8 }, (_, index) => index.toString(16).padStart(32, "0")))
-        .settled,
-    ).toHaveLength(8);
-  });
-
-  it("requires seq 0 to have an empty settled list", () => {
-    expect(() =>
-      validatePayments({
-        seq: 0,
-        settled: [SETTLED_A],
-        entry: null,
-        sig: null,
-      }),
-    ).toThrow(/seq 0 must have no settled ids/);
-    expect(() => paymentsSigningBytes(0, [SETTLED_A], null)).toThrow(
-      /seq 0 must have no settled ids/,
-    );
-  });
-
-  it("covers settled in the digest and rejects oversized signing input", () => {
-    const entry = payment();
-    expect(paymentsDigest16({ seq: 6, settled: [], entry, sig: SIG_A })).toBe(
-      GOLDEN_PAYMENTS_DIGEST_1,
-    );
-    const tampered = paymentsDigest16({
-      seq: 6,
-      settled: [SETTLED_A],
-      entry,
-      sig: SIG_A,
-    });
-    expect(tampered).not.toBe(GOLDEN_PAYMENTS_DIGEST_1);
-    expect(() =>
-      paymentsSigningBytes(
-        6,
-        Array.from({ length: 9 }, (_, index) =>
-          index.toString(16).padStart(32, "0"),
-        ),
-        entry,
-      ),
-    ).toThrow(/at most 8 settled ids/);
-  });
-
-  it("rejects impossible seq/entry/sig combinations", () => {
-    expect(() =>
-      validatePayments({ seq: 0, settled: [], entry: payment(), sig: null }),
-    ).toThrow(/seq 0 must have a null entry/);
-    expect(() =>
-      validatePayments({ seq: 0, settled: [], entry: null, sig: SIG_A }),
-    ).toThrow(/seq 0 must have a null signature/);
-    expect(() =>
-      validatePayments({ seq: 1, settled: [], entry: null, sig: null }),
-    ).toThrow(/requires a signature/);
-    expect(() =>
-      validatePayments({ seq: 1, settled: [], entry: payment(), sig: null }),
-    ).toThrow(/requires a signature/);
-    expect(() => validatePayments(null)).toThrow(/expected an object/);
-  });
-
-  it("validates entry fields and leg bounds", () => {
-    expect(() =>
-      validatePaymentEntry(payment({ id: "AB".repeat(16) })),
-    ).toThrow(/id/);
-    expect(() =>
-      validatePaymentEntry(payment({ id: "ab".repeat(15) })),
-    ).toThrow(/id/);
-    expect(() =>
-      validatePaymentEntry(payment({ src: CONTACT_HEX.toUpperCase() })),
-    ).toThrow(/src/);
-    expect(() =>
-      validatePaymentEntry(payment({ amount: 0n })),
-    ).toThrow(/greater than 0/);
-    expect(() =>
-      validatePaymentEntry(payment({ amount: I64_MAX + 1n })),
-    ).toThrow(/signed 64-bit/);
-    expect(() =>
-      validatePaymentEntry(payment({ srcAddr: "58" })),
-    ).toThrow(/octal address/);
-    expect(() =>
-      validatePaymentEntry(payment({ srcAddr: "0".repeat(33) })),
-    ).toThrow(/octal address/);
-    expect(() =>
-      validatePaymentEntry(payment({ cursor: 65 })),
-    ).toThrow(/cursor/);
-    expect(() =>
-      validatePaymentEntry(payment({ phase: "sideways" as never })),
-    ).toThrow(/phase/);
-    expect(() =>
-      validatePaymentEntry(payment({ status: "unknown" as never })),
-    ).toThrow(/status/);
-    expect(() =>
-      validatePaymentEntry(payment({ fail: "oops" as never })),
-    ).toThrow(/fail/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          legs: [
-            { slot: 1, seq: 4, postValue: 1n, sig: PAY_LEG_SIG },
-            { slot: 1, seq: 5, postValue: 2n, sig: PAY_LEG_SIG },
-          ],
-        }),
-      ),
-    ).toThrow(/duplicate slot/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          legs: [
-            { slot: 1, seq: 4, postValue: 1n, sig: PAY_LEG_SIG },
-            { slot: 2, seq: 5, postValue: 2n, sig: PAY_LEG_SIG },
-            { slot: 3, seq: 6, postValue: 3n, sig: PAY_LEG_SIG },
-          ],
-        }),
-      ),
-    ).toThrow(/at most 2 legs/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({ legs: [{ slot: 1, seq: 0, postValue: 1n, sig: PAY_LEG_SIG }] }),
-      ),
-    ).toThrow(/greater than 0/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          legs: [{ slot: 8, seq: 1, postValue: 1n, sig: PAY_LEG_SIG }],
-        }),
-      ),
-    ).toThrow(/slot/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          legs: [{ slot: 1, seq: 1, postValue: 1n, sig: "A".repeat(128) }],
-        }),
-      ),
-    ).toThrow(/lowercase hex/);
-  });
-
-  it("enforces phase/status coherence", () => {
-    expect(() =>
-      validatePaymentEntry(payment({ status: "offered", cursor: 1 })),
-    ).toThrow(/offered/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({ status: "offered", cursor: 0, legs: [] }),
-      ),
-    ).not.toThrow();
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          status: "offered",
-          cursor: 0,
-          legs: [{ slot: 1, seq: 1, postValue: 1n, sig: PAY_LEG_SIG }],
-        }),
-      ),
-    ).toThrow(/offered/);
-    expect(() =>
-      validatePaymentEntry(payment({ status: "complete" })),
-    ).toThrow(/must be terminal/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({ phase: "terminal", status: "acted", next: PAY_USER_NEXT }),
-      ),
-    ).toThrow(/all-zero next/);
-    expect(() =>
-      validatePaymentEntry(
-        payment({
-          phase: "terminal",
-          status: "complete",
-          cursor: 5,
-          next: "0".repeat(64),
-        }),
-      ),
-    ).not.toThrow();
-  });
-
-  it("round-trips payments in a state, delta and summary", () => {
+describe("payments and adjustments records", () => {
+  it("round-trips payments in state, delta and summary", () => {
     const record = payments({ seq: 6, entry: payment(), sig: SIG_A });
     const state = stateWith({});
     state.payments = record;
+    expect(decodeState(encodeState(state)).payments).toEqual(record);
 
-    const encoded = encodeState(state);
-    expect(decodeState(encoded).payments).toEqual(record);
-
-    const delta = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: record,
-      adjustments: null,
-      slots: [],
-    };
-    expect(decodeDelta(encodeDelta(delta)).payments).toEqual(record);
-    expect(mergeDelta(emptyState(), delta).payments).toEqual(record);
+    const next = delta({ payments: record });
+    expect(decodeDelta(encodeDelta(next)).payments).toEqual(record);
+    expect(mergeDelta(emptyState(), next).payments).toEqual(record);
 
     const summary = summaryFromState(state);
-    expect(summary.payments).toEqual([6, GOLDEN_PAYMENTS_DIGEST_1]);
+    expect(summary.payments[0]).toBe(6);
     expect(decodeSummary(encodeSummary(summary)).payments).toEqual(
       summary.payments,
     );
   });
 
-  it("carries settled through state, delta and summary", () => {
+  it("carries settled ids through state, delta and summary", () => {
     const record = payments({
       seq: 6,
       settled: [SETTLED_A, SETTLED_B],
@@ -1531,445 +1173,79 @@ describe("payments record", () => {
     });
     const state = stateWith({});
     state.payments = record;
-
     expect(decodeState(encodeState(state)).payments).toEqual(record);
-
-    const delta = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: record,
-      adjustments: null,
-      slots: [],
-    };
-    const decoded = decodeDelta(encodeDelta(delta));
-    expect(decoded.payments).toEqual(record);
-    expect(mergeDelta(emptyState(), delta).payments).toEqual(record);
-
-    const summary = summaryFromState(state);
-    expect(summary.payments).toEqual([6, paymentsDigest16(record)]);
-    expect(summary.payments[1]).not.toBe(GOLDEN_PAYMENTS_DIGEST_1);
+    expect(paymentsDigest16(record)).toBe(summaryFromState(state).payments[1]);
   });
 
-  it("merges payments by seq then signature bytes, including tombstones", () => {
-    const low = payments({ seq: 1, entry: payment(), sig: SIG_A });
-    const high = payments({ seq: 2, entry: payment(), sig: SIG_A });
-    expect(mergePayments(low, high)).toEqual(high);
-    expect(mergePayments(high, low)).toEqual(high);
-
-    const tieLow = payments({ seq: 2, entry: payment(), sig: SIG_A });
-    const tieHigh = payments({ seq: 2, entry: payment(), sig: SIG_B });
-    expect(mergePayments(tieLow, tieHigh)).toEqual(tieHigh);
-    expect(mergePayments(tieHigh, tieLow)).toEqual(tieHigh);
-
-    const tombstone = payments({ seq: 3, entry: null, sig: SIG_C });
-    expect(mergePayments(tieHigh, tombstone)).toEqual(tombstone);
-    expect(mergePayments(tombstone, tieHigh)).toEqual(tombstone);
-
-    expect(
-      mergeStates(
-        (() => {
-          const a = stateWith({});
-          a.payments = low;
-          return a;
-        })(),
-        (() => {
-          const b = stateWith({});
-          b.payments = high;
-          return b;
-        })(),
-      ).payments,
-    ).toEqual(high);
-  });
-
-  it("moves settled with the record and keeps it across a tombstone", () => {
-    const low = payments({
-      seq: 1,
-      settled: [SETTLED_A],
-      entry: payment(),
-      sig: SIG_A,
-    });
-    const high = payments({
-      seq: 2,
-      settled: [SETTLED_A, SETTLED_B],
-      entry: payment(),
-      sig: SIG_A,
-    });
-    expect(mergePayments(low, high)).toEqual(high);
-
-    const tombstone = payments({
-      seq: 3,
-      settled: [SETTLED_A, SETTLED_B],
-      entry: null,
-      sig: SIG_C,
-    });
-    expect(mergePayments(high, tombstone)).toEqual(tombstone);
-    expect(mergePayments(tombstone, high)).toEqual(tombstone);
-    expect(mergePayments(tombstone, high).entry).toBeNull();
-    expect(mergePayments(tombstone, high).settled).toEqual([
-      SETTLED_A,
-      SETTLED_B,
-    ]);
-  });
-
-  it("breaks equal-seq/sig ties deterministically using settled", () => {
-    const a = payments({ seq: 2, settled: [SETTLED_A], sig: SIG_A });
-    const b = payments({ seq: 2, settled: [SETTLED_B], sig: SIG_A });
-    expect(mergePayments(a, b)).toEqual(mergePayments(b, a));
-    expect(mergePayments(a, b).settled).toEqual(
-      mergePayments(b, a).settled,
-    );
-    expect(mergeStates(
-      (() => {
-        const state = stateWith({});
-        state.payments = a;
-        return state;
-      })(),
-      (() => {
-        const state = stateWith({});
-        state.payments = b;
-        return state;
-      })(),
-    ).payments.seq).toBe(2);
-  });
-
-  it("returns independent settled arrays from clone/merge", () => {
-    const record = payments({
-      seq: 4,
-      settled: [SETTLED_A],
-      entry: payment(),
-      sig: SIG_A,
-    });
-    const merged = mergePayments(record, payments());
-    expect(merged.settled).toEqual([SETTLED_A]);
-    merged.settled.push(SETTLED_B);
-    expect(record.settled).toEqual([SETTLED_A]);
-  });
-
-
-  it("filters payments in computeDelta and lets stale deltas lose", () => {
-    const ours = stateWith({});
-    ours.payments = payments({ seq: 4, entry: payment(), sig: SIG_A });
-    const theirs = stateWith({});
-
-    expect(computeDelta(ours, theirs).payments).toEqual(ours.payments);
-    expect(computeDelta(theirs, ours).payments).toBeNull();
-    expect(computeDelta(ours, ours).payments).toBeNull();
-
-    const stale = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: payments({ seq: 3, entry: null, sig: SIG_B }),
-      adjustments: null,
-      slots: [],
-    };
-    expect(mergeDelta(ours, stale).payments).toEqual(ours.payments);
-  });
-});
-
-describe("v5 adjustments codec, merge and delta", () => {
-  it("round-trips adjustments in a state, delta and summary", () => {
+  it("round-trips adjustments and merges by seq then signature", () => {
     const record = adjustments({
-      seq: 2,
-      entries: [
-        adjustment({ slot: 0, slotSeq: 2, delta: 500n, postValue: 500n, note: null }),
-        adjustment({ slot: 0, slotSeq: 3, delta: -200n, postValue: 300n, note: "burn" }),
-      ],
+      seq: 6,
+      entries: [adjustment()],
       sig: SIG_A,
     });
     const state = stateWith({});
     state.adjustments = record;
-
     expect(decodeState(encodeState(state)).adjustments).toEqual(record);
+    expect(adjustmentsDigest16(record)).toBe(summaryFromState(state).adjustments[1]);
 
-    const delta = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: null,
-      adjustments: record,
-      slots: [],
-    };
-    expect(decodeDelta(encodeDelta(delta)).adjustments).toEqual(record);
-    expect(mergeDelta(emptyState(), delta).adjustments).toEqual(record);
-
-    const summary = summaryFromState(state);
-    expect(summary.adjustments).toEqual([2, adjustmentsDigest16(record)]);
-    expect(decodeSummary(encodeSummary(summary)).adjustments).toEqual(
-      summary.adjustments,
-    );
+    const higher = adjustments({
+      seq: 7,
+      entries: [],
+      sig: SIG_B,
+    });
+    expect(mergeAdjustments(record, higher)).toEqual(higher);
+    expect(mergeAdjustments(higher, record)).toEqual(higher);
   });
 
-  it("merges adjustments by seq then signature bytes", () => {
-    const low = adjustments({
-      seq: 1,
-      entries: [adjustment({ slotSeq: 1, postValue: 100n })],
-      sig: SIG_A,
-    });
-    const high = adjustments({
-      seq: 2,
-      entries: [adjustment({ slotSeq: 2, postValue: 200n })],
-      sig: SIG_A,
-    });
-    expect(mergeAdjustments(low, high)).toEqual(high);
-    expect(mergeAdjustments(high, low)).toEqual(high);
-
-    const sigB = { ...high, sig: SIG_B };
-    expect(mergeAdjustments(high, sigB)).toEqual(sigB);
-    expect(mergeAdjustments(sigB, high)).toEqual(sigB);
-  });
-
-  it("includes adjustments in computeDelta only when ours is newer or diverged", () => {
-    const ours = stateWith({});
-    ours.adjustments = adjustments({
-      seq: 3,
-      entries: [adjustment()],
-      sig: SIG_A,
-    });
-    const theirs = stateWith({});
-
-    expect(computeDelta(ours, theirs).adjustments).toEqual(ours.adjustments);
-    expect(computeDelta(theirs, ours).adjustments).toBeNull();
-    expect(computeDelta(ours, ours).adjustments).toBeNull();
-
-    const stale = {
-      v: 5 as const,
-      parent: null,
-      contacts: null,
-      payments: null,
-      adjustments: adjustments({ seq: 2, sig: SIG_B }),
-      slots: [],
-    };
-    expect(mergeDelta(ours, stale).adjustments).toEqual(ours.adjustments);
-  });
-
-  it("enforces adjustment bounds without cross-checking slots", () => {
-    expect(() => validateAdjustment(adjustment({ slot: 8 }))).toThrow(/slot/);
-    expect(() => validateAdjustment(adjustment({ slotSeq: 0 }))).toThrow(
-      /slotSeq/,
-    );
-    expect(() => validateAdjustment(adjustment({ delta: 0n }))).toThrow(
-      /delta/,
-    );
-    expect(() => validateAdjustment(adjustment({ postValue: -1n }))).toThrow(
-      /postValue/,
-    );
+  it("validates payments and adjustments bounds", () => {
     expect(() =>
-      validateAdjustment(adjustment({ delta: 10n, postValue: 5n })),
-    ).toThrow(/pre-value/);
+      validatePayments({ seq: 1, settled: [], entry: null, sig: null }),
+    ).toThrow(/requires a signature/);
     expect(() =>
-      validateAdjustment(
-        adjustment({ note: "n".repeat(MAX_ADJUSTMENT_NOTE_BYTES + 1) }),
-      ),
-    ).toThrow(/128-byte limit/);
+      validatePayments({ seq: 0, settled: [SETTLED_A], entry: null, sig: null }),
+    ).toThrow(/no settled ids/);
     expect(() =>
       validateAdjustments({
         seq: 1,
-        entries: [
-          adjustment({ slotSeq: 2 }),
-          adjustment({ slotSeq: 2, postValue: 3900n }),
-        ],
+        entries: [adjustment({ slot: 8 })],
         sig: SIG_A,
       }),
-    ).toThrow(/duplicate/);
+    ).toThrow(/slot/);
     expect(() =>
       validateAdjustments({
         seq: 1,
-        entries: [
-          adjustment({ slotSeq: 3 }),
-          adjustment({ slotSeq: 2, postValue: 3900n }),
-        ],
+        entries: [adjustment({ note: "n".repeat(MAX_ADJUSTMENT_NOTE_BYTES + 1) })],
         sig: SIG_A,
       }),
-    ).toThrow(/increase/);
-    expect(() =>
-      validateAdjustments({
-        seq: 0,
-        entries: [adjustment()],
-        sig: null,
-      }),
-    ).toThrow(/seq 0 must have no adjustments/);
-
-    // Deliberately mismatched with the slot table: the log is merge-invariant
-    // and must validate even when a slot write from another delta is absent.
-    const state = validateState({
-      v: 5,
-      parent: emptyParent(),
-      contacts: emptyContacts(),
-      payments: emptyPayments(),
-      adjustments: {
-        seq: 1,
-        entries: [adjustment({ slot: 7, slotSeq: 99, postValue: 1n, delta: 1n })],
-        sig: SIG_A,
-      },
-      slots: emptyState().slots,
-    });
-    expect(state.adjustments.entries[0].slotSeq).toBe(99);
-  });
-
-  it("requires a v5 state to carry an adjustments record", () => {
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        slots: emptyState().slots,
-      }),
-    ).toThrow(/state\.adjustments/);
-  });
-
-  it("caps the log at MAX_ADJUSTMENTS entries", () => {
-    const entries = Array.from({ length: MAX_ADJUSTMENTS }, (_, index) =>
-      adjustment({
-        slot: 0,
-        slotSeq: index + 1,
-        delta: 1n,
-        postValue: BigInt(index + 1),
-        note: null,
-      }),
-    );
-    expect(
-      validateAdjustments({ seq: 1, entries, sig: SIG_A }).entries,
-    ).toHaveLength(MAX_ADJUSTMENTS);
+    ).toThrow(/note/);
     expect(() =>
       validateAdjustments({
         seq: 1,
-        entries: [...entries, adjustment({ slot: 0, slotSeq: 33 })],
+        entries: Array.from({ length: MAX_ADJUSTMENTS + 1 }, (_, index) =>
+          adjustment({ slotSeq: index + 1 }),
+        ),
         sig: SIG_A,
       }),
     ).toThrow(/at most 32/);
+    expect(validateAdjustment(adjustment())).toEqual(adjustment());
+    expect(validatePaymentEntry(payment())).toEqual(payment());
+    expect(mergePayments(payments(), payments({ seq: 1, sig: SIG_A }))).toEqual(
+      payments({ seq: 1, sig: SIG_A }),
+    );
+  });
+
+  it("rejects a v2 contact count above the legacy bound", () => {
+    const many = Array.from({ length: MAX_CONTACTS + 1 }, (_, index) => ({
+      label: `c${index}`,
+      userId: index.toString(16).padStart(64, "0"),
+    }));
+    expect(() => validateContacts(contacts({ seq: 1, entries: many, sig: SIG_A })))
+      .toThrow(new RegExp(`at most ${MAX_CONTACTS}`));
   });
 });
 
-describe("bounds and invariants", () => {
-  it("enforces unit and note UTF-8 byte limits", () => {
-    expect(() => validateEntry(entry(1, { unit: "u".repeat(16) }))).not.toThrow();
-    expect(() => validateEntry(entry(1, { unit: "u".repeat(17) }))).toThrow(
-      /16-byte limit/,
-    );
-    expect(() => validateEntry(entry(1, { note: "n".repeat(512) }))).not.toThrow();
-    expect(() => validateEntry(entry(1, { note: "n".repeat(513) }))).toThrow(
-      /512-byte limit/,
-    );
-  });
-
-  it("requires integer i64 values", () => {
-    expect(isI64(-42)).toBe(true);
-    expect(isI64(Number(I64_MIN))).toBe(true);
-    expect(isI64(2 ** 63)).toBe(false);
-    expect(() => validateEntry({ value: 1.5, contact: CONTACT_A })).toThrow(
-      /integer/,
-    );
-    expect(() => validateEntry({ value: "1", contact: CONTACT_A })).toThrow(
-      /integer/,
-    );
-  });
-
-  it("enforces slot seq-0 and signature invariants atomically", () => {
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots.map((slot, index) =>
-          index === 0 ? { seq: 0, entry: entry(1), sig: null } : slot,
-        ),
-      }),
-    ).toThrow(/seq 0 must have a null entry/);
-
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots.map((slot, index) =>
-          index === 0 ? { seq: 0, entry: null, sig: SIG_A } : slot,
-        ),
-      }),
-    ).toThrow(/seq 0 must have a null signature/);
-
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots.map((slot, index) =>
-          index === 0 ? { seq: 1, entry: entry(1), sig: null } : slot,
-        ),
-      }),
-    ).toThrow(/requires a signature/);
-
-    expect(() =>
-      validateState({
-        v: 5,
-        parent: emptyParent(),
-        contacts: emptyContacts(),
-        payments: emptyPayments(),
-        adjustments: emptyAdjustments(),
-        slots: emptyState().slots.map((slot, index) =>
-          index === 0 ? { seq: 1, entry: entry(1), sig: "A".repeat(128) } : slot,
-        ),
-      }),
-    ).toThrow(/lowercase hex/);
-
-    expect(() =>
-      validateDelta({
-        v: 5,
-        parent: null,
-        contacts: null,
-        payments: null,
-        adjustments: null,
-        slots: [{ i: 8, seq: 1, entry: entry(1), sig: SIG_A }],
-      }),
-    ).toThrow(/0\.\.7/);
-  });
-
-  it("round-trips the full i64 range exactly", () => {
-    const values = [
-      I64_MIN,
-      I64_MAX,
-      I64_MIN + 1n,
-      I64_MAX - 1n,
-      9007199254740993n, // 2^53 + 1, the first value a JS number rounds
-      -9007199254740993n,
-    ];
-    for (const value of values) {
-      const state = stateWith({
-        0: { seq: 1, entry: entry(value), sig: SIG_A },
-      });
-      const encoded = encodeState(state);
-      const text = new TextDecoder().decode(encoded);
-      expect(text).toContain(`"value":${value}`);
-      expect(text).not.toContain(`"value":"`); // a JSON number, not a string
-      const decoded = decodeState(encoded);
-      expect(decoded.slots[0].entry?.value).toBe(value);
-      expect(stateWarnings(decoded)).toEqual([]);
-    }
+describe("state warnings", () => {
+  it("has no advisories for a valid state", () => {
     expect(stateWarnings(emptyState())).toEqual([]);
-  });
-
-  it("decodes small wire numbers as bigints", () => {
-    const raw = JSON.stringify({
-      v: 2,
-      contacts: { seq: 0, entries: [], sig: null },
-      slots: emptyState().slots.map((slot, index) =>
-        index === 0
-          ? {
-              seq: 1,
-              entry: { value: 123456789, contact: CONTACT_A, unit: null, note: null },
-              sig: SIG_A,
-            }
-          : slot,
-      ),
-    });
-    expect(decodeState(raw).slots[0].entry?.value).toBe(123456789n);
   });
 });

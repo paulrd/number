@@ -21,18 +21,18 @@ import {
   optionalText,
   validateAdjustment,
   validateAdjustmentList,
-  validateContactList,
+  validateChildNameList,
   validateEntry,
   validatePaymentEntry,
   type Adjustment,
-  type Contact,
+  type ChildName,
   type Delta,
   type DeltaSlot,
   type Entry,
   type StateV3,
 } from "./state";
-import { paymentId, type PaymentEntry } from "./payments";
-import { bytesToHex, delay, isLowerHex } from "./util";
+import { isOctalAddress, paymentId, type PaymentEntry } from "./payments";
+import { bytesToHex, delay, isLowerHex, utf8Length } from "./util";
 import {
   nextSettled,
   type BoardBackend,
@@ -40,7 +40,7 @@ import {
   type BoardSnapshot,
   type PaymentSlotWrite,
 } from "./board";
-import type { DelegateIdentity } from "./delegate";
+import type { ContactRecord, DelegateIdentity } from "./delegate";
 
 const encoder = new TextEncoder();
 
@@ -68,18 +68,86 @@ function mockSignature(slotIndex: number, seq: number, entry: Entry | null): str
   return bytesToHex(bytes);
 }
 
-function mockContactsSignature(seq: number, entries: Contact[]): string {
+function mockSelfNameSignature(seq: number, name: string | null): string {
+  const body = JSON.stringify({ seq, name });
+  const bytes = new Uint8Array(64);
+  bytes.set(digest(`number:offline:selfname:0:${body}`), 0);
+  bytes.set(digest(`number:offline:selfname:1:${body}`), 32);
+  return bytesToHex(bytes);
+}
+
+function mockChildNamesSignature(seq: number, entries: ChildName[]): string {
   const body = JSON.stringify({
     seq,
     entries: entries.map((entry) => ({
-      label: entry.label,
+      slot: entry.slot,
       userId: entry.userId,
+      name: entry.name,
     })),
   });
   const bytes = new Uint8Array(64);
-  bytes.set(digest(`number:offline:contacts:0:${body}`), 0);
-  bytes.set(digest(`number:offline:contacts:1:${body}`), 32);
+  bytes.set(digest(`number:offline:childnames:0:${body}`), 0);
+  bytes.set(digest(`number:offline:childnames:1:${body}`), 32);
   return bytesToHex(bytes);
+}
+
+const MAX_CONTACT_LABEL_BYTES = 64;
+const MAX_CONTACTS = 64;
+
+/** Validate one private address-book entry, mirroring the delegate bounds. */
+function validateContactRecord(
+  raw: unknown,
+  path = "contact",
+): ContactRecord {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${path} must be an object.`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const label = obj.label;
+  if (typeof label !== "string" || label.length === 0) {
+    throw new Error(`${path}.label must be a non-empty string.`);
+  }
+  if (utf8Length(label) > MAX_CONTACT_LABEL_BYTES) {
+    throw new Error(
+      `${path}.label is ${utf8Length(label)} bytes; maximum is ${MAX_CONTACT_LABEL_BYTES}.`,
+    );
+  }
+  if (typeof obj.userId !== "string" || !isLowerHex(obj.userId, 64)) {
+    throw new Error(`${path}.userId must be 64 lowercase hex characters.`);
+  }
+  let address: string | null = null;
+  if (obj.address !== undefined && obj.address !== null) {
+    if (typeof obj.address !== "string" || !isOctalAddress(obj.address)) {
+      throw new Error(
+        `${path}.address must be null or an octal address of at most 32 digits 0..7.`,
+      );
+    }
+    address = obj.address;
+  }
+  return { label, userId: obj.userId, address };
+}
+
+function validateContactRecords(raw: unknown): ContactRecord[] {
+  if (!Array.isArray(raw)) throw new Error("contacts must be an array.");
+  if (raw.length > MAX_CONTACTS) {
+    throw new Error(`contacts has ${raw.length} entries; maximum is ${MAX_CONTACTS}.`);
+  }
+  const entries = raw.map((entry, index) =>
+    validateContactRecord(entry, `contacts[${index}]`),
+  );
+  const userIds = new Set<string>();
+  const labels = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    if (userIds.has(entry.userId)) {
+      throw new Error(`contacts[${index}] duplicates a userId.`);
+    }
+    userIds.add(entry.userId);
+    if (labels.has(entry.label)) {
+      throw new Error(`contacts[${index}] duplicates a label.`);
+    }
+    labels.add(entry.label);
+  }
+  return entries;
 }
 
 function mockParentSignature(seq: number, userId: string | null): string {
@@ -161,8 +229,14 @@ export class OfflineBoard implements BoardBackend {
   private readonly codeHashBytes: Uint8Array;
   private readonly pubkeyBytes: Uint8Array;
   private readonly fixtures = new Map<string, StateV3>();
+  /** The private address book; delegate-owned, never part of contract state. */
+  private addressBook: ContactRecord[] = [];
   private started = false;
   private mutating = false;
+
+  get contacts(): ContactRecord[] {
+    return this.addressBook.map((entry) => ({ ...entry }));
+  }
 
   constructor(private readonly callbacks: BoardCallbacks) {
     this.codeHashBytes = digest("number:offline:v1:contract");
@@ -174,6 +248,8 @@ export class OfflineBoard implements BoardBackend {
       parentNextSeq: 1,
       paymentsNextSeq: 1,
       adjustmentsNextSeq: 1,
+      childNamesNextSeq: 1,
+      selfNameNextSeq: 1,
     };
     this.contractKeyBase58 = deriveInstanceIdFromBytes(
       this.codeHashBytes,
@@ -189,16 +265,13 @@ export class OfflineBoard implements BoardBackend {
 
     this.currentState = emptyState();
     if (!unnamedRequested()) {
-      // The board name is the owner's self-entry in the signed address book.
-      const entries: Contact[] = [
-        { label: "My board", userId: this.identity.pubkey },
-      ];
-      this.currentState.contacts = {
+      // The board name is the signed selfName record (v6).
+      this.currentState.selfName = {
         seq: 1,
-        entries,
-        sig: mockContactsSignature(1, entries),
+        name: "My board",
+        sig: mockSelfNameSignature(1, "My board"),
       };
-      this.identity.contactsNextSeq = 2;
+      this.identity.selfNameNextSeq = 2;
     }
     this.started = true;
     this.callbacks.onIdentity(this.snapshotIdentity());
@@ -216,15 +289,18 @@ export class OfflineBoard implements BoardBackend {
     await this.write(slotIndex, null);
   }
 
-  async saveContacts(entries: Contact[]): Promise<void> {
-    const normalised = entries.map((entry) => ({
-      label: entry.label.trim(),
-      userId: entry.userId.trim().toLowerCase(),
-    }));
-    const validated = validateContactList(normalised);
-
+  /**
+   * Sign and write the owner's `selfName` with a deterministic mock signature.
+   * A null name is a legal cleared tombstone at seq > 0.
+   */
+  async saveSelfName(name: string | null): Promise<void> {
     if (!this.started || !this.currentState) {
       throw new Error("Offline board is not ready yet");
+    }
+    if (name !== null) {
+      const trimmed = name.trim();
+      if (trimmed === "") throw new Error("A board name must not be empty.");
+      name = trimmed;
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -232,29 +308,88 @@ export class OfflineBoard implements BoardBackend {
     try {
       await delay(70);
       const seq = Math.max(
-        this.currentState.contacts.seq + 1,
-        this.identity.contactsNextSeq ?? 1,
+        this.currentState.selfName.seq + 1,
+        this.identity.selfNameNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 5,
-        parent: null,
-        contacts: {
+        v: 6,
+        selfName: {
           seq,
-          entries: validated,
-          sig: mockContactsSignature(seq, validated),
+          name,
+          sig: mockSelfNameSignature(seq, name),
         },
+        parent: null,
+        childNames: null,
         payments: null,
         adjustments: null,
         slots: [],
       };
 
       this.currentState = mergeDelta(this.currentState, delta);
-      this.identity.contactsNextSeq = seq + 1;
+      this.identity.selfNameNextSeq = seq + 1;
       this.callbacks.onIdentity(this.snapshotIdentity());
       this.callbacks.onState(this.currentState);
     } finally {
       this.mutating = false;
     }
+  }
+
+  /** The delegate-side address book commands the v9 UI calls. */
+  async listContacts(): Promise<ContactRecord[]> {
+    return this.addressBook.map((entry) => ({ ...entry }));
+  }
+
+  async addContact(entry: {
+    label: string;
+    userId: string;
+    address?: string | null;
+  }): Promise<ContactRecord[]> {
+    const record = validateContactRecord({
+      label: entry.label,
+      userId: entry.userId,
+      address: entry.address ?? null,
+    });
+    return this.writeContacts([...this.addressBook, record]);
+  }
+
+  async updateContact(
+    userId: string,
+    patch: { label?: string; address?: string | null },
+  ): Promise<ContactRecord[]> {
+    const index = this.addressBook.findIndex((entry) => entry.userId === userId);
+    if (index === -1) throw new Error(`no contact with userId ${userId}`);
+    const current = this.addressBook[index];
+    return this.writeContacts(
+      this.addressBook.map((entry, at) =>
+        at === index
+          ? {
+              label: patch.label ?? current.label,
+              userId: current.userId,
+              address:
+                "address" in patch ? (patch.address ?? null) : current.address,
+            }
+          : entry,
+      ),
+    );
+  }
+
+  async removeContact(userId: string): Promise<ContactRecord[]> {
+    const next = this.addressBook.filter((entry) => entry.userId !== userId);
+    if (next.length === this.addressBook.length) {
+      throw new Error(`no contact with userId ${userId}`);
+    }
+    return this.writeContacts(next);
+  }
+
+  private async writeContacts(
+    entries: ContactRecord[],
+  ): Promise<ContactRecord[]> {
+    const validated = validateContactRecords(entries);
+    this.addressBook = validated;
+    if (this.started && this.currentState) {
+      this.callbacks.onState(this.currentState);
+    }
+    return validated.map((entry) => ({ ...entry }));
   }
 
   /**
@@ -286,9 +421,10 @@ export class OfflineBoard implements BoardBackend {
         this.identity.parentNextSeq ?? 1,
       );
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: { seq, userId, sig: mockParentSignature(seq, userId) },
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: null,
         adjustments: null,
         slots: [],
@@ -395,9 +531,10 @@ export class OfflineBoard implements BoardBackend {
       const settled = nextSettled(this.currentState.payments, signedEntry);
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: {
           seq: paymentsSeq,
           settled,
@@ -484,9 +621,10 @@ export class OfflineBoard implements BoardBackend {
         this.identity.adjustmentsNextSeq ?? 1,
       );
       const deltaRecord: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: null,
         adjustments: {
           seq: adjustmentsSeq,
@@ -539,6 +677,7 @@ export class OfflineBoard implements BoardBackend {
     return {
       ownerId,
       state,
+      contacts: ownerId === this.identity.pubkey ? this.contacts : [],
       codeHash: encodeBase58(this.codeHashBytes),
       legacy: false,
     };
@@ -552,6 +691,8 @@ export class OfflineBoard implements BoardBackend {
       parentNextSeq: this.identity.parentNextSeq,
       paymentsNextSeq: this.identity.paymentsNextSeq ?? 1,
       adjustmentsNextSeq: this.identity.adjustmentsNextSeq ?? 1,
+      childNamesNextSeq: this.identity.childNamesNextSeq ?? 1,
+      selfNameNextSeq: this.identity.selfNameNextSeq ?? 1,
     };
   }
 
@@ -581,11 +722,10 @@ export class OfflineBoard implements BoardBackend {
           : ownerId === MOCK_SIBLING_ID
             ? "Sibling board"
             : "Parent board";
-    const selfEntries: Contact[] = [{ label: name, userId: ownerId }];
-    fixture.contacts = {
+    fixture.selfName = {
       seq: 1,
-      entries: selfEntries,
-      sig: mockContactsSignature(1, selfEntries),
+      name,
+      sig: mockSelfNameSignature(1, name),
     };
 
     if (ownerId === MOCK_PARENT_ID) {
@@ -610,6 +750,16 @@ export class OfflineBoard implements BoardBackend {
         seq: 1,
         entry: siblingEntry,
         sig: mockSignature(1, 1, siblingEntry),
+      };
+      // A parent names each child by its own slot index (v6).
+      const childNames = validateChildNameList([
+        { slot: 0, userId: own, name: "My board" },
+        { slot: 1, userId: MOCK_SIBLING_ID, name: "Sibling board" },
+      ]);
+      fixture.childNames = {
+        seq: 1,
+        entries: childNames,
+        sig: mockChildNamesSignature(1, childNames),
       };
     } else if (ownerId === MOCK_SIBLING_ID) {
       fixture.parent = {
@@ -669,10 +819,56 @@ export class OfflineBoard implements BoardBackend {
       const nextSeq = this.identity.nextSeq[slotIndex] ?? 1;
       const seq = Math.max(this.currentState.slots[slotIndex].seq + 1, nextSeq);
       const sig = mockSignature(slotIndex, seq, entry);
+
+      // Mirror the online write: saving a child slot also (re)writes the
+      // parent's signed name for that slot; clearing removes it.
+      const current = this.currentState.childNames;
+      const existing = current.entries.find(
+        (candidate) => candidate.slot === slotIndex,
+      );
+      const contact =
+        entry === null
+          ? null
+          : (this.addressBook.find(
+              (candidate) => candidate.userId === entry.contact,
+            ) ?? null);
+      const entries = current.entries.filter(
+        (candidate) => candidate.slot !== slotIndex,
+      );
+      if (entry !== null) {
+        if (contact !== null) {
+          entries.push({
+            slot: slotIndex,
+            userId: entry.contact,
+            name: contact.label,
+          });
+        } else if (existing !== undefined && existing.userId === entry.contact) {
+          entries.push(existing);
+        }
+      }
+      entries.sort((a, b) => a.slot - b.slot);
+      const childEntries = validateChildNameList(entries);
+      const childNames =
+        JSON.stringify(childEntries) === JSON.stringify(current.entries)
+          ? null
+          : (() => {
+              const childSeq = Math.max(
+                current.seq + 1,
+                this.identity.childNamesNextSeq ?? 1,
+              );
+              this.identity.childNamesNextSeq = childSeq + 1;
+              return {
+                seq: childSeq,
+                entries: childEntries,
+                sig: mockChildNamesSignature(childSeq, childEntries),
+              };
+            })();
+
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames,
         payments: null,
         adjustments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],

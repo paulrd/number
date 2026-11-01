@@ -8,6 +8,7 @@
  * Escape and the backdrop cannot dismiss it into an ambiguous state, so the
  * only outcomes are a completed install or an explicit refusal.
  */
+import { APP_NAME } from "./brand";
 import { DelegateError } from "./delegate";
 import { errorMessage } from "./util";
 
@@ -23,7 +24,7 @@ export interface DelegateDialog {
 }
 
 export const DELEGATE_DECLINED_MESSAGE =
-  "number needs its local component before it can use this node.";
+  `${APP_NAME} needs its local component before it can use this node.`;
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -59,7 +60,7 @@ export function createDelegateDialog(
     installing = value;
     installButton.disabled = value;
     notNowButton.disabled = value;
-    installButton.textContent = value ? "Installing…" : "Install number";
+    installButton.textContent = value ? "Installing…" : `Install ${APP_NAME}`;
     installButton.setAttribute("aria-busy", String(value));
     shell.setAttribute("aria-busy", String(value));
     progress.hidden = !value;

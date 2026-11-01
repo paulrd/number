@@ -37,6 +37,14 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v8 as deployed before v9. v9 moves the address book into the delegate
+    // and signs selfName/childNames instead of contacts, so the predecessor is
+    // the only path left to a v8 owner's seed and counters.
+    key: "8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg",
+    codeHash: "3PoWyq37qCRhFNzjhYzedtyqxHA6saaj3NBJyj993Jrb",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v8 stale-cache fix: local committed state beats the notification cache.
     // Superseded by the fresher-of-local-and-cache build, which also re-gets
     // the own board when a plan is Busy. Its seed and counters carry forward.
@@ -115,6 +123,10 @@ export const LEGACY_DELEGATES: LegacyDelegate[] = [
  * slot schema/signing bytes and remain unmigratable.
  */
 export const LEGACY_CONTRACT_CODE_HASHES: string[] = [
+  // v5 (adjustments). v6 drops the contacts record and adds empty selfName and
+  // childNames records; every surviving slot, parent, payment and adjustment
+  // signature remains valid, so the client upgrades and re-PUTs the state.
+  "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
   // v4 (payments). v5 adds an empty adjustments record; every existing slot,
   // contacts, parent and payments signature remains valid.
   "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",

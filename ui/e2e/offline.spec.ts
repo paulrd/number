@@ -88,7 +88,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
 
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { level: 1, name: "number" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Tally" })).toBeVisible();
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#identity-short")).toBeVisible();
@@ -117,7 +117,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await page.locator("#contact-add").click();
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-title")).toBeFocused();
-  await expect(page.locator("#contacts-dialog-count")).toHaveText("0 of 63");
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("0 of 64");
   await page.locator("#contact-label-input").fill("Alice");
   await page.locator("#contact-userid-input").fill(ALICE_ID);
   await page.locator("#contact-add-button").click();
@@ -163,7 +163,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-list")).toContainText("Alice");
   await expect(page.locator("#contacts-list")).not.toContainText("My board");
-  await expect(page.locator("#contacts-dialog-count")).toHaveText("1 of 63");
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("1 of 64");
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -179,15 +179,17 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await page.locator(".contacts-remove").click();
   await expect(page.locator("#contacts-confirm")).toBeVisible();
   await expect(page.locator("#contacts-confirm-text")).toContainText(
-    "unknown contact",
+    "saved name",
   );
   await page.locator("#contacts-confirm-remove").click();
   await expect(page.locator("#contacts-list")).not.toContainText("Alice");
   await expect(page.locator("#contacts-count")).toHaveText("0");
   await page.locator("#contacts-done").click();
 
+  // The slot keeps the signed name it was given; removing the private contact
+  // does not rewrite the board's `childNames` record.
   const firstLabel = page.locator(".slot .slot-label").first();
-  await expect(firstLabel).toHaveText("Unknown · abcdef01");
+  await expect(firstLabel).toHaveText("Alice");
   await expect(firstLabel).toHaveAttribute("title", aliceId);
   await expect(page.locator("#board-name")).toHaveText("My board");
 
@@ -463,7 +465,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#board-owner")).toContainText("Parent");
   await expect(page.locator("#read-only-badge")).toBeVisible();
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
-    "Parent",
+    "Parent board",
   );
   // The parent fixture is a root: its own address is empty and it has no parent.
   await expect(page.locator("#board-address")).toHaveAttribute("data-address", "");
@@ -588,7 +590,7 @@ test("requires a board name on first load and cannot be dismissed", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("renames the board and reserves that name in the address book", async ({
+test("renames the board as a signed name, separate from contact labels", async ({
   page,
 }) => {
   const errors = watchConsole(page);
@@ -610,27 +612,33 @@ test("renames the board and reserves that name in the address book", async ({
     "Renamed board",
   );
 
-  // A name already used by a contact is rejected in the dialog.
+  // v6: the board name is its own signed record, not an address-book entry, so
+  // it shares no namespace with contact labels.
   await addContact(page, "Alice", ALICE_ID);
   await page.locator("#board-name-edit").click();
   await page.locator("#board-name-input").fill("Alice");
   await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-warning")).toContainText(
-    "Another contact",
-  );
-  await page.locator("#board-name-cancel").click();
-  await expect(page.locator("#board-name")).toHaveText("Renamed board");
+  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await expect(page.locator("#board-name")).toHaveText("Alice");
+  await expect(page.locator("#contacts-count")).toHaveText("1");
 
-  // The board name is also reserved when adding a new contact.
+  // A contact may use the board's old name, because the names are private and
+  // signed separately.
   await page.locator("#contacts-open").click();
   await page.locator("#contact-label-input").fill("Renamed board");
   await page.locator("#contact-userid-input").fill(BOB_ID);
   await page.locator("#contact-add-button").click();
+  await expect(page.locator("#contacts-list")).toContainText("Renamed board");
+
+  // Contact labels still have to be unique among themselves.
+  await page.locator("#contact-label-input").fill("Alice");
+  await page.locator("#contact-userid-input").fill(CAROL_ID);
+  await page.locator("#contact-add-button").click();
   await expect(page.locator("#contact-label-warning")).toContainText(
-    "board's name",
+    "Another contact",
   );
   await page.locator("#contacts-done").click();
-  await expect(page.locator("#contacts-count")).toHaveText("1");
+  await expect(page.locator("#contacts-count")).toHaveText("2");
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -641,7 +649,7 @@ test("renames the board and reserves that name in the address book", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("falls back to fixture board names when contacts are removed", async ({
+test("keeps parent-given slot names after contacts are removed", async ({
   page,
 }) => {
   const errors = watchConsole(page);
@@ -675,19 +683,21 @@ test("falls back to fixture board names when contacts are removed", async ({
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#parent-save").click();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  await expect(page.locator("#parent-name")).toHaveText("Parent");
+  // The parent row uses the parent board's own signed name, not the private
+  // contact label ("Parent").
+  await expect(page.locator("#parent-name")).toHaveText("Parent board");
 
-  // Removing the child contact keeps the signed id and falls back to the
-  // child board's own name.
+  // Removing the child contact keeps both the signed id and the name this
+  // board already gave the slot.
   await page.locator("#contacts-open").click();
   await page.getByRole("button", { name: "Remove Child" }).click();
   await expect(page.locator("#contacts-confirm")).toBeVisible();
   await page.locator("#contacts-confirm-remove").click();
   await expect(page.locator("#contacts-list")).not.toContainText("Child");
   await page.locator("#contacts-done").click();
-  await expect(page.locator(".slot .slot-label").first()).toHaveText("Child board");
+  await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
 
-  // The parent row replaces its initial Unknown label with the parent's name.
+  // The parent row already shows the parent's own name and does not change.
   await page.locator("#contacts-open").click();
   await page.getByRole("button", { name: "Remove Parent" }).click();
   await expect(page.locator("#contacts-confirm")).toBeVisible();
@@ -696,13 +706,14 @@ test("falls back to fixture board names when contacts are removed", async ({
   await page.locator("#contacts-done").click();
   await expect(page.locator("#parent-name")).toHaveText("Parent board");
 
-  // The Viewing row and path use the same fallback.
+  // The Viewing row shows the child board's own name; the breadcrumb uses the
+  // name this board gave the slot.
   await page.locator(".slot").first().click();
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await page.locator("#child-open").click();
   await expect(page.locator("#board-owner")).toContainText("Child board");
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
-    "Child board",
+    "Child",
   );
   await expect(page.locator("#breadcrumb-list")).toContainText("My board");
   await page.locator("#board-home").click();

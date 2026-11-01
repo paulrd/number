@@ -32,9 +32,9 @@ use freenet_stdlib::prelude::{
     ContractInterface, Parameters, State, StateDelta, StateSummary, UpdateData,
 };
 use number_contract::{
-    Adjustment, Adjustments, Contact, Contacts, Entry, MAX_NOTE_BYTES, NumberContract, Parent,
-    Slot, StateV5, Summary, adjustments_signing_bytes, contacts_signing_bytes,
-    parent_signing_bytes, signing_bytes,
+    Adjustment, Adjustments, ChildName, ChildNames, Entry, MAX_NOTE_BYTES, NumberContract, Parent,
+    SelfName, Slot, StateV6, Summary, adjustments_signing_bytes, child_names_signing_bytes,
+    parent_signing_bytes, self_name_signing_bytes, signing_bytes,
 };
 use serde::Serialize;
 
@@ -101,12 +101,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let verifying = key.verifying_key();
     std::fs::write(directory.join("params.bin"), verifying.to_bytes())?;
 
-    // Base board: one value, one measured value, one cleared slot, the first
-    // contact and a parent link. `s1` is the empty predecessor.
-    let s1 = StateV5::empty();
-    let mut s2 = StateV5::empty();
+    // Base board: one value, one measured value, one cleared slot, a board
+    // name, one child name and a parent link. `s1` is the empty predecessor.
+    let s1 = StateV6::empty();
+    let mut s2 = StateV6::empty();
+    s2.self_name = signed_self_name(&key, 1, Some("Corpus Board"));
     s2.parent = signed_parent(&key, 1, Some(ALICE));
-    s2.contacts = signed_contacts(&key, 1, vec![contact("Alice", ALICE)]);
+    s2.child_names = signed_child_names(&key, 1, vec![child_name(0, ALICE, "Alice")]);
     s2.slots[0] = signed(
         &key,
         0,
@@ -117,11 +118,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     s2.slots[5] = signed(&key, 5, 1, None); // tombstone: a slot that was cleared
 
     // A later state from the same owner: a second parent link (parent seq 2), a
-    // second contact (contacts seq 2), higher seq on slot 0, an extreme i64 at
-    // u64::MAX seq, and a longer note near the metadata limit.
+    // renamed board (selfName seq 2), a second child name (childNames seq 2),
+    // higher seq on slot 0, an extreme i64 at u64::MAX seq, and a longer note
+    // near the metadata limit.
     let mut s3 = s2.clone();
+    s3.self_name = signed_self_name(&key, 2, Some("Renamed Board"));
     s3.parent = signed_parent(&key, 2, Some(BOB));
-    s3.contacts = signed_contacts(&key, 2, vec![contact("Alice", ALICE), contact("Bob", BOB)]);
+    s3.child_names = signed_child_names(
+        &key,
+        2,
+        vec![
+            child_name(0, ALICE, "Alice"),
+            child_name(1, BOB, "Bob"),
+            child_name(2, ALICE, "Alicia"),
+        ],
+    );
     s3.slots[0] = signed(
         &key,
         0,
@@ -163,20 +174,43 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // Three independent updates to the SAME base `s2`: the concurrent-update
-    // scenario `delta_permutation_invariance` is a law about. Two add a slot, one
-    // clears a slot with a tombstone and also clears the parent.
+    // scenario `delta_permutation_invariance` is a law about. Two add a slot,
+    // one clears a slot with a tombstone and also clears the parent; two of
+    // them also rewrite `childNames` or `selfName` so the naming records take
+    // part in the concurrent merge.
     let mut a = s2.clone();
     a.slots[3] = signed(&key, 3, 1, Some(entry(100, ALICE, Some("items"), None)));
     let mut b = s2.clone();
+    b.self_name = signed_self_name(&key, 2, Some("Concurrent Name"));
+    b.child_names = signed_child_names(
+        &key,
+        2,
+        vec![
+            child_name(0, ALICE, "Alice"),
+            child_name(4, BOB, "Concurrent"),
+        ],
+    );
     b.slots[4] = signed(&key, 4, 2, Some(entry(7, BOB, None, Some("concurrent"))));
     let mut c = s2.clone();
+    c.child_names = signed_child_names(&key, 2, vec![child_name(0, ALICE, "Renamed Child")]);
     c.slots[2] = signed(&key, 2, 5, None); // tombstone an existing slot
     c.parent = signed_parent(&key, 2, None); // clear the parent
 
     // A second base with its own update, so transition provenance is not all one
     // board. It replaces the whole adjustment log at seq 2 while keeping the
-    // seq-1 entry as history and adding a second adjustment + slot write.
+    // seq-1 entry as history and adding a second adjustment + slot write, names
+    // the new child, and clears the board name (a `selfName` tombstone).
     let mut s4 = s3.clone();
+    s4.self_name = signed_self_name(&key, 3, None);
+    s4.child_names = signed_child_names(
+        &key,
+        3,
+        vec![
+            child_name(0, ALICE, "Alice"),
+            child_name(1, BOB, "Bob"),
+            child_name(6, BOB, "Second Base"),
+        ],
+    );
     s4.slots[6] = signed(&key, 6, 2, Some(entry(5, BOB, None, Some("second base"))));
     s4.adjustments = signed_adjustments(
         &key,
@@ -211,7 +245,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Real network deltas: `get_state_delta(sender, recipient_summary)`.
     let d1 = delta(&verifying, &s2, &summaries[0]); // peer holds the empty board
-    let d3 = delta(&verifying, &s3, &summaries[1]); // contacts seq 1 -> 2
+    let d3 = delta(&verifying, &s3, &summaries[1]); // selfName/childNames seq 1 -> 2
     let da = delta(&verifying, &a, &summaries[1]); // peer is at s2
     let db = delta(&verifying, &b, &summaries[1]);
     let dc = delta(&verifying, &c, &summaries[1]);
@@ -268,8 +302,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// actually produces, never a hand-written state.
 fn step(
     verifying: &VerifyingKey,
-    base: &StateV5,
-    expected: &StateV5,
+    base: &StateV6,
+    expected: &StateV6,
     delta: Vec<u8>,
     summary: Vec<u8>,
 ) -> Transition {
@@ -299,7 +333,7 @@ fn params(verifying: &VerifyingKey) -> Parameters<'static> {
     Parameters::from(verifying.to_bytes().to_vec())
 }
 
-fn delta(verifying: &VerifyingKey, sender: &StateV5, recipient_summary: &[u8]) -> Vec<u8> {
+fn delta(verifying: &VerifyingKey, sender: &StateV6, recipient_summary: &[u8]) -> Vec<u8> {
     NumberContract::get_state_delta(
         params(verifying),
         State::from(sender.to_bytes()),
@@ -310,7 +344,7 @@ fn delta(verifying: &VerifyingKey, sender: &StateV5, recipient_summary: &[u8]) -
     .to_vec()
 }
 
-fn apply(verifying: &VerifyingKey, state: &StateV5, delta: &[u8]) -> StateV5 {
+fn apply(verifying: &VerifyingKey, state: &StateV6, delta: &[u8]) -> StateV6 {
     let updated = NumberContract::update_state(
         params(verifying),
         State::from(state.to_bytes()),
@@ -318,7 +352,7 @@ fn apply(verifying: &VerifyingKey, state: &StateV5, delta: &[u8]) -> StateV5 {
     )
     .expect("corpus delta must be accepted")
     .unwrap_valid();
-    StateV5::decode(updated.as_ref()).expect("the contract emits decodable state")
+    StateV6::decode(updated.as_ref()).expect("the contract emits decodable state")
 }
 
 fn signed(key: &SigningKey, index: u8, seq: u64, entry: Option<Entry>) -> Slot {
@@ -339,9 +373,18 @@ fn signed_parent(key: &SigningKey, seq: u64, user_id: Option<&str>) -> Parent {
     }
 }
 
-fn signed_contacts(key: &SigningKey, seq: u64, entries: Vec<Contact>) -> Contacts {
-    let signature = key.sign(&contacts_signing_bytes(seq, &entries));
-    Contacts {
+fn signed_self_name(key: &SigningKey, seq: u64, name: Option<&str>) -> SelfName {
+    let signature = key.sign(&self_name_signing_bytes(seq, name));
+    SelfName {
+        seq,
+        name: name.map(str::to_owned),
+        sig: Some(hex::encode(signature.to_bytes())),
+    }
+}
+
+fn signed_child_names(key: &SigningKey, seq: u64, entries: Vec<ChildName>) -> ChildNames {
+    let signature = key.sign(&child_names_signing_bytes(seq, &entries));
+    ChildNames {
         seq,
         entries,
         sig: Some(hex::encode(signature.to_bytes())),
@@ -357,10 +400,11 @@ fn signed_adjustments(key: &SigningKey, seq: u64, entries: Vec<Adjustment>) -> A
     }
 }
 
-fn contact(label: &str, user_id: &str) -> Contact {
-    Contact {
-        label: label.into(),
+fn child_name(slot: u8, user_id: &str, name: &str) -> ChildName {
+    ChildName {
+        slot,
         user_id: user_id.into(),
+        name: name.into(),
     }
 }
 

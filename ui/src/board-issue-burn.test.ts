@@ -14,6 +14,7 @@ import {
 import type { ClientRequestT } from "@freenetorg/freenet-stdlib/client-request";
 import type { DelegateResponse } from "@freenetorg/freenet-stdlib";
 import type { OnlineBoard } from "./board";
+import type { ContactRecord } from "./delegate";
 import type { Delta, StateV3 } from "./state";
 import { I64_MAX } from "./state";
 import { LEGACY_CONTRACT_CODE_HASHES } from "./migrations";
@@ -54,6 +55,10 @@ vi.mock("./freenet", async (importOriginal) => {
     async connect(): Promise<void> {}
     async ensureState(): Promise<ReturnType<typeof empty>> {
       return this.state;
+    }
+    /** No legacy generation in these tests; the probe must simply miss. */
+    async readStateRaw(): Promise<Uint8Array> {
+      throw new Error("no legacy instance");
     }
     async getState(): Promise<ReturnType<typeof empty>> {
       return this.state;
@@ -120,7 +125,10 @@ async function harness(
   counters: {
     nextSeq?: number[];
     adjustmentsNextSeq?: number;
+    selfNameNextSeq?: number;
+    childNamesNextSeq?: number;
     adjustmentSeqOffset?: number;
+    contacts?: ContactRecord[];
   } = {},
 ): Promise<Harness> {
   const { OnlineBoard } = await import("./board");
@@ -128,6 +136,17 @@ async function harness(
   const sent: Record<string, unknown>[] = [];
   const nextSeq = counters.nextSeq ?? [1, 1, 1, 1, 1, 1, 1, 1];
   let adjustmentsNextSeq = counters.adjustmentsNextSeq ?? 1;
+  let selfNameNextSeq = counters.selfNameNextSeq ?? 1;
+  let childNamesNextSeq = counters.childNamesNextSeq ?? 1;
+  const contacts = counters.contacts ?? [];
+
+  // Signed-name replies advance their counters, like the real delegate.
+  const signed = (kind: "selfName" | "childNames", seq: unknown): object => {
+    const next = Number(seq) + 1;
+    if (kind === "selfName") selfNameNextSeq = next;
+    else childNamesNextSeq = next;
+    return { ok: true, sig: SIG };
+  };
 
   const board = new OnlineBoard(
     {
@@ -150,6 +169,9 @@ async function harness(
   const fake = NumberContract as unknown as {
     instances: Array<{ state: StateV3; deltas: Delta[] }>;
   };
+  // The instance this start creates is the active board; the post-start
+  // reconcile pass may add read-only probe viewers after it.
+  const firstInstance = fake.instances.length;
 
   fakeTransport.handler = (request, callbacks) => {
     const payload = sentPayload([request as ClientRequestT]);
@@ -165,6 +187,8 @@ async function harness(
         parentNextSeq: 1,
         paymentsNextSeq: 1,
         adjustmentsNextSeq,
+        childNamesNextSeq,
+        selfNameNextSeq,
         configured: true,
         codeHashes: [ACTIVE, ...LEGACY_CONTRACT_CODE_HASHES],
         matchedCodeHash: ACTIVE,
@@ -185,7 +209,15 @@ async function harness(
         parentNextSeq: 1,
         paymentsNextSeq: 1,
         adjustmentsNextSeq,
+        childNamesNextSeq,
+        selfNameNextSeq,
       };
+    } else if (payload.cmd === "contacts") {
+      reply = { ok: true, contacts };
+    } else if (payload.cmd === "signSelfName") {
+      reply = signed("selfName", payload.seq);
+    } else if (payload.cmd === "signChildNames") {
+      reply = signed("childNames", payload.seq);
     } else if (payload.cmd === "configure") {
       reply = { ok: true, configured: true, matchedCodeHash: ACTIVE };
     } else if (payload.cmd === "signAdjustment") {
@@ -207,7 +239,7 @@ async function harness(
     expect(sent.some((payload) => payload.cmd === "configure")).toBe(true);
   });
 
-  const contract = fake.instances[fake.instances.length - 1];
+  const contract = fake.instances[firstInstance];
   mutate(contract.state);
   return { board, contract, sent };
 }
@@ -250,7 +282,7 @@ describe("OnlineBoard.issueOrBurn", () => {
 
     const deltas = (contract as unknown as { deltas: Delta[] }).deltas;
     expect(deltas).toHaveLength(1);
-    expect(deltas[0].v).toBe(5);
+    expect(deltas[0].v).toBe(6);
     expect(deltas[0].slots).toEqual([
       {
         i: 0,
@@ -401,6 +433,121 @@ describe("OnlineBoard.issueOrBurn", () => {
       ],
     });
     expect(board.identity?.adjustmentsNextSeq).toBe(8);
+    board.close();
+  });
+});
+
+describe("OnlineBoard names", () => {
+  it("renaming the own board signs a selfName record, not a contacts entry", async () => {
+    const { board, contract, sent } = await harness(() => {});
+
+    await board.saveSelfName("Renamed board");
+
+    const sign = sent.find((payload) => payload.cmd === "signSelfName");
+    expect(sign).toEqual({
+      cmd: "signSelfName",
+      seq: 1,
+      name: "Renamed board",
+    });
+
+    const deltas = (contract as unknown as { deltas: Delta[] }).deltas;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].v).toBe(6);
+    expect(deltas[0].selfName).toEqual({
+      seq: 1,
+      name: "Renamed board",
+      sig: SIG,
+    });
+    // v6 removed the replicated address book: no state or delta carries it.
+    expect(deltas[0]).not.toHaveProperty("contacts");
+    expect(board.currentState?.selfName.name).toBe("Renamed board");
+    expect(board.identity?.selfNameNextSeq).toBe(2);
+
+    board.close();
+  });
+
+  it("saving a child slot writes the parent's name for that slot", async () => {
+    const { board, contract, sent } = await harness(
+      (state) => {
+        state.slots[0] = slot(1000n, 3);
+      },
+      {
+        contacts: [{ label: "Alice", userId: CONTACT_A, address: null }],
+        nextSeq: [5, 1, 1, 1, 1, 1, 1, 1],
+      },
+    );
+
+    await board.save(0, {
+      value: 1250n,
+      contact: CONTACT_A,
+      unit: "kg",
+      note: "rent",
+    });
+
+    const sign = sent.find((payload) => payload.cmd === "signChildNames");
+    expect(sign).toEqual({
+      cmd: "signChildNames",
+      seq: 1,
+      entries: [{ slot: 0, userId: CONTACT_A, name: "Alice" }],
+    });
+
+    const deltas = (contract as unknown as { deltas: Delta[] }).deltas;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].v).toBe(6);
+    expect(deltas[0].childNames).toEqual({
+      seq: 1,
+      entries: [{ slot: 0, userId: CONTACT_A, name: "Alice" }],
+      sig: SIG,
+    });
+    expect(deltas[0]).not.toHaveProperty("contacts");
+    expect(board.identity?.childNamesNextSeq).toBe(2);
+
+    // Clearing the slot removes that slot's entry in a fresh record.
+    await board.clear(0);
+    expect(deltas).toHaveLength(2);
+    expect(deltas[1].childNames).toEqual({
+      seq: 2,
+      entries: [],
+      sig: SIG,
+    });
+
+    board.close();
+  });
+});
+
+describe("OnlineBoard backup", () => {
+  it("forwards a v2 restore with its contacts and both name counters", async () => {
+    const { board, sent } = await harness(() => {});
+    const contacts = [{ label: "Alice", userId: CONTACT_A, address: "12" }];
+    const seed = "ab".repeat(32);
+
+    await board.importIdentity(
+      seed,
+      [1, 1, 1, 1, 1, 1, 1, 1],
+      1,
+      1,
+      1,
+      1,
+      3,
+      4,
+      2,
+      contacts,
+    );
+
+    expect(sent.find((payload) => payload.cmd === "import")).toEqual({
+      cmd: "import",
+      seed,
+      payloadVersion: 2,
+      nextSeq: [1, 1, 1, 1, 1, 1, 1, 1],
+      contactsNextSeq: 1,
+      parentNextSeq: 1,
+      paymentsNextSeq: 1,
+      adjustmentsNextSeq: 1,
+      childNamesNextSeq: 3,
+      selfNameNextSeq: 4,
+      contacts,
+    });
+
     board.close();
   });
 });

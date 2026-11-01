@@ -185,6 +185,21 @@ export type ContractUpdate =
   | { kind: "state"; state: Uint8Array }
   | { kind: "state-and-delta"; state: Uint8Array; delta: Uint8Array };
 
+/**
+ * Upgrade one legacy generation's raw state into the state to PUT into the
+ * current instance.
+ *
+ * The bytes, not a decoded `StateV3`, because a v5 state's address book only
+ * exists in the old encoding: `decodeState` drops it during the v6 upgrade, and
+ * the migration has to write it into the delegate before anything is PUT.
+ * Throwing aborts `ensureState` before the PUT, leaving the legacy board as it
+ * was.
+ */
+export type LegacyStateUpgrade = (
+  state: Uint8Array,
+  codeHash: string,
+) => Promise<StateV3>;
+
 export interface NumberContractCallbacks {
   onState?: (state: StateV3) => void;
   onStatus?: (status: ConnectionStatus, detail?: string) => void;
@@ -474,6 +489,13 @@ export class NumberContract {
     key: ContractKey,
     timeoutMs: number,
   ): Promise<StateV3> {
+    return decodeState(await this.getRawStateForKey(key, timeoutMs));
+  }
+
+  private async getRawStateForKey(
+    key: ContractKey,
+    timeoutMs: number,
+  ): Promise<Uint8Array> {
     const api = this.requireApi();
     let signalMissing!: () => void;
     const missing = new Promise<never>((_, reject) => {
@@ -486,10 +508,48 @@ export class NumberContract {
         timeoutMs,
         "Timed out fetching the contract state",
       );
-      return decodeState(Uint8Array.from(response.state));
+      return Uint8Array.from(response.state);
     } finally {
       this.missingListener = null;
     }
+  }
+
+  /**
+   * Read one parameterised instance's state bytes without the v6 upgrade.
+   *
+   * The migration path needs the old encoding: a v5 address book is dropped by
+   * `decodeState`, so only the raw bytes can be handed to
+   * `decodeLegacyV5State`. Never PUTs or subscribes.
+   */
+  async readStateRaw(
+    parameters: Uint8Array,
+    timeoutMs: number = GET_TIMEOUT_MS,
+  ): Promise<Uint8Array> {
+    if (parameters.length !== 32) {
+      throw new Error(
+        `contract parameters must be 32 bytes, got ${parameters.length}`,
+      );
+    }
+    this.key = deriveContractKey(this.codeHashBase58, parameters);
+    return this.getRawStateForKey(this.key, timeoutMs);
+  }
+
+  /**
+   * PUT a complete state into this parameterised instance.
+   *
+   * Used by the legacy-ahead heal, which has to publish the merge of an
+   * untouched v5 instance and the v6 board. Freenet merges the PUT through the
+   * contract's `update_state`, so republishing a converged state is a no-op and
+   * the same owner's signatures validate on both sides.
+   */
+  async publishState(parameters: Uint8Array, state: StateV3): Promise<void> {
+    if (parameters.length !== 32) {
+      throw new Error(
+        `contract parameters must be 32 bytes, got ${parameters.length}`,
+      );
+    }
+    this.key = deriveContractKey(this.codeHashBase58, parameters);
+    await this.putState(parameters, state);
   }
 
   /**
@@ -501,10 +561,16 @@ export class NumberContract {
    * through the contract's `update_state`, and our empty state (every slot
    * `seq: 0`) loses every slot merge, so it is a no-op. The only cost of a
    * spurious PUT is re-sending the WASM.
+   *
+   * `upgradeLegacyState` turns the raw bytes of a probed legacy generation into
+   * the state to PUT. The v5→v6 migration uses it to write the old address book
+   * into the delegate and sign the name records first; if it throws, nothing is
+   * PUT and the legacy instance remains the only copy of the board.
    */
   async ensureState(
     parameters: Uint8Array,
     legacyContractCodeHashes: readonly string[] = [],
+    upgradeLegacyState?: LegacyStateUpgrade,
   ): Promise<StateV3> {
     if (parameters.length !== 32) {
       throw new Error(`contract parameters must be 32 bytes, got ${parameters.length}`);
@@ -519,16 +585,23 @@ export class NumberContract {
     }
 
     if (state === null) {
-      const legacyState = await this.findLegacyState(
+      const legacy = await this.findLegacyState(
         parameters,
         legacyContractCodeHashes,
       );
-      if (legacyState) {
+      if (legacy) {
         // Probe BEFORE writing the new key: PUT old state into the current
         // contract, whose validate_state re-checks every signature. If the
         // registry contains an incompatible version, surface the failure
         // instead of silently creating an empty board.
-        await this.putState(parameters, legacyState);
+        //
+        // The upgrade hook runs first and may throw (the v5→v6 path writes the
+        // delegate address book and signs the name records before any PUT); the
+        // throw aborts here, so the legacy instance stays the only copy.
+        const migrated = upgradeLegacyState
+          ? await upgradeLegacyState(legacy.raw, legacy.codeHash)
+          : decodeState(legacy.raw);
+        await this.putState(parameters, migrated);
       } else {
         await this.putState(parameters, emptyState());
       }
@@ -564,16 +637,21 @@ export class NumberContract {
       : new Error("Timed out reading the contract state after publishing");
   }
 
-  /** Probe old contract instances for state this version accepts. */
+  /**
+   * Probe old contract instances for state this version accepts. Returns the
+   * bytes and the generation they came from; the caller either decodes the v5
+   * encoding itself (the migration path needs the address book) or runs the
+   * default v6 upgrade.
+   */
   private async findLegacyState(
     parameters: Uint8Array,
     legacyContractCodeHashes: readonly string[],
-  ): Promise<StateV3 | null> {
+  ): Promise<{ raw: Uint8Array; codeHash: string } | null> {
     for (const codeHash of legacyContractCodeHashes) {
       try {
         const legacyKey = deriveContractKey(codeHash, parameters);
-        const state = await this.getStateForKey(legacyKey, PROBE_TIMEOUT_MS);
-        return state;
+        const raw = await this.getRawStateForKey(legacyKey, PROBE_TIMEOUT_MS);
+        return { raw, codeHash };
       } catch {
         // Not found, unreadable, or a timeout: try the next generation.
       }

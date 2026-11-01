@@ -8,12 +8,12 @@
  * missing remote board cannot contain this one as an ancestor.
  */
 import type { BoardSnapshot } from "./board";
-import type { Contact } from "./state";
+import type { ContactRecord } from "./delegate";
 import { MAX_TREE_DEPTH, walkParentChain } from "./tree-view";
 import { errorMessage } from "./util";
 
 export interface ParentDialogDeps {
-  getContacts(): Contact[];
+  getContacts(): ContactRecord[];
   getOwnOwnerId(): string | null;
   getParent(): string | null;
   readBoard(ownerId: string): Promise<BoardSnapshot | null>;
@@ -94,7 +94,7 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
     form.setAttribute("aria-busy", String(busy));
   }
 
-  function contactsForParent(): Contact[] {
+  function contactsForParent(): ContactRecord[] {
     const ownId = deps.getOwnOwnerId();
     return deps.getContacts().filter((contact) => contact.userId !== ownId);
   }

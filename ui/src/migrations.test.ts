@@ -122,14 +122,17 @@ describe("migration registry", () => {
     }
   });
 
-  it("treats v2, v3 and v4 as migratable and v1 as unmigratable", () => {
+  it("treats v2–v5 as migratable and v1 as unmigratable", () => {
     // v3 keeps the v2 slot/contacts signing bytes; v4 adds an empty payments
-    // record; v5 adds an empty adjustments record. Only v1 changed the slot
-    // schema and cannot be re-PUT.
+    // record; v5 adds an empty adjustments record; v6 drops the contacts
+    // record (the address book moves to the delegate) and adds empty
+    // selfName/childNames records. Every surviving signature still verifies,
+    // so all of them are re-PUT. Only v1 changed the slot schema.
     expect(LEGACY_CONTRACT_CODE_HASHES[0]).toBe(
-      "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
+      "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
     );
     for (const migratable of [
+      "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
       "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
       "7j8ycU22TP9CfgGCk1nztWe6nqiasM6TS71Lg2fj9WPg",
       "A1J4T4sJ4xwRtbbu8QpXhCSyMHrW1uMp2H4H5BfBdiur",

@@ -16,7 +16,7 @@
     <meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#11120f" media="(prefers-color-scheme: dark)" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <title>number</title>
+    <title>Tally</title>
   </head>
   <body>
     <div class="app">
@@ -24,13 +24,13 @@
         <div class="title-block">
           <p class="eyebrow">Personal Freenet board</p>
           <div class="wordmark-row">
-            <h1 class="wordmark">number</h1>
+            <h1 class="wordmark">Tally</h1>
             <p class="wordmark-tag" aria-hidden="true">
               <span class="wordmark-count">08</span>
               <span class="wordmark-word">slots</span>
             </p>
           </div>
-          <p class="tagline">Eight slots. One owner. Change a value, keep it.</p>
+          <p class="tagline">Eight slots. One owner. Two halves, both signed.</p>
         </div>
 
         <div class="connection-block">
@@ -804,7 +804,7 @@
               <h2 id="board-name-title" tabindex="-1">Name your board</h2>
               <p id="board-name-desc" class="identity-intro">
                 This name is how other boards see yours in their path. It is
-                stored in your signed address book and can be changed later.
+                signed into this board and can be changed later.
               </p>
             </div>
             <button
@@ -835,8 +835,8 @@
               />
             </label>
             <p id="board-name-hint" class="field-hint">
-              Up to 64 characters. This name is public and signed with the rest
-              of your address book.
+              Up to 64 characters. This name is public and signed into this
+              board.
             </p>
             <p id="board-name-warning" class="field-warning" role="status" hidden></p>
             <p id="board-name-error" class="form-error" role="alert" hidden></p>
@@ -872,9 +872,9 @@
               <p class="eyebrow">First run</p>
               <h2 id="delegate-title" tabindex="-1">Install the local component</h2>
               <p id="delegate-desc" class="identity-intro">
-                number keeps the key that signs your board on this device, in a
+                Tally keeps the key that signs your board on this device, in a
                 small Freenet component called a delegate. This node does not have
-                it yet, so number cannot create or open a board here.
+                it yet, so Tally cannot create or open a board here.
               </p>
             </div>
           </header>
@@ -907,7 +907,7 @@
                   <h3>What comes next</h3>
                   <p>
                     Installing is a prerequisite, not your identity. Afterwards,
-                    number asks you to create a new owner key or restore a backup.
+                    Tally asks you to create a new owner key or restore a backup.
                   </p>
                 </div>
               </li>
@@ -929,7 +929,7 @@
               class="button button--primary"
               type="button"
             >
-              Install number
+              Install Tally
             </button>
           </footer>
         </div>
@@ -967,7 +967,7 @@
                   <h3 id="identity-create-title">Create a new identity</h3>
                   <p>
                     Starts an empty board owned by a new key on this device. Choose this
-                    if you have not used number before.
+                    if you have not used Tally before.
                   </p>
                   <button id="identity-create" class="button button--primary" type="button">
                     Create a new identity
@@ -1146,7 +1146,7 @@
               <h3 id="identity-here-title">Restore is not available here</h3>
               <p>
                 This device already has an identity, so it cannot import a backup. To use
-                the same key on another device, open number there and choose Restore from
+                the same key on another device, open Tally there and choose Restore from
                 a backup before it creates an identity, then check that the Identity in
                 the header matches this one. The backup carries the key, not the board:
                 the new device loads the board from Freenet, so it needs network access.
@@ -1174,10 +1174,11 @@
               <p class="eyebrow">Address book</p>
               <h2 id="contacts-title" tabindex="-1">Contacts</h2>
               <p id="contacts-desc" class="contacts-intro">
-                A contact is a name for a public key. Slots store the key, so renaming
-                a label keeps the link. Removing a contact leaves its key on any slot
-                that already uses it. Your board's own name is edited from the header
-                and is not listed here.
+                A contact is a private label for a public key. Slots store the key, so
+                renaming a label keeps the link. Removing a contact leaves its key on
+                any slot that already uses it, and the name already saved into a slot
+                stays on the signed board. Your board's own name is edited from the
+                header and is not listed here.
               </p>
             </div>
             <button

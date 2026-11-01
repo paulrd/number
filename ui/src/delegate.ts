@@ -33,17 +33,18 @@ import {
   type ClientRequestT as ClientRequestTable,
 } from "@freenetorg/freenet-stdlib/client-request";
 import {
+  MAX_CONTACTS,
   validateAdjustmentList,
-  validateContactList,
+  validateChildNameList,
   validateEntry,
   validatePaymentEntry,
   validateSettled,
   type Adjustment,
-  type Contact,
+  type ChildName,
   type Entry,
 } from "./state";
-import type { PaymentEntry } from "./payments";
-import { delay, errorMessage, isLowerHex } from "./util";
+import { isOctalAddress, type PaymentEntry } from "./payments";
+import { delay, errorMessage, isLowerHex, utf8Length } from "./util";
 
 export type DelegateErrorCode =
   | "Missing"
@@ -71,6 +72,106 @@ export function isMissingDelegateError(error: unknown): error is DelegateError {
   return error instanceof DelegateError && error.code === "Missing";
 }
 
+/** One private address-book entry owned by the delegate (never replicated). */
+export interface ContactRecord {
+  /** 1–64 UTF-8 bytes; unique within the book. */
+  label: string;
+  /** 64 lowercase hex characters; unique within the book. */
+  userId: string;
+  /** Optional derived octal address used to route payments. */
+  address: string | null;
+}
+
+const MAX_CONTACT_LABEL_BYTES = 64;
+
+function validateContactLabel(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    throw new DelegateError("Protocol", `${path} must be a string.`);
+  }
+  if (value.length === 0) {
+    throw new DelegateError("Protocol", `${path} must not be empty.`);
+  }
+  const length = utf8Length(value);
+  if (length > MAX_CONTACT_LABEL_BYTES) {
+    throw new DelegateError(
+      "Protocol",
+      `${path} is ${length} bytes; maximum is ${MAX_CONTACT_LABEL_BYTES}.`,
+    );
+  }
+  return value;
+}
+
+function validateContactAddress(value: unknown, path: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !isOctalAddress(value)) {
+    throw new DelegateError(
+      "Protocol",
+      `${path} must be null or an octal address of at most 32 digits 0..7.`,
+    );
+  }
+  return value;
+}
+
+/** Validate one address-book entry, mirroring the delegate's invariants. */
+function validateContactRecord(
+  raw: unknown,
+  path = "contact",
+): ContactRecord {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new DelegateError("Protocol", `${path} must be an object.`);
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.userId !== "string" || !isLowerHex(obj.userId, 64)) {
+    throw new DelegateError(
+      "Protocol",
+      `${path}.userId must be 64 lowercase hex characters.`,
+    );
+  }
+  return {
+    label: validateContactLabel(obj.label, `${path}.label`),
+    userId: obj.userId,
+    address: validateContactAddress(obj.address, `${path}.address`),
+  };
+}
+
+/** Validate the whole address book the delegate returned. */
+function validateContactList(raw: unknown): ContactRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new DelegateError(
+      "Protocol",
+      "Delegate contacts response is missing a contacts array.",
+    );
+  }
+  if (raw.length > MAX_CONTACTS) {
+    throw new DelegateError(
+      "Protocol",
+      `Delegate returned ${raw.length} contacts; maximum is ${MAX_CONTACTS}.`,
+    );
+  }
+  const entries = raw.map((entry, index) =>
+    validateContactRecord(entry, `contacts[${index}]`),
+  );
+  const userIds = new Set<string>();
+  const labels = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    if (userIds.has(entry.userId)) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate contacts response duplicates userId at index ${index}.`,
+      );
+    }
+    userIds.add(entry.userId);
+    if (labels.has(entry.label)) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate contacts response duplicates label at index ${index}.`,
+      );
+    }
+    labels.add(entry.label);
+  }
+  return entries;
+}
+
 export interface DelegateIdentity {
   /** 32-byte Ed25519 verifying key as 64 lowercase hex characters. */
   pubkey: string;
@@ -90,6 +191,16 @@ export interface DelegateIdentity {
    * for compatibility with delegates built before v5; normalize with `?? 1`.
    */
   adjustmentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `childNames` record, >= 1. Optional
+   * for compatibility with delegates built before v9; normalize with `?? 1`.
+   */
+  childNamesNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `selfName` record, >= 1. Optional
+   * for compatibility with delegates built before v9; normalize with `?? 1`.
+   */
+  selfNameNextSeq?: number;
 }
 
 /** Default per-payment cap in hundredths (10,000.00); 0 disables the cap. */
@@ -169,6 +280,11 @@ export function delegateNeverScanned(
 }
 
 export interface ExportedSecrets {
+  /**
+   * Delegate export payload version. v2 carries the private address book and
+   * both v6 name counters; v1 (a pre-v9 export) has neither. `?? 1`.
+   */
+  payloadVersion: number;
   /** 32-byte Ed25519 seed as 64 lowercase hex characters. */
   seed: string;
   nextSeq: number[];
@@ -186,6 +302,18 @@ export interface ExportedSecrets {
    * for compatibility with exports from delegates built before v5; `?? 1`.
    */
   adjustmentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `childNames` record, >= 1. Optional
+   * for compatibility with exports from delegates built before v9; `?? 1`.
+   */
+  childNamesNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `selfName` record, >= 1. Optional
+   * for compatibility with exports from delegates built before v9; `?? 1`.
+   */
+  selfNameNextSeq?: number;
+  /** The private address book; empty for a v1 payload. */
+  contacts: ContactRecord[];
 }
 
 type ResponseRecord = Record<string, unknown>;
@@ -255,6 +383,7 @@ interface PendingRequest {
   kind:
     | "identity"
     | "sign"
+    | "contacts"
     | "status"
     | "export"
     | "import"
@@ -446,7 +575,12 @@ export class DelegateClient {
     );
   }
 
-  /** Restore a predecessor's seed into this fresh delegate. */
+  /**
+   * Restore a predecessor's seed into this fresh delegate.
+   *
+   * v2 payloads carry the private address book; v1 payloads (a pre-v9 export)
+   * have no contacts and no name counters, so those default to empty and 1.
+   */
   async importSecrets(
     seed: string,
     nextSeq: number[],
@@ -454,12 +588,22 @@ export class DelegateClient {
     parentNextSeq = 1,
     paymentsNextSeq = 1,
     adjustmentsNextSeq = 1,
+    childNamesNextSeq = 1,
+    selfNameNextSeq = 1,
+    payloadVersion = 1,
+    contacts?: ContactRecord[],
     timeoutMs = 5_000,
   ): Promise<void> {
     if (!/^[0-9a-fA-F]{64}$/.test(seed)) {
       throw new DelegateError(
         "Protocol",
         "Refusing to import a seed that is not 32 bytes of hex.",
+      );
+    }
+    if (payloadVersion !== 1 && payloadVersion !== 2) {
+      throw new DelegateError(
+        "Protocol",
+        `payloadVersion must be 1 or 2, got ${payloadVersion}.`,
       );
     }
     this.validateNextSeq(nextSeq);
@@ -469,19 +613,108 @@ export class DelegateClient {
       this.validatePaymentsNextSeq(paymentsNextSeq);
     const validatedAdjustmentsNextSeq =
       this.validateAdjustmentsNextSeq(adjustmentsNextSeq);
-    await this.request(
-      "import",
+    const validatedChildNamesNextSeq =
+      this.validateChildNamesNextSeq(childNamesNextSeq);
+    const validatedSelfNameNextSeq =
+      this.validateSelfNameNextSeq(selfNameNextSeq);
+
+    const message: Record<string, unknown> = {
+      cmd: "import",
+      seed: seed.toLowerCase(),
+      payloadVersion,
+      nextSeq,
+      contactsNextSeq: validatedContactsNextSeq,
+      parentNextSeq: validatedParentNextSeq,
+      paymentsNextSeq: validatedPaymentsNextSeq,
+      adjustmentsNextSeq: validatedAdjustmentsNextSeq,
+      childNamesNextSeq: validatedChildNamesNextSeq,
+      selfNameNextSeq: validatedSelfNameNextSeq,
+    };
+    // Forward the address book when the caller has one (v2); a v1 payload
+    // omits it and the delegate restores an empty book.
+    if (contacts !== undefined || payloadVersion === 2) {
+      message.contacts = validateContactList(contacts ?? []);
+    }
+
+    await this.request("import", message, timeoutMs);
+  }
+
+  /** List the delegate's private address book. */
+  listContacts(timeoutMs = 5_000): Promise<ContactRecord[]> {
+    return this.request("contacts", { cmd: "contacts" }, timeoutMs).then(
+      (payload) => this.parseContacts(payload),
+    );
+  }
+
+  /** Add one address-book entry; the delegate returns the resulting array. */
+  async addContact(
+    entry: { label: string; userId: string; address?: string | null },
+    timeoutMs = 5_000,
+  ): Promise<ContactRecord[]> {
+    const validated = validateContactRecord({
+      label: entry.label,
+      userId: entry.userId,
+      address: entry.address ?? null,
+    });
+    return this.request(
+      "contacts",
       {
-        cmd: "import",
-        seed: seed.toLowerCase(),
-        nextSeq,
-        contactsNextSeq: validatedContactsNextSeq,
-        parentNextSeq: validatedParentNextSeq,
-        paymentsNextSeq: validatedPaymentsNextSeq,
-        adjustmentsNextSeq: validatedAdjustmentsNextSeq,
+        cmd: "contacts.add",
+        label: validated.label,
+        userId: validated.userId,
+        address: validated.address,
       },
       timeoutMs,
+    ).then((payload) => this.parseContacts(payload));
+  }
+
+  /**
+   * Change the label and/or address of one entry. An absent `address` leaves
+   * the stored address alone; an explicit `null` clears it (the delegate's
+   * `Some(None)` distinction).
+   */
+  async updateContact(
+    userId: string,
+    patch: { label?: string; address?: string | null },
+    timeoutMs = 5_000,
+  ): Promise<ContactRecord[]> {
+    if (!isLowerHex(userId, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "userId must be 64 lowercase hex characters.",
+      );
+    }
+    const message: Record<string, unknown> = {
+      cmd: "contacts.update",
+      userId,
+    };
+    if (patch.label !== undefined) {
+      message.label = validateContactLabel(patch.label, "label");
+    }
+    if ("address" in patch && patch.address !== undefined) {
+      message.address = validateContactAddress(patch.address, "address");
+    }
+    return this.request("contacts", message, timeoutMs).then((payload) =>
+      this.parseContacts(payload),
     );
+  }
+
+  /** Remove one address-book entry by userId. */
+  async removeContact(
+    userId: string,
+    timeoutMs = 5_000,
+  ): Promise<ContactRecord[]> {
+    if (!isLowerHex(userId, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "userId must be 64 lowercase hex characters.",
+      );
+    }
+    return this.request(
+      "contacts",
+      { cmd: "contacts.remove", userId },
+      timeoutMs,
+    ).then((payload) => this.parseContacts(payload));
   }
 
   async sign(
@@ -519,38 +752,79 @@ export class DelegateClient {
   }
 
   /**
-   * Sign the address book. The board serialises writes, so this and `sign` are
-   * never in flight together; both reuse the `"sign"` pending kind because the
-   * delegate answers `{ok, sig}` for each.
+   * Sign the owner's `selfName` record at `seq`; a null name signs the cleared
+   * tombstone. Reuses the `"sign"` pending kind because the delegate answers
+   * `{ok, sig}`, exactly like `signParent`.
    */
-  async signContacts(
+  async signSelfName(
     seq: number,
-    entries: Contact[],
+    name: string | null,
     timeoutMs = 15_000,
   ): Promise<string> {
     if (!Number.isSafeInteger(seq) || seq <= 0) {
       throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
     }
-    let validatedEntries: Contact[];
-    try {
-      validatedEntries = validateContactList(entries);
-    } catch (error) {
-      throw new DelegateError(
-        "Protocol",
-        errorMessage(error),
-      );
+    if (name !== null) {
+      if (typeof name !== "string" || name.length === 0) {
+        throw new DelegateError(
+          "Protocol",
+          "selfName must be null or a non-empty string.",
+        );
+      }
+      const length = utf8Length(name);
+      if (length > MAX_CONTACT_LABEL_BYTES) {
+        throw new DelegateError(
+          "Protocol",
+          `selfName is ${length} bytes; maximum is ${MAX_CONTACT_LABEL_BYTES}.`,
+        );
+      }
     }
 
     const payload = await this.request(
       "sign",
-      { cmd: "signContacts", seq, entries: validatedEntries },
+      { cmd: "signSelfName", seq, name },
       timeoutMs,
     );
+    return this.parseSignResponse(payload, "signSelfName");
+  }
+
+  /**
+   * Sign the whole `childNames` record at `seq`. Entries must be in strictly
+   * ascending slot order. Reuses the `"sign"` pending kind (`{ok, sig}`).
+   */
+  async signChildNames(
+    seq: number,
+    entries: ChildName[],
+    timeoutMs = 15_000,
+  ): Promise<string> {
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError("Protocol", `seq must be a positive integer, got ${seq}`);
+    }
+    let validatedEntries: ChildName[];
+    try {
+      validatedEntries = validateChildNameList(entries);
+    } catch (error) {
+      throw new DelegateError("Protocol", errorMessage(error));
+    }
+
+    const payload = await this.request(
+      "sign",
+      { cmd: "signChildNames", seq, entries: validatedEntries },
+      timeoutMs,
+    );
+    return this.parseSignResponse(payload, "signChildNames");
+  }
+
+  /** Validate the common `{ok, sig}` reply used by every sign command. */
+  private parseSignResponse(
+    payload: ResponseRecord,
+    command: string,
+  ): string {
     if (payload.ok !== true) {
       throw classifyDelegateFailure(
         typeof payload.error === "string"
           ? payload.error
-          : "signContacts was rejected",
+          : `${command} was rejected`,
       );
     }
     const sig = payload.sig;
@@ -735,6 +1009,8 @@ export class DelegateClient {
         index = this.pending.findIndex((pending) => pending.kind === "status");
       } else if (typeof payload.seed === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "export");
+      } else if (Array.isArray(payload.contacts)) {
+        index = this.pending.findIndex((pending) => pending.kind === "contacts");
       } else if (typeof payload.pubkey === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "identity");
       } else if (typeof payload.sig === "string") {
@@ -901,6 +1177,8 @@ export class DelegateClient {
       adjustmentsNextSeq: this.parseAdjustmentsNextSeq(
         payload.adjustmentsNextSeq,
       ),
+      childNamesNextSeq: this.parseChildNamesNextSeq(payload.childNamesNextSeq),
+      selfNameNextSeq: this.parseSelfNameNextSeq(payload.selfNameNextSeq),
     };
   }
 
@@ -1166,6 +1444,7 @@ export class DelegateClient {
     }
 
     return {
+      payloadVersion: this.parsePayloadVersion(payload.payloadVersion),
       seed: seed.toLowerCase(),
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
@@ -1174,7 +1453,43 @@ export class DelegateClient {
       adjustmentsNextSeq: this.parseAdjustmentsNextSeq(
         payload.adjustmentsNextSeq,
       ),
+      childNamesNextSeq: this.parseChildNamesNextSeq(payload.childNamesNextSeq),
+      selfNameNextSeq: this.parseSelfNameNextSeq(payload.selfNameNextSeq),
+      contacts: this.parseContactsField(payload.contacts),
     };
+  }
+
+  /** Validate a `{ok, contacts}` reply from any address-book command. */
+  private parseContacts(payload: ResponseRecord): ContactRecord[] {
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "contacts was rejected",
+      );
+    }
+    return this.parseContactsField(payload.contacts);
+  }
+
+  /** A v1 export has no contacts key; an older delegate therefore lists none. */
+  private parseContactsField(value: unknown): ContactRecord[] {
+    if (value === undefined) return [];
+    return validateContactList(value);
+  }
+
+  private parsePayloadVersion(value: unknown): number {
+    if (value === undefined) return 1;
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      (value !== 1 && value !== 2)
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate export response has a malformed payloadVersion (expected 1 or 2).",
+      );
+    }
+    return value;
   }
 
   private validateNextSeq(value: unknown): number[] {
@@ -1283,6 +1598,52 @@ export class DelegateClient {
       throw new DelegateError(
         "Protocol",
         "adjustmentsNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
+  }
+
+  /**
+   * A delegate built before v9 has no childNames counter; default it to 1 so
+   * the migrated identity can still sign its first child-name record.
+   */
+  private parseChildNamesNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validateChildNamesNextSeq(value);
+  }
+
+  private validateChildNamesNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "childNamesNextSeq must be a positive safe integer.",
+      );
+    }
+    return value;
+  }
+
+  /**
+   * A delegate built before v9 has no selfName counter; default it to 1 so the
+   * migrated identity can still sign its first self-name record.
+   */
+  private parseSelfNameNextSeq(value: unknown): number {
+    if (value === undefined) return 1;
+    return this.validateSelfNameNextSeq(value);
+  }
+
+  private validateSelfNameNextSeq(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "selfNameNextSeq must be a positive safe integer.",
       );
     }
     return value;

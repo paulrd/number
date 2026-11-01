@@ -5,6 +5,7 @@ import {
   childSlotIndex,
   hasLiveChild,
   octalAddress,
+  parentGivenName,
   parentValueFor,
   type LinkDeps,
 } from "./tree-view";
@@ -39,9 +40,27 @@ function board(
   return {
     ownerId: owner(name),
     state,
+    contacts: [],
     codeHash: "contract",
     legacy: false,
   };
+}
+
+/** Add a signed `childNames` record to a snapshot, in slot order. */
+function namedChildren(
+  snapshot: BoardSnapshot,
+  entries: Array<{ slot: number; child: string; name: string }>,
+): BoardSnapshot {
+  snapshot.state.childNames = {
+    seq: 1,
+    entries: entries.map((item) => ({
+      slot: item.slot,
+      userId: owner(item.child),
+      name: item.name,
+    })),
+    sig: SIG,
+  };
+  return snapshot;
 }
 
 function depsOf(...boards: BoardSnapshot[]): LinkDeps {
@@ -185,6 +204,38 @@ describe("octalAddress", () => {
       problem: null,
       blockedBy: null,
     });
+  });
+});
+
+describe("parentGivenName", () => {
+  it("reads the parent's name for the child from childNames", () => {
+    const parent = namedChildren(board("parent", null, [null, "child"]), [
+      { slot: 1, child: "child", name: "Alice" },
+    ]);
+    expect(parentGivenName(parent, owner("child"))).toBe("Alice");
+  });
+
+  it("ignores an entry whose userId no longer matches the slot", () => {
+    // The slot was rebound to a different child after the name was signed, or
+    // the name's slot write lost. The stale entry must not label anyone.
+    const parent = namedChildren(board("parent", null, [null, "child"]), [
+      { slot: 1, child: "other", name: "Stale name" },
+    ]);
+    expect(parentGivenName(parent, owner("child"))).toBeNull();
+  });
+
+  it("ignores an entry for a slot that no longer holds the child", () => {
+    const parent = namedChildren(board("parent", null, ["child"]), [
+      { slot: 3, child: "child", name: "Wrong slot" },
+    ]);
+    expect(parentGivenName(parent, owner("child"))).toBeNull();
+  });
+
+  it("returns null when the parent has no slot for the child", () => {
+    const parent = namedChildren(board("parent", null), [
+      { slot: 0, child: "child", name: "Alice" },
+    ]);
+    expect(parentGivenName(parent, owner("child"))).toBeNull();
   });
 });
 

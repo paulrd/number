@@ -5,6 +5,9 @@
  * slot whose contact is the child owner, and the child board's `parent.userId`
  * is the parent owner. A legacy (v2) snapshot has no parent record, so it cannot
  * be the child side, but its signed slots still make it a valid parent side.
+ * Names come from the boards themselves: a board's own `selfName`, and the
+ * `childNames` entry its parent signed for the slot that holds it. Nothing here
+ * reads the private address book.
  * Everything here is read-only; the caller decides when a board may be edited
  * (`BoardSnapshot` from the own delegate).
  *
@@ -13,7 +16,7 @@
  * reconnect; local writes do not change the remote snapshots it holds.
  */
 import type { BoardSnapshot } from "./board";
-import type { Contact, Entry, StateV3 } from "./state";
+import type { Entry, StateV3 } from "./state";
 import { errorMessage } from "./util";
 
 export const MAX_TREE_DEPTH = 32;
@@ -44,12 +47,12 @@ export interface TrailStep {
   ownerId: string;
   kind: TrailKind;
   /**
-   * The address book of the board just below this step. It is the one that
-   * names this board (a child names its parent), so labels stay meaningful on
-   * deeper paths where the current board's contacts do not know the ancestor.
+   * The name the board's parent gives it, from the parent's signed
+   * `childNames` record. Null when the parent has not named it (or the record
+   * no longer describes the slot).
    */
-  contacts: Contact[];
-  /** The target board's own name, from its self-entry. */
+  parentName: string | null;
+  /** The board's own signed name, from its `selfName` record. */
   selfName: string | null;
   /**
    * True when this board was read from a previous (v2) contract generation.
@@ -124,16 +127,24 @@ export async function walkParentChain(
   return { hitOwnerId: null, loop: false, truncated: false, error: null };
 }
 
-/** The contact entry that names a board, i.e. its self-entry. */
-export function selfContact(state: StateV3, ownerId: string): Contact | null {
-  return (
-    state.contacts.entries.find((contact) => contact.userId === ownerId) ?? null
+/**
+ * The name a parent board gives a child, from the parent's signed `childNames`
+ * record. The entry is only authoritative while it still describes the slot:
+ * its `slot` must be the slot that currently points at `childOwnerId` and its
+ * `userId` must be that same child. A stale entry (slot rebound, or a name
+ * whose slot write lost) is ignored rather than shown.
+ */
+export function parentGivenName(
+  parent: Pick<BoardSnapshot, "state">,
+  childOwnerId: string,
+): string | null {
+  const slot = childSlotIndex(parent.state, childOwnerId);
+  if (slot === null) return null;
+  const entry = parent.state.childNames.entries.find(
+    (candidate) =>
+      candidate.slot === slot && candidate.userId === childOwnerId,
   );
-}
-
-/** A board's own name, or null when it has no self-entry yet. */
-export function selfNameOf(state: StateV3, ownerId: string): string | null {
-  return selfContact(state, ownerId)?.label ?? null;
+  return entry?.name ?? null;
 }
 
 /**
@@ -188,7 +199,7 @@ export interface ParentValue {
   slot: number;
   entry: Entry;
   parentOwnerId: string;
-  /** The parent's own name, when its address book has a self-entry. */
+  /** The parent's own signed name, when it has one. */
   parentName: string | null;
 }
 
@@ -209,7 +220,7 @@ export function parentValueFor(
     slot,
     entry,
     parentOwnerId: parent.ownerId,
-    parentName: selfNameOf(parent.state, parent.ownerId),
+    parentName: parent.state.selfName.name,
   };
 }
 
@@ -391,11 +402,18 @@ export async function buildTrail(
   current: BoardSnapshot,
   deps: LinkDeps,
 ): Promise<Trail> {
-  const ancestors: TrailStep[] = [];
+  // The mutual chain, child first. Steps are labelled afterwards so a parent's
+  // `childNames` record is available when the child's name is resolved.
+  const chain: BoardSnapshot[] = [current];
   const seen = new Set<string>([current.ownerId]);
-  let node = current;
-  let pending: TrailStep | null = null;
+  let pending: {
+    ownerId: string;
+    kind: TrailKind;
+    selfName: string | null;
+    legacy: boolean;
+  } | null = null;
   let warning: string | null = null;
+  let node = current;
 
   for (let depth = 0; ; depth += 1) {
     const parentId = node.state.parent.userId;
@@ -416,7 +434,6 @@ export async function buildTrail(
       pending = {
         ownerId: parentId,
         kind: "unreadable",
-        contacts: node.state.contacts.entries,
         selfName: null,
         legacy: false,
       };
@@ -427,7 +444,6 @@ export async function buildTrail(
       pending = {
         ownerId: parentId,
         kind: "not-created",
-        contacts: node.state.contacts.entries,
         selfName: null,
         legacy: false,
       };
@@ -437,37 +453,35 @@ export async function buildTrail(
       pending = {
         ownerId: parentId,
         kind: "pending",
-        contacts: node.state.contacts.entries,
-        selfName: selfNameOf(result.snapshot.state, parentId),
+        selfName: result.snapshot.state.selfName.name,
         legacy: result.snapshot.legacy,
       };
       break;
     }
 
     seen.add(parentId);
-    ancestors.push({
-      ownerId: parentId,
-      kind: "ancestor",
-      contacts: node.state.contacts.entries,
-      selfName: selfNameOf(result.snapshot.state, parentId),
-      legacy: result.snapshot.legacy,
-    });
+    chain.push(result.snapshot);
     node = result.snapshot;
   }
 
   const steps: TrailStep[] = [];
-  if (pending !== null) steps.push(pending);
-  steps.push(...ancestors.reverse());
-  steps.push({
-    ownerId: current.ownerId,
-    kind: "current",
-    // There is no board below the current step in the mutual chain, so the
-    // current board's own address book is not a "child names its parent"
-    // source. Its self-entry is exposed separately as `selfName`.
-    contacts: [],
-    selfName: selfNameOf(current.state, current.ownerId),
-    legacy: current.legacy,
-  });
+  if (pending !== null) {
+    steps.push({ ...pending, parentName: null });
+  }
+  // chain[0] is the current board, chain[1] its parent, and so on. Emit root
+  // first so the list reads root → current.
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const board = chain[index];
+    const parent = index + 1 < chain.length ? chain[index + 1] : null;
+    steps.push({
+      ownerId: board.ownerId,
+      kind: index === 0 ? "current" : "ancestor",
+      parentName:
+        parent === null ? null : parentGivenName(parent, board.ownerId),
+      selfName: board.state.selfName.name,
+      legacy: board.legacy,
+    });
+  }
   return { steps, warning };
 }
 

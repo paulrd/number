@@ -1,5 +1,9 @@
 # number
 
+UI display name: **Tally**. The repository, crate names and on-disk keys keep
+`number`: renaming them changes the WASM bytes, and so the contract id and
+delegate key, which would strand every existing board.
+
 A small Freenet dApp: one personal board of **8 number slots** and a shared
 **address book**, arranged as a **tree of boards**. Each board is a node: its 8
 slots are its children (each linked to a contact — label + user id/public key)

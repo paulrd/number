@@ -1,10 +1,11 @@
-//! `number-delegate` — private key custody, slot signing and address-book
-//! signing for the number app.
+//! `number-delegate` — private key custody, slot signing and the private
+//! address book for the number app.
 //!
 //! The delegate owns a single Ed25519 key pair. The 32-byte seed, a per-slot
-//! monotonic sequence counter, a contacts sequence counter, a parent sequence
-//! counter and a payments sequence counter live in the delegate's secret
-//! store; the matching public key is the owner key the
+//! monotonic sequence counter, a parent sequence counter, a payments sequence
+//! counter and the two v6 name counters live in the delegate's secret store;
+//! the private address book is stored there too and is never replicated. The
+//! matching public key is the owner key the
 //! `number-contract` instance is parameterised by. The delegate itself is
 //! parameterised by the web container contract id it serves, and refuses every
 //! other caller.
@@ -42,7 +43,11 @@ pub const USER_ID_HEX_LEN: usize = 64;
 pub const WEBAPP_ID_LEN: usize = 32;
 
 /// Bumped when the delegate protocol changes; reported by `status`/`export`.
-pub const DELEGATE_VERSION: u32 = 8;
+pub const DELEGATE_VERSION: u32 = 9;
+
+/// Version of the export/import payload shape (independent of the wire state
+/// version). Version 1 payloads are accepted by `import`.
+pub const EXPORT_PAYLOAD_VERSION: u32 = 2;
 
 /// Secret-store key holding the raw 32-byte Ed25519 seed.
 pub const SECRET_SEED: &[u8] = b"number.v1.seed";
@@ -50,8 +55,19 @@ pub const SECRET_SEED: &[u8] = b"number.v1.seed";
 /// Prefix for the per-slot `u64` little-endian next-sequence key.
 pub const NEXTSEQ_PREFIX: &str = "number.v1.nextseq.";
 
-/// Secret-store key holding the contacts `u64` little-endian next-sequence.
+/// Secret-store key holding the v2 contacts `u64` little-endian next-sequence.
+/// Retained for export compatibility: contacts are no longer signed, so this
+/// counter is never incremented, but it survives an export for old clients.
 pub const CONTACTS_NEXTSEQ_KEY: &[u8] = b"number.v2.nextseq.contacts";
+
+/// Secret-store key holding the private address book as a JSON array.
+pub const CONTACTS_KEY: &[u8] = b"number.v9.contacts";
+
+/// Secret-store key holding the `childNames` `u64` little-endian next-sequence.
+pub const CHILD_NAMES_NEXTSEQ_KEY: &[u8] = b"number.v9.nextseq.childnames";
+
+/// Secret-store key holding the `selfName` `u64` little-endian next-sequence.
+pub const SELF_NAME_NEXTSEQ_KEY: &[u8] = b"number.v9.nextseq.selfname";
 
 /// Secret-store key holding the parent `u64` little-endian next-sequence.
 pub const PARENT_NEXTSEQ_KEY: &[u8] = b"number.v3.nextseq.parent";
@@ -89,13 +105,22 @@ pub const MAX_ADJUSTMENTS: usize = 32;
 /// Maximum adjustment note length in UTF-8 bytes.
 pub const MAX_ADJUSTMENT_NOTE_BYTES: usize = 128;
 
+/// The only board-state version the auto-advance delta encoder can emit.
+///
+/// `apply_plan` must never emit a delta whose `v` differs from the board it
+/// read: a v5 board would be written a v6 delta (and a future v7 would be
+/// silently mis-encoded). Bump this together with the delta shape.
+const AUTO_ADVANCE_DELTA_VERSION: u8 = 6;
+
 /// Domain separator for the canonical slot signing bytes (`DESIGN.md` §2).
 /// Unchanged from v2 so v2 signatures keep validating.
 const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
 
-/// Domain separator for the canonical contacts signing bytes (`DESIGN.md` §2).
-/// Unchanged from v2.
-const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
+/// Domain separator for the v6 `selfName` signing bytes.
+const SIGNING_DOMAIN_SELF_NAME: &[u8] = b"number:v6:selfname";
+
+/// Domain separator for the v6 `childNames` signing bytes.
+const SIGNING_DOMAIN_CHILD_NAMES: &[u8] = b"number:v6:childnames";
 
 /// Domain separator for the canonical parent signing bytes (`DESIGN.md` §2).
 const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
@@ -140,12 +165,25 @@ fn is_lower_hex(value: &str, len: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// One address-book entry, mirroring the contract's wire shape.
+/// One private address-book entry. This is delegate-only state; it is never
+/// replicated or signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
     pub label: String,
     #[serde(rename = "userId")]
     pub user_id: String,
+    /// An optional derived octal address used to route payments.
+    #[serde(default)]
+    pub address: Option<String>,
+}
+
+/// One `childNames` entry: a parent's name for the child in `slot`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildName {
+    pub slot: u8,
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    pub name: String,
 }
 
 /// An optional string field. `null` and absent are equivalent on the wire; the
@@ -184,7 +222,8 @@ fn check_len(field: &str, value: Option<&str>, max: usize) -> Option<String> {
     }
 }
 
-/// Validate a contact list exactly as the contract does.
+/// Validate the private address-book invariants the v5 contract used to
+/// enforce, plus the optional routing address.
 fn contacts_error(entries: &[Contact]) -> Option<String> {
     if entries.len() > MAX_CONTACTS {
         return Some(format!(
@@ -207,6 +246,13 @@ fn contacts_error(entries: &[Contact]) -> Option<String> {
                 "contact {index} userId must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
             ));
         }
+        if let Some(address) = contact.address.as_deref() {
+            if !is_address(address) {
+                return Some(format!(
+                    "contact {index} address must be at most {MAX_ADDRESS_DIGITS} octal digits 0..7"
+                ));
+            }
+        }
         let earlier = &entries[..index];
         if earlier.iter().any(|other| other.user_id == contact.user_id) {
             return Some(format!("contact {index} duplicates a userId"));
@@ -216,6 +262,60 @@ fn contacts_error(entries: &[Contact]) -> Option<String> {
         }
     }
     None
+}
+
+/// Validate a `childNames` record exactly as `DESIGN-v6.md` §3 requires.
+fn child_names_error(entries: &[ChildName]) -> Option<String> {
+    if entries.len() > SLOT_COUNT {
+        return Some(format!(
+            "childNames has {} entries; maximum is {SLOT_COUNT}",
+            entries.len()
+        ));
+    }
+    let mut previous: Option<u8> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if usize::from(entry.slot) >= SLOT_COUNT {
+            return Some(format!(
+                "childNames entry {index} slot {} is out of range; must be 0..{}",
+                entry.slot,
+                SLOT_COUNT - 1
+            ));
+        }
+        if previous.is_some_and(|slot| entry.slot <= slot) {
+            return Some(format!(
+                "childNames entry {index} slot must be strictly ascending"
+            ));
+        }
+        if !is_user_id(&entry.user_id) {
+            return Some(format!(
+                "childNames entry {index} userId must be exactly {USER_ID_HEX_LEN} lowercase hex characters"
+            ));
+        }
+        if entry.name.is_empty() {
+            return Some(format!("childNames entry {index} name must not be empty"));
+        }
+        if entry.name.len() > MAX_CONTACT_LABEL_BYTES {
+            return Some(format!(
+                "childNames entry {index} name is {} bytes; maximum is {MAX_CONTACT_LABEL_BYTES}",
+                entry.name.len()
+            ));
+        }
+        previous = Some(entry.slot);
+    }
+    None
+}
+
+/// Validate a `selfName` value exactly as `DESIGN-v6.md` §2 requires.
+fn self_name_error(name: Option<&str>) -> Option<String> {
+    match name {
+        None => None,
+        Some("") => Some("selfName name must not be empty".into()),
+        Some(name) if name.len() > MAX_CONTACT_LABEL_BYTES => Some(format!(
+            "selfName name is {} bytes; maximum is {MAX_CONTACT_LABEL_BYTES}",
+            name.len()
+        )),
+        Some(_) => None,
+    }
 }
 
 /// Maximum digits in a payment address (`DESIGN-payments.md`).
@@ -620,11 +720,46 @@ enum Request {
         #[serde(default)]
         entry: Option<Entry>,
     },
-    /// Sign a whole address-book record at `seq`.
-    #[serde(rename = "signContacts")]
-    SignContacts {
+    /// Sign a whole `selfName` record at `seq`.
+    #[serde(rename = "signSelfName")]
+    SignSelfName {
         seq: u64,
-        entries: Vec<Contact>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Sign a whole `childNames` record at `seq`.
+    #[serde(rename = "signChildNames")]
+    SignChildNames {
+        seq: u64,
+        entries: Vec<ChildName>,
+    },
+    /// List the private address book.
+    #[serde(rename = "contacts")]
+    Contacts,
+    /// Add one address-book entry.
+    #[serde(rename = "contacts.add")]
+    ContactsAdd {
+        label: String,
+        #[serde(rename = "userId")]
+        user_id: String,
+        #[serde(default)]
+        address: Option<String>,
+    },
+    /// Change the label and/or address of one address-book entry.
+    #[serde(rename = "contacts.update")]
+    ContactsUpdate {
+        #[serde(rename = "userId")]
+        user_id: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_some")]
+        address: Option<Option<String>>,
+    },
+    /// Remove one address-book entry by `userId`.
+    #[serde(rename = "contacts.remove")]
+    ContactsRemove {
+        #[serde(rename = "userId")]
+        user_id: String,
     },
     /// Sign the parent record at `seq`; `userId` null clears the parent.
     #[serde(rename = "signParent")]
@@ -671,10 +806,13 @@ enum Request {
     /// Return the owner seed and counters for a successor delegate.
     /// Only the pinned webapp may ask; this is the forward-only migration path.
     Export,
-    /// Restore an exported seed into a fresh delegate. Refused once a seed
-    /// exists, so a later request cannot overwrite the owner identity.
+    /// Restore an exported seed, counters and address book into a fresh
+    /// delegate. Refused once a seed exists, so a later request cannot
+    /// overwrite the owner identity.
     Import {
         seed: String,
+        #[serde(rename = "payloadVersion", default = "default_payload_version")]
+        payload_version: u32,
         #[serde(rename = "nextSeq")]
         next_seq: Vec<u64>,
         #[serde(rename = "contactsNextSeq", default = "default_contacts_next_seq")]
@@ -688,7 +826,28 @@ enum Request {
             default = "default_adjustments_next_seq"
         )]
         adjustments_next_seq: u64,
+        #[serde(rename = "childNamesNextSeq", default = "default_contacts_next_seq")]
+        child_names_next_seq: u64,
+        #[serde(rename = "selfNameNextSeq", default = "default_contacts_next_seq")]
+        self_name_next_seq: u64,
+        #[serde(default)]
+        contacts: Vec<Contact>,
     },
+}
+
+/// Deserialize a field as `Some(value)` when present, so `Option<Option<T>>`
+/// can distinguish an absent field (`None`) from an explicit `null`
+/// (`Some(None)`) in `contacts.update`.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn default_payload_version() -> u32 {
+    1
 }
 
 fn default_contacts_next_seq() -> u64 {
@@ -730,9 +889,18 @@ pub struct IdentityResponse {
     pub payments_next_seq: u64,
     #[serde(rename = "adjustmentsNextSeq")]
     pub adjustments_next_seq: u64,
+    #[serde(rename = "childNamesNextSeq")]
+    pub child_names_next_seq: u64,
+    #[serde(rename = "selfNameNextSeq")]
+    pub self_name_next_seq: u64,
 }
 
-/// `{"ok":true,"seq":N,"sig":"<128 hex>"}` for a v5 adjustment.
+/// `{"ok":true,"contacts":[{...}]}` for every address-book command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactsResponse {
+    pub ok: bool,
+    pub contacts: Vec<Contact>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdjustmentResponse {
     pub ok: bool,
@@ -767,6 +935,10 @@ pub struct StatusResponse {
     pub payments_next_seq: Option<u64>,
     #[serde(rename = "adjustmentsNextSeq", skip_serializing_if = "Option::is_none")]
     pub adjustments_next_seq: Option<u64>,
+    #[serde(rename = "childNamesNextSeq", skip_serializing_if = "Option::is_none")]
+    pub child_names_next_seq: Option<u64>,
+    #[serde(rename = "selfNameNextSeq", skip_serializing_if = "Option::is_none")]
+    pub self_name_next_seq: Option<u64>,
     /// Whether a valid auto-advance configuration exists.
     pub configured: bool,
     /// Empty until configured. Always present on a v8 response.
@@ -798,6 +970,8 @@ pub struct StatusResponse {
 pub struct ExportResponse {
     pub ok: bool,
     pub version: u32,
+    #[serde(rename = "payloadVersion")]
+    pub payload_version: u32,
     pub seed: String,
     #[serde(rename = "nextSeq")]
     pub next_seq: [u64; SLOT_COUNT],
@@ -809,6 +983,11 @@ pub struct ExportResponse {
     pub payments_next_seq: u64,
     #[serde(rename = "adjustmentsNextSeq")]
     pub adjustments_next_seq: u64,
+    #[serde(rename = "childNamesNextSeq")]
+    pub child_names_next_seq: u64,
+    #[serde(rename = "selfNameNextSeq")]
+    pub self_name_next_seq: u64,
+    pub contacts: Vec<Contact>,
 }
 
 /// `{"ok":true}`.
@@ -840,6 +1019,7 @@ pub enum Response {
     Identity(IdentityResponse),
     Sign(SignResponse),
     Adjustment(AdjustmentResponse),
+    Contacts(ContactsResponse),
     Status(Box<StatusResponse>),
     Export(ExportResponse),
     Import(ImportResponse),
@@ -1006,6 +1186,8 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 parent_next_seq,
                 payments_next_seq,
                 adjustments_next_seq,
+                child_names_next_seq,
+                self_name_next_seq,
             )) => Response::Identity(IdentityResponse {
                 ok: true,
                 pubkey,
@@ -1014,6 +1196,8 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 parent_next_seq,
                 payments_next_seq,
                 adjustments_next_seq,
+                child_names_next_seq,
+                self_name_next_seq,
             }),
             Err(error) => Response::error(error),
         },
@@ -1021,8 +1205,47 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
             Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
             Err(error) => Response::error(error),
         },
-        Request::SignContacts { seq, entries } => match sign_contacts_with(store, seq, &entries) {
-            Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+        Request::SignSelfName { seq, name } => {
+            match sign_self_name_with(store, seq, name.as_deref()) {
+                Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+                Err(error) => Response::error(error),
+            }
+        }
+        Request::SignChildNames { seq, entries } => {
+            match sign_child_names_with(store, seq, &entries) {
+                Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+                Err(error) => Response::error(error),
+            }
+        }
+        Request::Contacts => match contacts_with(store) {
+            Ok(contacts) => Response::Contacts(ContactsResponse { ok: true, contacts }),
+            Err(error) => Response::error(error),
+        },
+        Request::ContactsAdd {
+            label,
+            user_id,
+            address,
+        } => match contacts_add_with(
+            store,
+            Contact {
+                label,
+                user_id,
+                address,
+            },
+        ) {
+            Ok(contacts) => Response::Contacts(ContactsResponse { ok: true, contacts }),
+            Err(error) => Response::error(error),
+        },
+        Request::ContactsUpdate {
+            user_id,
+            label,
+            address,
+        } => match contacts_update_with(store, &user_id, label, address) {
+            Ok(contacts) => Response::Contacts(ContactsResponse { ok: true, contacts }),
+            Err(error) => Response::error(error),
+        },
+        Request::ContactsRemove { user_id } => match contacts_remove_with(store, &user_id) {
+            Ok(contacts) => Response::Contacts(ContactsResponse { ok: true, contacts }),
             Err(error) => Response::error(error),
         },
         Request::SignParent { seq, user_id } => {
@@ -1067,39 +1290,56 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
         },
         Request::Export => match export_with(store) {
             Ok((
-                seed,
-                next_seq,
-                contacts_next_seq,
-                parent_next_seq,
-                payments_next_seq,
-                adjustments_next_seq,
+                (
+                    seed,
+                    next_seq,
+                    contacts_next_seq,
+                    parent_next_seq,
+                    payments_next_seq,
+                    adjustments_next_seq,
+                    child_names_next_seq,
+                    self_name_next_seq,
+                ),
+                contacts,
             )) => Response::Export(ExportResponse {
                 ok: true,
                 version: DELEGATE_VERSION,
+                payload_version: EXPORT_PAYLOAD_VERSION,
                 seed,
                 next_seq,
                 contacts_next_seq,
                 parent_next_seq,
                 payments_next_seq,
                 adjustments_next_seq,
+                child_names_next_seq,
+                self_name_next_seq,
+                contacts,
             }),
             Err(error) => Response::error(error),
         },
         Request::Import {
             seed,
+            payload_version,
             next_seq,
             contacts_next_seq,
             parent_next_seq,
             payments_next_seq,
             adjustments_next_seq,
+            child_names_next_seq,
+            self_name_next_seq,
+            contacts,
         } => match import_with(
             store,
             &seed,
+            payload_version,
             &next_seq,
             contacts_next_seq,
             parent_next_seq,
             payments_next_seq,
             adjustments_next_seq,
+            child_names_next_seq,
+            self_name_next_seq,
+            &contacts,
         ) {
             Ok(()) => Response::Import(ImportResponse { ok: true }),
             Err(error) => Response::error(error),
@@ -1108,10 +1348,9 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
 }
 
 /// Return `(hex public key, nextSeq[0..8], contactsNextSeq, parentNextSeq,
-/// paymentsNextSeq)`, creating the seed on first use.
-/// `(pubkey hex, nextSeq, contactsNextSeq, parentNextSeq, paymentsNextSeq,
-/// adjustmentsNextSeq)`.
-pub type OwnerCounters = (String, [u64; SLOT_COUNT], u64, u64, u64, u64);
+/// paymentsNextSeq, adjustmentsNextSeq, childNamesNextSeq, selfNameNextSeq)`,
+/// creating the seed on first use.
+pub type OwnerCounters = (String, [u64; SLOT_COUNT], u64, u64, u64, u64, u64, u64);
 
 pub fn identity_with(store: &mut impl SecretStore) -> Result<OwnerCounters, String> {
     let seed = load_or_create_seed(store)?;
@@ -1126,6 +1365,8 @@ pub fn identity_with(store: &mut impl SecretStore) -> Result<OwnerCounters, Stri
     let parent_next_seq = read_parent_next_seq(store)?;
     let payments_next_seq = read_payments_next_seq(store)?;
     let adjustments_next_seq = read_adjustments_next_seq(store)?;
+    let child_names_next_seq = read_child_names_next_seq(store)?;
+    let self_name_next_seq = read_self_name_next_seq(store)?;
 
     Ok((
         pubkey,
@@ -1134,6 +1375,8 @@ pub fn identity_with(store: &mut impl SecretStore) -> Result<OwnerCounters, Stri
         parent_next_seq,
         payments_next_seq,
         adjustments_next_seq,
+        child_names_next_seq,
+        self_name_next_seq,
     ))
 }
 
@@ -1152,6 +1395,8 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Ok(status_response(
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -1182,6 +1427,8 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
     let parent_next_seq = read_parent_next_seq(store)?;
     let payments_next_seq = read_payments_next_seq(store)?;
     let adjustments_next_seq = read_adjustments_next_seq(store)?;
+    let child_names_next_seq = read_child_names_next_seq(store)?;
+    let self_name_next_seq = read_self_name_next_seq(store)?;
 
     Ok(status_response(
         true,
@@ -1191,6 +1438,8 @@ pub fn status_with(store: &impl SecretStore) -> Result<StatusResponse, String> {
         Some(parent_next_seq),
         Some(payments_next_seq),
         Some(adjustments_next_seq),
+        Some(child_names_next_seq),
+        Some(self_name_next_seq),
         configured,
         config.as_ref(),
         &inbox,
@@ -1208,6 +1457,8 @@ fn status_response(
     parent_next_seq: Option<u64>,
     payments_next_seq: Option<u64>,
     adjustments_next_seq: Option<u64>,
+    child_names_next_seq: Option<u64>,
+    self_name_next_seq: Option<u64>,
     configured: bool,
     config: Option<&DelegateConfig>,
     inbox: &InboxState,
@@ -1224,6 +1475,8 @@ fn status_response(
         parent_next_seq,
         payments_next_seq,
         adjustments_next_seq,
+        child_names_next_seq,
+        self_name_next_seq,
         configured,
         code_hashes: config
             .map(|config| config.code_hashes.clone())
@@ -1243,12 +1496,15 @@ fn status_response(
     }
 }
 
-/// Export the owner seed and counters for a successor delegate.
+/// Export the owner seed, counters and private address book for a successor
+/// delegate.
 ///
 /// Authorization is the same pinned-webapp gate as every other request. This
 /// is the forward-only migration path: a successor can only recover from a
-/// predecessor whose already-published WASM answers this command.
-pub fn export_with(store: &impl SecretStore) -> Result<OwnerCounters, String> {
+/// predecessor whose already-published WASM answers this command. Everything
+/// is read before returning, so a corrupt secret fails the export rather than
+/// producing a partial backup.
+pub fn export_with(store: &impl SecretStore) -> Result<(OwnerCounters, Vec<Contact>), String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Err("refused export: this delegate has no seed yet".into());
     };
@@ -1267,33 +1523,53 @@ pub fn export_with(store: &impl SecretStore) -> Result<OwnerCounters, String> {
     let parent_next_seq = read_parent_next_seq(store)?;
     let payments_next_seq = read_payments_next_seq(store)?;
     let adjustments_next_seq = read_adjustments_next_seq(store)?;
+    let child_names_next_seq = read_child_names_next_seq(store)?;
+    let self_name_next_seq = read_self_name_next_seq(store)?;
+    let contacts = load_contacts(store)?;
 
     Ok((
-        hex::encode(seed),
-        next_seq,
-        contacts_next_seq,
-        parent_next_seq,
-        payments_next_seq,
-        adjustments_next_seq,
+        (
+            hex::encode(seed),
+            next_seq,
+            contacts_next_seq,
+            parent_next_seq,
+            payments_next_seq,
+            adjustments_next_seq,
+            child_names_next_seq,
+            self_name_next_seq,
+        ),
+        contacts,
     ))
 }
 
-/// Restore an exported seed into a fresh delegate.
+/// Restore an exported seed, counters and address book into a fresh delegate.
 ///
 /// Refused once a seed exists: a later request must not silently replace the
-/// owner identity. Counters are written first, so a failure to write the seed
-/// leaves no half-initialized identity behind and the import can be retried.
+/// owner identity. Everything is validated before any write. Counters and
+/// contacts are written first and the seed last, so a failure to write the
+/// seed leaves no half-initialized identity behind and the import can be
+/// retried; a failed contacts write likewise never writes the seed.
+#[allow(clippy::too_many_arguments)]
 pub fn import_with(
     store: &mut impl SecretStore,
     seed_hex: &str,
+    payload_version: u32,
     next_seq: &[u64],
     contacts_next_seq: u64,
     parent_next_seq: u64,
     payments_next_seq: u64,
     adjustments_next_seq: u64,
+    child_names_next_seq: u64,
+    self_name_next_seq: u64,
+    contacts: &[Contact],
 ) -> Result<(), String> {
     if store.get_secret(SECRET_SEED).is_some() {
         return Err("refused import: this delegate already has a seed".into());
+    }
+    if payload_version != 1 && payload_version != EXPORT_PAYLOAD_VERSION {
+        return Err(format!(
+            "unsupported payloadVersion {payload_version}; expected 1 or {EXPORT_PAYLOAD_VERSION}"
+        ));
     }
     if next_seq.len() != SLOT_COUNT {
         return Err(format!(
@@ -1315,6 +1591,15 @@ pub fn import_with(
     }
     if adjustments_next_seq == 0 {
         return Err("adjustmentsNextSeq must be greater than 0".into());
+    }
+    if child_names_next_seq == 0 {
+        return Err("childNamesNextSeq must be greater than 0".into());
+    }
+    if self_name_next_seq == 0 {
+        return Err("selfNameNextSeq must be greater than 0".into());
+    }
+    if let Some(error) = contacts_error(contacts) {
+        return Err(error);
     }
 
     let seed_bytes =
@@ -1341,6 +1626,13 @@ pub fn import_with(
     if !store.set_secret(ADJUSTMENTS_NEXTSEQ_KEY, &adjustments_next_seq.to_le_bytes()) {
         return Err("failed to persist adjustmentsNextSeq".into());
     }
+    if !store.set_secret(CHILD_NAMES_NEXTSEQ_KEY, &child_names_next_seq.to_le_bytes()) {
+        return Err("failed to persist childNamesNextSeq".into());
+    }
+    if !store.set_secret(SELF_NAME_NEXTSEQ_KEY, &self_name_next_seq.to_le_bytes()) {
+        return Err("failed to persist selfNameNextSeq".into());
+    }
+    write_json(store, CONTACTS_KEY, &contacts)?;
     if !store.set_secret(SECRET_SEED, &seed) {
         return Err("failed to persist imported seed".into());
     }
@@ -1395,34 +1687,70 @@ pub fn sign_with(
     Ok(hex::encode(signature.to_bytes()))
 }
 
-/// Validate, sign, then advance the contacts sequence counter.
-pub fn sign_contacts_with(
+/// Validate, sign, then advance the `selfName` sequence counter.
+///
+/// A `None` name signs the cleared tombstone (tag `0`); it is only reachable
+/// at `seq > 0`, and `seq == 0` is the empty record that is never signed.
+pub fn sign_self_name_with(
     store: &mut impl SecretStore,
     seq: u64,
-    entries: &[Contact],
+    name: Option<&str>,
 ) -> Result<String, String> {
     if seq == 0 {
         return Err("seq must be greater than 0".into());
     }
-    let next_seq = read_contacts_next_seq(store)?;
+    let next_seq = read_self_name_next_seq(store)?;
     if seq < next_seq {
         return Err(format!(
-            "stale seq {seq} for contacts; need at least {next_seq}"
+            "stale seq {seq} for selfName; need at least {next_seq}"
         ));
     }
     let following = seq
         .checked_add(1)
         .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
-    if let Some(error) = contacts_error(entries) {
+    if let Some(error) = self_name_error(name) {
         return Err(error);
     }
 
     let seed = load_or_create_seed(store)?;
     let signing_key = SigningKey::from_bytes(&seed);
-    let signature = signing_key.sign(&contacts_signing_bytes(seq, entries));
+    let signature = signing_key.sign(&self_name_signing_bytes(seq, name));
 
-    if !store.set_secret(CONTACTS_NEXTSEQ_KEY, &following.to_le_bytes()) {
-        return Err("failed to persist contactsNextSeq".into());
+    if !store.set_secret(SELF_NAME_NEXTSEQ_KEY, &following.to_le_bytes()) {
+        return Err("failed to persist selfNameNextSeq".into());
+    }
+
+    Ok(hex::encode(signature.to_bytes()))
+}
+
+/// Validate, sign, then advance the `childNames` sequence counter.
+pub fn sign_child_names_with(
+    store: &mut impl SecretStore,
+    seq: u64,
+    entries: &[ChildName],
+) -> Result<String, String> {
+    if seq == 0 {
+        return Err("seq must be greater than 0".into());
+    }
+    let next_seq = read_child_names_next_seq(store)?;
+    if seq < next_seq {
+        return Err(format!(
+            "stale seq {seq} for childNames; need at least {next_seq}"
+        ));
+    }
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
+    if let Some(error) = child_names_error(entries) {
+        return Err(error);
+    }
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let signature = signing_key.sign(&child_names_signing_bytes(seq, entries));
+
+    if !store.set_secret(CHILD_NAMES_NEXTSEQ_KEY, &following.to_le_bytes()) {
+        return Err("failed to persist childNamesNextSeq".into());
     }
 
     Ok(hex::encode(signature.to_bytes()))
@@ -1588,20 +1916,47 @@ pub fn signing_bytes(slot: u8, seq: u64, entry: Option<&Entry>) -> Vec<u8> {
     bytes
 }
 
-/// Build the canonical contacts signing bytes from `DESIGN.md` §2.
-pub fn contacts_signing_bytes(seq: u64, entries: &[Contact]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(128);
-    bytes.extend_from_slice(SIGNING_DOMAIN_CONTACTS);
+/// Build the canonical v6 `selfName` signing bytes (`DESIGN-v6.md` §2).
+///
+/// ```text
+/// b"number:v6:selfname" || seq u64 LE || tag u8
+/// // only when tag == 1:
+/// || len u32 LE || name bytes (UTF-8)
+/// ```
+pub fn self_name_signing_bytes(seq: u64, name: Option<&str>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    bytes.extend_from_slice(SIGNING_DOMAIN_SELF_NAME);
     bytes.extend_from_slice(&seq.to_le_bytes());
-    let count = u32::try_from(entries.len()).expect("contact count is bounded by MAX_CONTACTS");
-    bytes.extend_from_slice(&count.to_le_bytes());
-    for contact in entries {
-        let label = contact.label.as_bytes();
-        let label_len =
-            u32::try_from(label.len()).expect("label bounds keep lengths below u32::MAX");
-        bytes.extend_from_slice(&label_len.to_le_bytes());
-        bytes.extend_from_slice(label);
-        bytes.extend_from_slice(&contact_raw(&contact.user_id));
+    match name {
+        None => bytes.push(0),
+        Some(name) => {
+            bytes.push(1);
+            push_optional_str(&mut bytes, Some(name));
+        }
+    }
+    bytes
+}
+
+/// Build the canonical v6 `childNames` signing bytes (`DESIGN-v6.md` §3).
+///
+/// ```text
+/// b"number:v6:childnames" || seq u64 LE || count u32 LE
+/// // per entry, in the given order:
+/// // || slot u8 || userId 32 raw bytes || len u32 LE || name bytes (UTF-8)
+/// ```
+pub fn child_names_signing_bytes(seq: u64, entries: &[ChildName]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(SIGNING_DOMAIN_CHILD_NAMES);
+    bytes.extend_from_slice(&seq.to_le_bytes());
+    // Validation bounds the count at SLOT_COUNT, so the cast is lossless.
+    bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        bytes.push(entry.slot);
+        bytes.extend_from_slice(&contact_raw(&entry.user_id));
+        let name = entry.name.as_bytes();
+        // Validation bounds the name at 64 bytes, so the cast is lossless.
+        bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(name);
     }
     bytes
 }
@@ -1809,6 +2164,36 @@ fn read_adjustments_next_seq(store: &impl SecretStore) -> Result<u64, String> {
     }
 }
 
+fn read_child_names_next_seq(store: &impl SecretStore) -> Result<u64, String> {
+    match store.get_secret(CHILD_NAMES_NEXTSEQ_KEY) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored childNamesNextSeq has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
+}
+
+fn read_self_name_next_seq(store: &impl SecretStore) -> Result<u64, String> {
+    match store.get_secret(SELF_NAME_NEXTSEQ_KEY) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored selfNameNextSeq has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
+}
+
 fn load_seed(store: &impl SecretStore) -> Result<[u8; 32], String> {
     let Some(bytes) = store.get_secret(SECRET_SEED) else {
         return Err("no seed: call identity first".into());
@@ -1897,6 +2282,75 @@ fn load_dedup(store: &impl SecretStore) -> Result<DedupState, String> {
 
 fn load_audit(store: &impl SecretStore) -> Result<AuditState, String> {
     Ok(read_json(store, AUDIT_KEY)?.unwrap_or_default())
+}
+
+/// Load the private address book. A missing key is an empty book; corrupt JSON
+/// is an error rather than a silent reset.
+fn load_contacts(store: &impl SecretStore) -> Result<Vec<Contact>, String> {
+    Ok(read_json(store, CONTACTS_KEY)?.unwrap_or_default())
+}
+
+fn save_contacts(store: &mut impl SecretStore, contacts: &[Contact]) -> Result<(), String> {
+    if let Some(error) = contacts_error(contacts) {
+        return Err(error);
+    }
+    write_json(store, CONTACTS_KEY, &contacts)
+}
+
+/// List the address book.
+pub fn contacts_with(store: &impl SecretStore) -> Result<Vec<Contact>, String> {
+    load_contacts(store)
+}
+
+/// Add one entry, rejecting a duplicate `userId` or exact `label`.
+pub fn contacts_add_with(
+    store: &mut impl SecretStore,
+    entry: Contact,
+) -> Result<Vec<Contact>, String> {
+    let mut contacts = load_contacts(store)?;
+    contacts.push(entry);
+    save_contacts(store, &contacts)?;
+    Ok(contacts)
+}
+
+/// Change the label and/or address of the entry named by `user_id`.
+///
+/// `address` is `None` when the field was absent and `Some(None)` when it was
+/// explicitly `null`, so a caller can leave the address alone or clear it.
+pub fn contacts_update_with(
+    store: &mut impl SecretStore,
+    user_id: &str,
+    label: Option<String>,
+    address: Option<Option<String>>,
+) -> Result<Vec<Contact>, String> {
+    let mut contacts = load_contacts(store)?;
+    let entry = contacts
+        .iter_mut()
+        .find(|contact| contact.user_id == user_id)
+        .ok_or_else(|| format!("no contact with userId {user_id}"))?;
+    if let Some(label) = label {
+        entry.label = label;
+    }
+    if let Some(address) = address {
+        entry.address = address;
+    }
+    save_contacts(store, &contacts)?;
+    Ok(contacts)
+}
+
+/// Remove the entry named by `user_id`.
+pub fn contacts_remove_with(
+    store: &mut impl SecretStore,
+    user_id: &str,
+) -> Result<Vec<Contact>, String> {
+    let mut contacts = load_contacts(store)?;
+    let before = contacts.len();
+    contacts.retain(|contact| contact.user_id != user_id);
+    if contacts.len() == before {
+        return Err(format!("no contact with userId {user_id}"));
+    }
+    save_contacts(store, &contacts)?;
+    Ok(contacts)
 }
 
 /// Decode a base58 32-byte code hash. Hex is explicitly rejected.
@@ -2275,6 +2729,16 @@ fn apply_plan(
     if inbox.budget == 0 {
         return Err("network budget exhausted".into());
     }
+    // The delta encoder below knows exactly one shape. Refuse before signing
+    // anything if the board came from a different version, so a v5 board can
+    // never be written a v6 delta (and a future v7 fails loudly until the
+    // encoder is updated instead of being silently mis-encoded).
+    if own_state.v != AUTO_ADVANCE_DELTA_VERSION {
+        return Err(format!(
+            "cannot auto-advance a v{} board: the delta encoder only emits v{AUTO_ADVANCE_DELTA_VERSION}",
+            own_state.v
+        ));
+    }
     let key = dedup_key(&plan.payment, from_owner);
     let mut dedup = load_dedup(store)?;
     if dedup.keys.iter().any(|existing| existing == &key) {
@@ -2333,10 +2797,13 @@ fn apply_plan(
         }
     };
 
+    // v6 delta: `contacts` no longer exists on the wire, and name records are
+    // omitted (not set to null) so the contract's `#[serde(default)]`
+    // "unchanged" convention applies. Auto-advance never writes names. The
+    // version is the decoded board's own, checked above against the encoder.
     let delta = serde_json::json!({
         "v": own_state.v,
         "parent": null,
-        "contacts": null,
         "payments": {
             "seq": payments_seq,
             "settled": own_state.payments.settled,
@@ -2712,14 +3179,17 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::advance::{Direction, Role, SlotState, SlotWrite};
 
     /// Golden vector: seed `[7u8; 32]`, slot 3, seq 7,
     /// `{ value: 12, contact: 0x11 × 32, unit: null, note: null }`.
     /// Changing the signing-byte format changes the signature and fails here.
     const GOLDEN_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
     const GOLDEN_SLOT_SIGNATURE: &str = "f666bc2cac7ec8a21df38dfde44d09d80a8318400850c9e6bd72173eafbc9d68106ddce7a122f85bbb9253d13d95b9accad3e4bad3a0ee24fcf424fe17088201";
-    /// Golden contacts vector: seq 1, `[{ label: "Alice", userId: 0x11 × 32 }]`.
-    const GOLDEN_CONTACTS_SIGNATURE: &str = "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906";
+    /// Golden selfName vector: seed `[7u8; 32]`, seq 1, name `"Alice"`.
+    const GOLDEN_SELF_NAME_SIGNATURE: &str = "72c1612043a57e33ff75f0165f9b46ebbf902b819e69b8b82b79ddd3e0158ea3851241520295ddf7bd2acedb11258231b66ae2441f1eda6d736ae593ec3fc300";
+    /// Golden childNames vector: seed `[7u8; 32]`, seq 1, slots 0/2.
+    const GOLDEN_CHILD_NAMES_SIGNATURE: &str = "6b68ac2b897b3c07840afc74c584ca057b39b8bc32d8095e67d539b0d0f88cfa5d0ba47d43ef37918167f4e3ec43913cfcc775d22c58acb705d8f71c480cdd00";
     /// Golden parent vector: seq 1, `userId: 0x11 × 32`.
     const GOLDEN_PARENT_SIGNATURE: &str = "83620d873b5179b726f2aab882083d4d74fa6eee90726ada5b44b74d1d3f48e2e6b31dac5b31142febeb1d6505e426d659c0907adf3110cdddb3984b0bc80400";
     /// Golden payments vector: seed `[7u8; 32]`, seq 1, empty settled list,
@@ -2738,6 +3208,8 @@ mod tests {
     struct MemoryStore {
         secrets: BTreeMap<Vec<u8>, Vec<u8>>,
         contracts: BTreeMap<Vec<u8>, Vec<u8>>,
+        /// When set, `set_secret` reports failure for this key.
+        fail_key: Option<Vec<u8>>,
     }
 
     impl SecretStore for MemoryStore {
@@ -2746,6 +3218,9 @@ mod tests {
         }
 
         fn set_secret(&mut self, key: &[u8], value: &[u8]) -> bool {
+            if self.fail_key.as_deref() == Some(key) {
+                return false;
+            }
             self.secrets.insert(key.to_vec(), value.to_vec());
             true
         }
@@ -2793,6 +3268,23 @@ mod tests {
         Contact {
             label: label.into(),
             user_id: user_id.into(),
+            address: None,
+        }
+    }
+
+    fn contact_at(label: &str, user_id: &str, address: Option<&str>) -> Contact {
+        Contact {
+            label: label.into(),
+            user_id: user_id.into(),
+            address: address.map(str::to_owned),
+        }
+    }
+
+    fn child_name(slot: u8, user_id: &str, name: &str) -> ChildName {
+        ChildName {
+            slot,
+            user_id: user_id.into(),
+            name: name.into(),
         }
     }
 
@@ -2846,6 +3338,9 @@ mod tests {
         assert_eq!(first["contactsNextSeq"], 1);
         assert_eq!(first["parentNextSeq"], 1);
         assert_eq!(first["paymentsNextSeq"], 1);
+        assert_eq!(first["adjustmentsNextSeq"], 1);
+        assert_eq!(first["childNamesNextSeq"], 1);
+        assert_eq!(first["selfNameNextSeq"], 1);
         assert_eq!(
             store.secrets.get(SECRET_SEED).map(Vec::len),
             Some(32),
@@ -2877,32 +3372,50 @@ mod tests {
     }
 
     #[test]
-    fn export_import_round_trip_preserves_identity_and_counters() {
+    fn export_import_round_trip_preserves_identity_counters_and_contacts() {
         let mut old = store_with_seed([7u8; 32]);
         assert!(old.set_secret(&next_seq_key(3), &9u64.to_le_bytes()));
         assert!(old.set_secret(CONTACTS_NEXTSEQ_KEY, &7u64.to_le_bytes()));
         assert!(old.set_secret(PARENT_NEXTSEQ_KEY, &5u64.to_le_bytes()));
         assert!(old.set_secret(PAYMENTS_NEXTSEQ_KEY, &3u64.to_le_bytes()));
+        assert!(old.set_secret(ADJUSTMENTS_NEXTSEQ_KEY, &4u64.to_le_bytes()));
+        assert!(old.set_secret(CHILD_NAMES_NEXTSEQ_KEY, &6u64.to_le_bytes()));
+        assert!(old.set_secret(SELF_NAME_NEXTSEQ_KEY, &8u64.to_le_bytes()));
+        let book = vec![
+            contact_at("Alice", CONTACT_11, Some("52")),
+            contact_at("Bob", CONTACT_22, None),
+        ];
+        save_contacts(&mut old, &book).expect("contacts persist");
 
         let exported = call(&mut old, br#"{"cmd":"export"}"#);
         assert!(is_ok(&exported), "unexpected export: {exported}");
         assert_eq!(exported["version"], DELEGATE_VERSION);
+        assert_eq!(exported["payloadVersion"], EXPORT_PAYLOAD_VERSION);
         assert_eq!(exported["seed"], "07".repeat(32));
         assert_eq!(exported["nextSeq"][3], 9);
         assert_eq!(exported["contactsNextSeq"], 7);
         assert_eq!(exported["parentNextSeq"], 5);
         assert_eq!(exported["paymentsNextSeq"], 3);
+        assert_eq!(exported["adjustmentsNextSeq"], 4);
+        assert_eq!(exported["childNamesNextSeq"], 6);
+        assert_eq!(exported["selfNameNextSeq"], 8);
+        assert_eq!(exported["contacts"], json!(book));
 
         let mut new = MemoryStore::default();
-        let payload = format!(
-            r#"{{"cmd":"import","seed":"{}","nextSeq":{},"contactsNextSeq":{},"parentNextSeq":{},"paymentsNextSeq":{}}}"#,
-            exported["seed"].as_str().unwrap(),
-            exported["nextSeq"],
-            exported["contactsNextSeq"],
-            exported["parentNextSeq"],
-            exported["paymentsNextSeq"]
-        );
-        let imported = call(&mut new, payload.as_bytes());
+        let payload = json!({
+            "cmd": "import",
+            "payloadVersion": exported["payloadVersion"],
+            "seed": exported["seed"],
+            "nextSeq": exported["nextSeq"],
+            "contactsNextSeq": exported["contactsNextSeq"],
+            "parentNextSeq": exported["parentNextSeq"],
+            "paymentsNextSeq": exported["paymentsNextSeq"],
+            "adjustmentsNextSeq": exported["adjustmentsNextSeq"],
+            "childNamesNextSeq": exported["childNamesNextSeq"],
+            "selfNameNextSeq": exported["selfNameNextSeq"],
+            "contacts": exported["contacts"],
+        });
+        let imported = call(&mut new, payload.to_string().as_bytes());
         assert!(is_ok(&imported), "unexpected import: {imported}");
 
         let identity = call(&mut new, br#"{"cmd":"identity"}"#);
@@ -2911,6 +3424,36 @@ mod tests {
         assert_eq!(identity["contactsNextSeq"], 7);
         assert_eq!(identity["parentNextSeq"], 5);
         assert_eq!(identity["paymentsNextSeq"], 3);
+        assert_eq!(identity["adjustmentsNextSeq"], 4);
+        assert_eq!(identity["childNamesNextSeq"], 6);
+        assert_eq!(identity["selfNameNextSeq"], 8);
+
+        let contacts = call(&mut new, br#"{"cmd":"contacts"}"#);
+        assert!(is_ok(&contacts), "unexpected contacts: {contacts}");
+        assert_eq!(contacts["contacts"], json!(book));
+    }
+
+    #[test]
+    fn import_accepts_a_version_one_payload() {
+        let mut store = MemoryStore::default();
+        let payload = format!(
+            r#"{{"cmd":"import","seed":"{}","nextSeq":[1,1,1,1,1,1,1,1]}}"#,
+            "07".repeat(32)
+        );
+        let imported = call(&mut store, payload.as_bytes());
+        assert!(is_ok(&imported), "unexpected import: {imported}");
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["contactsNextSeq"], 1);
+        assert_eq!(identity["parentNextSeq"], 1);
+        assert_eq!(identity["paymentsNextSeq"], 1);
+        assert_eq!(identity["adjustmentsNextSeq"], 1);
+        assert_eq!(identity["childNamesNextSeq"], 1);
+        assert_eq!(identity["selfNameNextSeq"], 1);
+
+        let contacts = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert!(is_ok(&contacts), "unexpected contacts: {contacts}");
+        assert_eq!(contacts["contacts"], json!([]));
     }
 
     #[test]
@@ -2989,6 +3532,26 @@ mod tests {
                 r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"paymentsNextSeq":0}"#,
                 "paymentsNextSeq",
             ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"childNamesNextSeq":0}"#,
+                "childNamesNextSeq",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"selfNameNextSeq":0}"#,
+                "selfNameNextSeq",
+            ),
+            (
+                r#"{"cmd":"import","payloadVersion":3,"seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1]}"#,
+                "payloadVersion",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"contacts":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111","address":"58"}]}"#,
+                "address",
+            ),
+            (
+                r#"{"cmd":"import","seed":"0000000000000000000000000000000000000000000000000000000000000000","nextSeq":[1,1,1,1,1,1,1,1],"contacts":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111","address":null},{"label":"Alicia","userId":"1111111111111111111111111111111111111111111111111111111111111111","address":null}]}"#,
+                "duplicates a userId",
+            ),
         ];
 
         for (payload, expected) in cases {
@@ -3047,32 +3610,165 @@ mod tests {
     }
 
     #[test]
-    fn golden_contacts_signing_vector() {
+    fn golden_self_name_signing_vector() {
         let mut store = store_with_seed([7u8; 32]);
 
         let response = call(
             &mut store,
-            br#"{"cmd":"signContacts","seq":1,"entries":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}]}"#,
+            br#"{"cmd":"signSelfName","seq":1,"name":"Alice"}"#,
         );
 
         assert!(is_ok(&response), "unexpected response: {response}");
-        assert_eq!(response["sig"], GOLDEN_CONTACTS_SIGNATURE);
-
-        let entries = vec![contact("Alice", CONTACT_11)];
-        // Cross-crate pin: `contract/src/lib.rs` asserts this same hex.
+        assert_eq!(response["sig"], GOLDEN_SELF_NAME_SIGNATURE);
         assert_eq!(
-            hex::encode(contacts_signing_bytes(1, &entries)),
-            "6e756d6265723a76323a636f6e746163747301000000000000000100000005000000416c6963651111111111111111111111111111111111111111111111111111111111111111"
+            store.secrets.get(SELF_NAME_NEXTSEQ_KEY).cloned(),
+            Some(2u64.to_le_bytes().to_vec())
+        );
+
+        // Pin the bytes themselves, not just the signature: this is the
+        // cross-crate contract (`DESIGN-v6.md` §2).
+        assert_eq!(
+            hex::encode(self_name_signing_bytes(1, Some("Alice"))),
+            "6e756d6265723a76363a73656c666e616d6501000000000000000105000000416c696365"
         );
         let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
-        let signature: [u8; 64] = hex::decode(GOLDEN_CONTACTS_SIGNATURE)
+        let signature: [u8; 64] = hex::decode(GOLDEN_SELF_NAME_SIGNATURE)
             .expect("golden signature is hex")
             .try_into()
             .expect("golden signature is 64 bytes");
         let signature = ed25519_dalek::Signature::from_bytes(&signature);
         verifying_key
-            .verify_strict(&contacts_signing_bytes(1, &entries), &signature)
-            .expect("golden contacts signature verifies over the canonical bytes");
+            .verify_strict(&self_name_signing_bytes(1, Some("Alice")), &signature)
+            .expect("golden signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn golden_child_names_signing_vector() {
+        let mut store = store_with_seed([7u8; 32]);
+        let entries = vec![
+            child_name(0, CONTACT_11, "Alice"),
+            child_name(2, CONTACT_22, "Bob"),
+        ];
+
+        let response = call(
+            &mut store,
+            br#"{"cmd":"signChildNames","seq":1,"entries":[{"slot":0,"userId":"1111111111111111111111111111111111111111111111111111111111111111","name":"Alice"},{"slot":2,"userId":"2222222222222222222222222222222222222222222222222222222222222222","name":"Bob"}]}"#,
+        );
+
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"], GOLDEN_CHILD_NAMES_SIGNATURE);
+        assert_eq!(
+            store.secrets.get(CHILD_NAMES_NEXTSEQ_KEY).cloned(),
+            Some(2u64.to_le_bytes().to_vec())
+        );
+
+        assert_eq!(
+            hex::encode(child_names_signing_bytes(1, &entries)),
+            "6e756d6265723a76363a6368696c646e616d657301000000000000000200000000111111111111111111111111111111111111111111111111111111111111111105000000416c69636502222222222222222222222222222222222222222222222222222222222222222203000000426f62"
+        );
+        let verifying_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let signature: [u8; 64] = hex::decode(GOLDEN_CHILD_NAMES_SIGNATURE)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        verifying_key
+            .verify_strict(&child_names_signing_bytes(1, &entries), &signature)
+            .expect("golden signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn name_counters_are_monotonic_and_tombstones_are_legal() {
+        let mut store = store_with_seed([7u8; 32]);
+
+        let self_name = call(&mut store, br#"{"cmd":"signSelfName","seq":5,"name":null}"#);
+        assert!(is_ok(&self_name), "unexpected response: {self_name}");
+        let replay = call(
+            &mut store,
+            br#"{"cmd":"signSelfName","seq":5,"name":"Alice"}"#,
+        );
+        assert!(!is_ok(&replay));
+        assert!(error_text(&replay).contains("stale"));
+
+        let children = call(
+            &mut store,
+            br#"{"cmd":"signChildNames","seq":3,"entries":[]}"#,
+        );
+        assert!(is_ok(&children), "unexpected response: {children}");
+        let replay = call(
+            &mut store,
+            br#"{"cmd":"signChildNames","seq":3,"entries":[]}"#,
+        );
+        assert!(!is_ok(&replay));
+        assert!(error_text(&replay).contains("stale"));
+
+        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
+        assert_eq!(identity["selfNameNextSeq"], 6);
+        assert_eq!(identity["childNamesNextSeq"], 4);
+    }
+
+    #[test]
+    fn name_records_enforce_the_v6_bounds() {
+        let mut store = store_with_seed([7u8; 32]);
+        for name in [Some(""), Some(&"n".repeat(MAX_CONTACT_LABEL_BYTES + 1))] {
+            let error = sign_self_name_with(&mut store, 1, name)
+                .expect_err("invalid selfName must be rejected");
+            assert!(error.contains("name"), "unexpected error: {error}");
+        }
+
+        let cases: Vec<(Vec<ChildName>, &str)> = vec![
+            (vec![child_name(8, CONTACT_11, "Alice")], "out of range"),
+            (
+                vec![
+                    child_name(2, CONTACT_11, "Alice"),
+                    child_name(1, CONTACT_22, "Bob"),
+                ],
+                "ascending",
+            ),
+            (vec![child_name(0, CONTACT_11, "")], "must not be empty"),
+            (
+                vec![child_name(
+                    0,
+                    CONTACT_11,
+                    &"n".repeat(MAX_CONTACT_LABEL_BYTES + 1),
+                )],
+                "maximum",
+            ),
+            (vec![child_name(0, "11", "Alice")], "userId"),
+        ];
+        for (entries, expected) in cases {
+            let error = sign_child_names_with(&mut store, 1, &entries)
+                .expect_err("invalid childNames must be rejected");
+            assert!(
+                error.contains(expected),
+                "error {error:?} did not contain {expected:?}"
+            );
+        }
+
+        let too_many: Vec<ChildName> = (0..=SLOT_COUNT)
+            .map(|slot| {
+                child_name(
+                    slot as u8,
+                    &hex::encode({
+                        let mut id = [1u8; 32];
+                        id[31] = slot as u8;
+                        id
+                    }),
+                    "Alice",
+                )
+            })
+            .collect();
+        assert!(
+            sign_child_names_with(&mut store, 1, &too_many)
+                .expect_err("too many entries must be rejected")
+                .contains("maximum")
+        );
+
+        assert!(
+            !store.secrets.contains_key(SELF_NAME_NEXTSEQ_KEY),
+            "rejected names must not advance a counter"
+        );
+        assert!(!store.secrets.contains_key(CHILD_NAMES_NEXTSEQ_KEY));
     }
 
     #[test]
@@ -3702,35 +4398,211 @@ mod tests {
     }
 
     #[test]
-    fn contacts_seq_is_monotonic_and_empty_list_is_a_tombstone() {
-        let mut store = store_with_seed([7u8; 32]);
+    fn contacts_crud_round_trips_inside_the_delegate() {
+        let mut store = MemoryStore::default();
 
-        let accepted = call(
+        let empty = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert!(is_ok(&empty), "unexpected response: {empty}");
+        assert_eq!(empty["contacts"], json!([]));
+
+        let added = call(
             &mut store,
-            br#"{"cmd":"signContacts","seq":5,"entries":[{"label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}]}"#,
+            br#"{"cmd":"contacts.add","label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111","address":"52"}"#,
         );
-        assert!(is_ok(&accepted), "unexpected response: {accepted}");
+        assert!(is_ok(&added), "unexpected response: {added}");
         assert_eq!(
-            store.secrets.get(CONTACTS_NEXTSEQ_KEY).cloned(),
-            Some(6u64.to_le_bytes().to_vec())
+            added["contacts"],
+            json!([{ "label": "Alice", "userId": CONTACT_11, "address": "52" }])
         );
 
-        let replay = call(
+        // The address may be omitted, and is then `null`.
+        let added = call(
             &mut store,
-            br#"{"cmd":"signContacts","seq":5,"entries":[]}"#,
+            br#"{"cmd":"contacts.add","label":"Bob","userId":"2222222222222222222222222222222222222222222222222222222222222222"}"#,
         );
-        assert!(!is_ok(&replay));
-        assert!(error_text(&replay).contains("stale"));
+        assert!(is_ok(&added), "unexpected response: {added}");
+        assert_eq!(added["contacts"][1]["address"], Value::Null);
 
-        // An empty list at a fresh seq is a legal tombstone.
-        let tombstone = call(
+        // Rename Bob and clear the address explicitly with `null`.
+        let updated = call(
             &mut store,
-            br#"{"cmd":"signContacts","seq":6,"entries":[]}"#,
+            br#"{"cmd":"contacts.update","userId":"2222222222222222222222222222222222222222222222222222222222222222","label":"Robert","address":null}"#,
         );
-        assert!(is_ok(&tombstone), "unexpected response: {tombstone}");
+        assert!(is_ok(&updated), "unexpected response: {updated}");
+        assert_eq!(updated["contacts"][1]["label"], "Robert");
+        assert_eq!(updated["contacts"][1]["address"], Value::Null);
 
-        let identity = call(&mut store, br#"{"cmd":"identity"}"#);
-        assert_eq!(identity["contactsNextSeq"], 7);
+        // Changing only the address leaves the label alone.
+        let updated = call(
+            &mut store,
+            br#"{"cmd":"contacts.update","userId":"2222222222222222222222222222222222222222222222222222222222222222","address":"7"}"#,
+        );
+        assert!(is_ok(&updated), "unexpected response: {updated}");
+        assert_eq!(updated["contacts"][1]["label"], "Robert");
+        assert_eq!(updated["contacts"][1]["address"], "7");
+
+        // An explicit `null` clears a previously set address.
+        let updated = call(
+            &mut store,
+            br#"{"cmd":"contacts.update","userId":"2222222222222222222222222222222222222222222222222222222222222222","address":null}"#,
+        );
+        assert!(is_ok(&updated), "unexpected response: {updated}");
+        assert_eq!(updated["contacts"][1]["label"], "Robert");
+        assert_eq!(updated["contacts"][1]["address"], Value::Null);
+
+        let removed = call(
+            &mut store,
+            br#"{"cmd":"contacts.remove","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+        );
+        assert!(is_ok(&removed), "unexpected response: {removed}");
+        assert_eq!(removed["contacts"].as_array().unwrap().len(), 1);
+        assert_eq!(removed["contacts"][0]["label"], "Robert");
+
+        // The stored JSON is the sole copy.
+        let stored = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert_eq!(stored["contacts"], removed["contacts"]);
+    }
+
+    #[test]
+    fn contacts_invariants_are_enforced() {
+        let mut store = MemoryStore::default();
+        call(
+            &mut store,
+            br#"{"cmd":"contacts.add","label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+        );
+
+        let cases: Vec<(&str, &str)> = vec![
+            (
+                r#"{"cmd":"contacts.add","label":"Alicia","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+                "duplicates a userId",
+            ),
+            (
+                r#"{"cmd":"contacts.add","label":"Alice","userId":"2222222222222222222222222222222222222222222222222222222222222222"}"#,
+                "duplicates a label",
+            ),
+            (
+                r#"{"cmd":"contacts.add","label":"","userId":"2222222222222222222222222222222222222222222222222222222222222222"}"#,
+                "must not be empty",
+            ),
+            (
+                r#"{"cmd":"contacts.add","label":"Bob","userId":"2222222222222222222222222222222222222222222222222222222222222222","address":"58"}"#,
+                "address",
+            ),
+            (
+                r#"{"cmd":"contacts.add","label":"Bob","userId":"2222222222222222222222222222222222222222222222222222222222222222","address":"000000000000000000000000000000000"}"#,
+                "address",
+            ),
+            (
+                r#"{"cmd":"contacts.add","label":"Bob","userId":"2222222222222222222222222222222222222222222222222222222222222222AA"}"#,
+                "userId",
+            ),
+            (
+                r#"{"cmd":"contacts.update","userId":"2222222222222222222222222222222222222222222222222222222222222222","label":"Bob"}"#,
+                "no contact",
+            ),
+            (
+                r#"{"cmd":"contacts.update","userId":"1111111111111111111111111111111111111111111111111111111111111111","address":"8"}"#,
+                "address",
+            ),
+            (
+                r#"{"cmd":"contacts.remove","userId":"2222222222222222222222222222222222222222222222222222222222222222"}"#,
+                "no contact",
+            ),
+        ];
+        for (payload, expected) in cases {
+            let response = call(&mut store, payload.as_bytes());
+            assert!(!is_ok(&response), "payload must be rejected: {payload}");
+            assert!(
+                error_text(&response).contains(expected),
+                "error for {payload} did not contain {expected}: {response}"
+            );
+        }
+
+        // A rejected update must leave the stored label untouched.
+        let listed = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert_eq!(listed["contacts"][0]["label"], "Alice");
+
+        // The 65th entry is refused; the 64th is accepted.
+        for index in 1..MAX_CONTACTS {
+            let mut user_id = [2u8; 32];
+            user_id[31] = index as u8;
+            let response = contacts_add_with(
+                &mut store,
+                contact(&format!("c{index}"), &hex::encode(user_id)),
+            );
+            assert!(response.is_ok(), "entry {index} must be accepted");
+        }
+        let mut user_id = [2u8; 32];
+        user_id[31] = MAX_CONTACTS as u8;
+        let error = contacts_add_with(
+            &mut store,
+            contact(&format!("c{MAX_CONTACTS}"), &hex::encode(user_id)),
+        )
+        .expect_err("65 entries must be rejected");
+        assert!(error.contains("maximum"));
+    }
+
+    #[test]
+    fn interleaved_contacts_commands_do_not_clobber_each_other() {
+        let mut store = MemoryStore::default();
+
+        // Both tabs read the same empty book, then each adds its own entry.
+        // A whole-list setter would lose one of them.
+        let tab_a_view = call(&mut store, br#"{"cmd":"contacts"}"#);
+        let tab_b_view = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert_eq!(tab_a_view["contacts"], tab_b_view["contacts"]);
+
+        assert!(is_ok(&call(
+            &mut store,
+            br#"{"cmd":"contacts.add","label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#
+        )));
+        assert!(is_ok(&call(
+            &mut store,
+            br#"{"cmd":"contacts.add","label":"Bob","userId":"2222222222222222222222222222222222222222222222222222222222222222"}"#
+        )));
+
+        let after_adds = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert_eq!(after_adds["contacts"].as_array().unwrap().len(), 2);
+
+        // A stale tab renames Bob while another removes Alice; both land.
+        let renamed = call(
+            &mut store,
+            br#"{"cmd":"contacts.update","userId":"2222222222222222222222222222222222222222222222222222222222222222","label":"Robert"}"#,
+        );
+        assert!(is_ok(&renamed));
+        let removed = call(
+            &mut store,
+            br#"{"cmd":"contacts.remove","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#,
+        );
+        assert!(is_ok(&removed));
+
+        let final_list = call(&mut store, br#"{"cmd":"contacts"}"#);
+        assert_eq!(
+            final_list["contacts"],
+            json!([{ "label": "Robert", "userId": CONTACT_22, "address": null }])
+        );
+    }
+
+    #[test]
+    fn a_failed_contacts_write_leaves_the_seed_unwritten() {
+        let mut store = MemoryStore {
+            fail_key: Some(CONTACTS_KEY.to_vec()),
+            ..Default::default()
+        };
+        let payload = json!({
+            "cmd": "import",
+            "seed": "07".repeat(32),
+            "nextSeq": [1, 1, 1, 1, 1, 1, 1, 1],
+            "contacts": [{ "label": "Alice", "userId": CONTACT_11, "address": null }],
+        });
+        let response = call(&mut store, payload.to_string().as_bytes());
+
+        assert!(!is_ok(&response), "unexpected response: {response}");
+        assert!(error_text(&response).contains("contacts"));
+        assert!(
+            !store.secrets.contains_key(SECRET_SEED),
+            "a failed contacts write must not write the seed"
+        );
     }
 
     #[test]
@@ -3806,65 +4678,26 @@ mod tests {
     }
 
     #[test]
-    fn contacts_bounds_are_enforced() {
-        let cases: Vec<(Vec<Contact>, &str)> = vec![
-            (vec![contact("", CONTACT_11)], "must not be empty"),
-            (
-                vec![contact(
-                    &"l".repeat(MAX_CONTACT_LABEL_BYTES + 1),
-                    CONTACT_11,
-                )],
-                "label",
-            ),
-            (vec![contact("Alice", "")], "userId"),
-            (vec![contact("Alice", &"11".repeat(31))], "userId"),
-            (vec![contact("Alice", &("11".repeat(31) + "AA"))], "userId"),
-            (
-                vec![contact("Alice", CONTACT_11), contact("Alicia", CONTACT_11)],
-                "duplicates a userId",
-            ),
-            (
-                vec![contact("Alice", CONTACT_11), contact("Alice", CONTACT_22)],
-                "duplicates a label",
-            ),
-        ];
-
-        for (entries, expected) in cases {
-            let mut store = MemoryStore::default();
-            let error = sign_contacts_with(&mut store, 1, &entries)
-                .expect_err("invalid contact list must be rejected");
-            assert!(
-                error.contains(expected),
-                "error {error:?} did not contain {expected:?}"
-            );
-            assert!(
-                store.secrets.is_empty(),
-                "an invalid contact list must not create a seed"
-            );
-        }
-
+    fn retained_contacts_counter_is_never_incremented() {
         let mut store = store_with_seed([7u8; 32]);
-        let too_many: Vec<Contact> = (0..=MAX_CONTACTS)
-            .map(|index| {
-                let mut user_id = [1u8; 32];
-                user_id[31] = index as u8;
-                contact(&format!("c{index}"), &hex::encode(user_id))
-            })
-            .collect();
-        let error = sign_contacts_with(&mut store, 1, &too_many).expect_err("65 contacts rejected");
-        assert!(error.contains("maximum"));
+        assert!(store.set_secret(CONTACTS_NEXTSEQ_KEY, &7u64.to_le_bytes()));
 
-        let at_limit: Vec<Contact> = (0..MAX_CONTACTS)
-            .map(|index| {
-                let mut user_id = [1u8; 32];
-                user_id[31] = index as u8;
-                contact(&format!("c{index}"), &hex::encode(user_id))
-            })
-            .collect();
-        assert!(sign_contacts_with(&mut store, 1, &at_limit).is_ok());
+        // Names and address-book writes must leave the legacy counter alone.
+        assert!(is_ok(&call(
+            &mut store,
+            br#"{"cmd":"contacts.add","label":"Alice","userId":"1111111111111111111111111111111111111111111111111111111111111111"}"#
+        )));
+        assert!(is_ok(&call(
+            &mut store,
+            br#"{"cmd":"signSelfName","seq":1,"name":"Alice"}"#
+        )));
+        assert_eq!(
+            store.secrets.get(CONTACTS_NEXTSEQ_KEY).cloned(),
+            Some(7u64.to_le_bytes().to_vec())
+        );
 
-        let zero = sign_contacts_with(&mut store, 0, &[]).expect_err("seq must be positive");
-        assert!(zero.contains("seq"));
+        let export = call(&mut store, br#"{"cmd":"export"}"#);
+        assert_eq!(export["contactsNextSeq"], 7, "the v2 key survives export");
     }
 
     #[test]
@@ -3926,7 +4759,7 @@ mod tests {
             br#"{"cmd":"unknown"}"#,
             br#"{"cmd":"sign","slot":"three","seq":7,"entry":null}"#,
             br#"{"cmd":"sign","slot":3,"seq":7,"entry":{"value":"not a number"}}"#,
-            br#"{"cmd":"signContacts","seq":1,"entries":{}}"#,
+            br#"{"cmd":"signChildNames","seq":1,"entries":{}}"#,
             br#"{"cmd":"identity""#,
         ];
 
@@ -3975,6 +4808,24 @@ mod tests {
         let identity = call(&mut payments_store, br#"{"cmd":"identity"}"#);
         assert!(!is_ok(&identity));
         assert!(error_text(&identity).contains("invalid length"));
+
+        let mut child_names_store = store_with_seed([7u8; 32]);
+        assert!(child_names_store.set_secret(CHILD_NAMES_NEXTSEQ_KEY, &[1, 2, 3]));
+        let identity = call(&mut child_names_store, br#"{"cmd":"identity"}"#);
+        assert!(!is_ok(&identity));
+        assert!(error_text(&identity).contains("invalid length"));
+
+        let mut self_name_store = store_with_seed([7u8; 32]);
+        assert!(self_name_store.set_secret(SELF_NAME_NEXTSEQ_KEY, &[1, 2, 3]));
+        let identity = call(&mut self_name_store, br#"{"cmd":"identity"}"#);
+        assert!(!is_ok(&identity));
+        assert!(error_text(&identity).contains("invalid length"));
+
+        let mut contacts_store = store_with_seed([7u8; 32]);
+        assert!(contacts_store.set_secret(CONTACTS_KEY, b"not json"));
+        let contacts = call(&mut contacts_store, br#"{"cmd":"contacts"}"#);
+        assert!(!is_ok(&contacts));
+        assert!(error_text(&contacts).contains("invalid JSON"));
     }
 
     fn base58_hash(bytes: [u8; 32]) -> String {
@@ -4002,6 +4853,147 @@ mod tests {
         let mut value: Value = serde_json::from_slice(&empty_state_bytes(v)).expect("state parses");
         value["payments"]["seq"] = seq.into();
         serde_json::to_vec(&value).expect("state serializes")
+    }
+
+    /// A one-slot debit plan plus an own board at `version`, for exercising
+    /// the delta `apply_plan` emits.
+    fn advance_fixture(version: u8) -> (MemoryStore, InboxState, BoardState, LegPlan) {
+        let store = store_with_seed([7u8; 32]);
+        let inbox = InboxState {
+            budget: MAX_NETWORK_OPS,
+            ..Default::default()
+        };
+        let mut own_state = BoardState {
+            v: version,
+            owner: CONTACT_22.into(),
+            parent: None,
+            slots: std::array::from_fn(|_| SlotState::default()),
+            payments: Payments {
+                seq: 0,
+                settled: Vec::new(),
+                entry: None,
+                sig: None,
+            },
+        };
+        own_state.slots[2] = SlotState {
+            seq: 4,
+            entry: Some(Entry {
+                value: 900,
+                contact: CONTACT_11.into(),
+                unit: None,
+                note: None,
+            }),
+            sig: Some("aa".repeat(64)),
+        };
+
+        let plan = LegPlan {
+            slots: vec![SlotWrite {
+                index: 2,
+                entry: Entry {
+                    value: 900,
+                    contact: CONTACT_11.into(),
+                    unit: None,
+                    note: None,
+                },
+                direction: Direction::Debit,
+            }],
+            payment: Payment {
+                id: PAYMENT_ID.into(),
+                src: CONTACT_11.into(),
+                dst: CONTACT_22.into(),
+                amount: 100,
+                src_addr: "52".into(),
+                dst_addr: "3".into(),
+                cursor: 1,
+                phase: "forward".into(),
+                status: "acted".into(),
+                next: CONTACT_22.into(),
+                fail: None,
+                legs: Vec::new(),
+            },
+            cursor: 1,
+            role: Role::Debit,
+            terminal: false,
+        };
+
+        (store, inbox, own_state, plan)
+    }
+
+    fn emitted_delta(message: &OutboundDelegateMsg) -> Value {
+        match message {
+            OutboundDelegateMsg::UpdateContractRequest(request) => match &request.update {
+                UpdateData::Delta(delta) => {
+                    serde_json::from_slice(delta.as_ref()).expect("delta is JSON")
+                }
+                other => panic!("unexpected update: {other:?}"),
+            },
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_advance_emits_a_v6_delta_without_contacts_or_names() {
+        let (mut store, mut inbox, own_state, plan) = advance_fixture(6);
+        let mut out = Vec::new();
+        apply_plan(
+            &mut store, &mut inbox, [0xAB; 32], &own_state, &plan, CONTACT_11, &mut out,
+        )
+        .expect("plan applies");
+
+        assert_eq!(out.len(), 1);
+        let value = emitted_delta(&out[0]);
+        assert_eq!(value["v"], 6);
+        assert!(
+            value.get("contacts").is_none(),
+            "a v6 delta must not carry contacts: {value}"
+        );
+        assert!(
+            value.get("selfName").is_none(),
+            "auto-advance must omit selfName: {value}"
+        );
+        assert!(
+            value.get("childNames").is_none(),
+            "auto-advance must omit childNames: {value}"
+        );
+        assert_eq!(value["slots"].as_array().unwrap().len(), 1);
+        assert_eq!(value["slots"][0]["i"], 2);
+    }
+
+    #[test]
+    fn auto_advance_delta_version_tracks_the_board() {
+        // A v6 board emits a v6 delta.
+        let (mut store, mut inbox, own_state, plan) = advance_fixture(6);
+        let mut out = Vec::new();
+        apply_plan(
+            &mut store, &mut inbox, [0xAB; 32], &own_state, &plan, CONTACT_11, &mut out,
+        )
+        .expect("v6 plan applies");
+        assert_eq!(emitted_delta(&out[0])["v"], 6);
+
+        // A v5 board must not be written a v6 delta by accident, and a future
+        // v7 must fail until the encoder learns that version.
+        for version in [5, 7] {
+            let (mut store, mut inbox, own_state, plan) = advance_fixture(version);
+            assert_eq!(own_state.v, version);
+            let mut out = Vec::new();
+            let error = apply_plan(
+                &mut store, &mut inbox, [0xAB; 32], &own_state, &plan, CONTACT_11, &mut out,
+            )
+            .expect_err("the delta encoder must refuse an unknown board version");
+            assert!(
+                error.contains(&format!("v{version}")),
+                "error must name the board version: {error}"
+            );
+            assert!(
+                error.contains("only emits v6"),
+                "error must name the encoder version: {error}"
+            );
+            assert!(out.is_empty(), "a refused plan must emit nothing");
+            assert!(
+                !store.secrets.contains_key(DEDUP_KEY),
+                "the version check must run before any write"
+            );
+        }
     }
 
     #[test]
@@ -4076,7 +5068,10 @@ mod tests {
             2,
             "the newer payment record must win even when it is in the cache"
         );
-        assert!(out.is_empty(), "a resolved hit must not issue a network GET");
+        assert!(
+            out.is_empty(),
+            "a resolved hit must not issue a network GET"
+        );
         assert_eq!(inbox.instances[&hex::encode(instance)].seq, 2);
     }
 

@@ -13,16 +13,28 @@
  * import the UI shows the resulting identity, which is what the user compares
  * against the old device.
  */
-import type { ExportedSecrets } from "./delegate";
+import type { ContactRecord, ExportedSecrets } from "./delegate";
+import { isOctalAddress } from "./payments";
+import { isLowerHex, utf8Length } from "./util";
 
 export const IDENTITY_BACKUP_KIND = "number-identity";
-export const IDENTITY_BACKUP_VERSION = 1;
+/**
+ * v2 carries the delegate's private address book (`payloadVersion: 2`) and the
+ * signed-record counters a v1 payload predates: the v5 adjustment counter and
+ * the two v6 name counters. v1 is still accepted on decode/import.
+ */
+export const IDENTITY_BACKUP_VERSION = 2;
+export const LEGACY_IDENTITY_BACKUP_VERSION = 1;
 
 const SEED_PATTERN = /^[0-9a-fA-F]{64}$/;
+const MAX_CONTACT_LABEL_BYTES = 64;
+const MAX_CONTACTS = 64;
 
 export interface IdentityBackup {
   v: typeof IDENTITY_BACKUP_VERSION;
   kind: typeof IDENTITY_BACKUP_KIND;
+  /** Delegate export payload version; v2 adds the address book. */
+  payloadVersion: number;
   /** 32-byte Ed25519 seed, 64 lowercase hex characters. */
   seed: string;
   /** Per-slot next sequence values, 8 entries, each >= 1. */
@@ -43,6 +55,23 @@ export interface IdentityBackup {
    * backups written before cooperative payments still decode; missing means 1.
    */
   paymentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v5 `adjustments` record, >= 1. Optional
+   * so backups written before issue/burn still decode; missing means 1.
+   */
+  adjustmentsNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `childNames` record, >= 1. Optional
+   * so backups written before v9 still decode; missing means 1.
+   */
+  childNamesNextSeq?: number;
+  /**
+   * Next sequence value for the signed v6 `selfName` record, >= 1. Optional so
+   * backups written before v9 still decode; missing means 1.
+   */
+  selfNameNextSeq?: number;
+  /** The private address book; empty for a v1 payload. */
+  contacts?: ContactRecord[];
   /** Owner public key for human comparison; not verified at decode time. */
   pubkey?: string;
   /** ISO timestamp, informational. */
@@ -50,6 +79,8 @@ export interface IdentityBackup {
 }
 
 export interface DecodedIdentityBackup {
+  /** 1 for a pre-v9 backup, 2 for a backup that carries the address book. */
+  payloadVersion: number;
   seed: string;
   nextSeq: number[];
   /** Defaults to 1 for a v1 backup that has no contacts counter. */
@@ -58,6 +89,14 @@ export interface DecodedIdentityBackup {
   parentNextSeq: number;
   /** Defaults to 1 for a backup written before payments existed. */
   paymentsNextSeq: number;
+  /** Defaults to 1 for a backup written before issue/burn existed. */
+  adjustmentsNextSeq: number;
+  /** Defaults to 1 for a backup written before the v6 name records existed. */
+  childNamesNextSeq: number;
+  /** Defaults to 1 for a backup written before the v6 name records existed. */
+  selfNameNextSeq: number;
+  /** Empty for a v1 backup. */
+  contacts: ContactRecord[];
   pubkey?: string;
 }
 
@@ -76,15 +115,85 @@ export function encodeIdentityBackup(
   const backup: IdentityBackup = {
     v: IDENTITY_BACKUP_VERSION,
     kind: IDENTITY_BACKUP_KIND,
+    payloadVersion: secrets.payloadVersion ?? IDENTITY_BACKUP_VERSION,
     seed: secrets.seed.toLowerCase(),
     nextSeq: [...secrets.nextSeq],
     contactsNextSeq: secrets.contactsNextSeq,
     parentNextSeq: secrets.parentNextSeq,
     paymentsNextSeq: secrets.paymentsNextSeq ?? 1,
+    adjustmentsNextSeq: secrets.adjustmentsNextSeq ?? 1,
+    childNamesNextSeq: secrets.childNamesNextSeq ?? 1,
+    selfNameNextSeq: secrets.selfNameNextSeq ?? 1,
+    contacts: validateBackupContacts(secrets.contacts ?? []),
     ...(pubkey ? { pubkey: pubkey.toLowerCase() } : {}),
     createdAt: now.toISOString(),
   };
   return JSON.stringify(backup, null, 2);
+}
+
+/** Validate the address book carried by a backup (same bounds as delegate). */
+function validateBackupContacts(raw: unknown): ContactRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new IdentityBackupError(
+      "The backup contacts must be an array.",
+    );
+  }
+  if (raw.length > MAX_CONTACTS) {
+    throw new IdentityBackupError(
+      `The backup has ${raw.length} contacts; the maximum is ${MAX_CONTACTS}.`,
+    );
+  }
+  const userIds = new Set<string>();
+  const labels = new Set<string>();
+  return raw.map((value, index) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} must be an object.`,
+      );
+    }
+    const record = value as Record<string, unknown>;
+    const label = record.label;
+    if (typeof label !== "string" || label.length === 0) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} label must be a non-empty string.`,
+      );
+    }
+    if (utf8Length(label) > MAX_CONTACT_LABEL_BYTES) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} label exceeds ${MAX_CONTACT_LABEL_BYTES} bytes.`,
+      );
+    }
+    if (typeof record.userId !== "string" || !isLowerHex(record.userId, 64)) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} userId must be 64 lowercase hex characters.`,
+      );
+    }
+    let address: string | null = null;
+    if (record.address !== undefined && record.address !== null) {
+      if (
+        typeof record.address !== "string" ||
+        !isOctalAddress(record.address)
+      ) {
+        throw new IdentityBackupError(
+          `The backup contact ${index} address must be null or an octal address.`,
+        );
+      }
+      address = record.address;
+    }
+    if (userIds.has(record.userId)) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} duplicates a userId.`,
+      );
+    }
+    userIds.add(record.userId);
+    if (labels.has(label)) {
+      throw new IdentityBackupError(
+        `The backup contact ${index} duplicates a label.`,
+      );
+    }
+    labels.add(label);
+    return { label, userId: record.userId, address };
+  });
 }
 
 export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
@@ -109,11 +218,30 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
 
   if (
     record.kind !== IDENTITY_BACKUP_KIND ||
-    record.v !== IDENTITY_BACKUP_VERSION
+    (record.v !== IDENTITY_BACKUP_VERSION &&
+      record.v !== LEGACY_IDENTITY_BACKUP_VERSION)
   ) {
     throw new IdentityBackupError(
-      "That is not a version 1 number identity backup.",
+      "That is not a number identity backup (expected version 1 or 2).",
     );
+  }
+  const version =
+    record.v === IDENTITY_BACKUP_VERSION
+      ? IDENTITY_BACKUP_VERSION
+      : LEGACY_IDENTITY_BACKUP_VERSION;
+
+  let payloadVersion = version;
+  if (record.payloadVersion !== undefined) {
+    if (
+      typeof record.payloadVersion !== "number" ||
+      !Number.isSafeInteger(record.payloadVersion) ||
+      (record.payloadVersion !== 1 && record.payloadVersion !== 2)
+    ) {
+      throw new IdentityBackupError(
+        "The backup payload version must be 1 or 2.",
+      );
+    }
+    payloadVersion = record.payloadVersion;
   }
 
   if (typeof record.seed !== "string" || !SEED_PATTERN.test(record.seed)) {
@@ -180,6 +308,51 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
     paymentsNextSeq = record.paymentsNextSeq;
   }
 
+  let adjustmentsNextSeq = 1;
+  if (record.adjustmentsNextSeq !== undefined) {
+    if (
+      typeof record.adjustmentsNextSeq !== "number" ||
+      !Number.isSafeInteger(record.adjustmentsNextSeq) ||
+      record.adjustmentsNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup adjustments sequence must be a positive integer.",
+      );
+    }
+    adjustmentsNextSeq = record.adjustmentsNextSeq;
+  }
+
+  let childNamesNextSeq = 1;
+  if (record.childNamesNextSeq !== undefined) {
+    if (
+      typeof record.childNamesNextSeq !== "number" ||
+      !Number.isSafeInteger(record.childNamesNextSeq) ||
+      record.childNamesNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup childNames sequence must be a positive integer.",
+      );
+    }
+    childNamesNextSeq = record.childNamesNextSeq;
+  }
+
+  let selfNameNextSeq = 1;
+  if (record.selfNameNextSeq !== undefined) {
+    if (
+      typeof record.selfNameNextSeq !== "number" ||
+      !Number.isSafeInteger(record.selfNameNextSeq) ||
+      record.selfNameNextSeq < 1
+    ) {
+      throw new IdentityBackupError(
+        "The backup selfName sequence must be a positive integer.",
+      );
+    }
+    selfNameNextSeq = record.selfNameNextSeq;
+  }
+
+  const contacts =
+    record.contacts === undefined ? [] : validateBackupContacts(record.contacts);
+
   let pubkey: string | undefined;
   if (record.pubkey !== undefined) {
     if (
@@ -194,11 +367,16 @@ export function decodeIdentityBackup(text: string): DecodedIdentityBackup {
   }
 
   return {
+    payloadVersion,
     seed: record.seed.toLowerCase(),
     nextSeq: nextSeq as number[],
     contactsNextSeq,
     parentNextSeq,
     paymentsNextSeq,
+    adjustmentsNextSeq,
+    childNamesNextSeq,
+    selfNameNextSeq,
+    contacts,
     ...(pubkey ? { pubkey } : {}),
   };
 }

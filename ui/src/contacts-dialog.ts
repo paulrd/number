@@ -1,28 +1,44 @@
 /**
  * Address book dialog: list, add, and remove contacts.
  *
- * The address book is signed board state, not local settings. Every change goes
- * through `saveContacts`, and the list is re-rendered from the state callback,
- * so two devices editing the same book still converge.
+ * In v6 the address book is private delegate state, not signed board state.
+ * Every change goes through a delegate command (`contacts.add`,
+ * `contacts.remove`, `contacts.update`) that returns the resulting list, and
+ * the backend repaints from its refreshed cache, so two tabs cannot clobber
+ * each other with a whole-list write.
  *
  * When the dialog is opened from the slot editor, a successful add closes the
  * dialog and hands the new contact back so the editor can select it.
  */
-import { LIMITS, MAX_CONTACTS, type Contact } from "./state";
+import type { ContactRecord } from "./delegate";
+import { LIMITS, MAX_CONTACTS } from "./state";
 import { errorMessage, utf8Length } from "./util";
 
 export interface ContactsDialogDeps {
-  getContacts(): Contact[];
+  /** The delegate's private address book, label + userId + address. */
+  getContacts(): ContactRecord[];
   /** How many slots/parent links store this user ID (for the remove warning). */
   getUsedContactCount(userId: string): number;
-  saveContacts(entries: Contact[]): Promise<void>;
+  /** Add one entry. The delegate assigns no address until the user sets one. */
+  addContact(entry: {
+    label: string;
+    userId: string;
+    address?: string | null;
+  }): Promise<ContactRecord[]>;
+  /**
+   * Change a label and/or address. No address field is exposed yet, so callers
+   * pass only a label and the delegate preserves the stored address.
+   */
+  updateContact(
+    userId: string,
+    patch: { label?: string; address?: string | null },
+  ): Promise<ContactRecord[]>;
+  removeContact(userId: string): Promise<ContactRecord[]>;
   announce(message: string): void;
   /** Called after an add made while the dialog was opened from the editor. */
-  onAdded(contact: Contact): void;
-  /** The self-entry counts toward the contract limit but is not listed here. */
+  onAdded(contact: ContactRecord): void;
+  /** The delegate caps the book at MAX_CONTACTS entries. */
   getMaxContacts?(): number;
-  /** Labels reserved by board state, e.g. the board's own name. */
-  getReservedLabels?(): string[];
   /** User ids reserved by board state, e.g. the owner's own id. */
   getReservedUserIds?(): string[];
 }
@@ -85,7 +101,7 @@ export function createContactsDialog(
 
   let writing = false;
   let selectOnAdd = false;
-  let pendingRemove: Contact | null = null;
+  let pendingRemove: ContactRecord | null = null;
 
   function setWriting(value: boolean): void {
     writing = value;
@@ -199,7 +215,7 @@ export function createContactsDialog(
     countLabel.textContent = `${contacts.length} of ${contactLimit()}`;
   }
 
-  function requestRemove(contact: Contact): void {
+  function requestRemove(contact: ContactRecord): void {
     if (writing) return;
     const used = deps.getUsedContactCount(contact.userId);
     if (used === 0) {
@@ -210,15 +226,15 @@ export function createContactsDialog(
     pendingRemove = contact;
     confirmText.textContent =
       used === 1
-        ? `“${contact.label}” is linked from this board. That link will show an unknown contact until you choose a new one.`
-        : `“${contact.label}” is linked from ${used} places on this board. Those links will show an unknown contact until you choose new ones.`;
+        ? `“${contact.label}” is linked from this board. The signed slot keeps its saved name until you save the slot with another contact.`
+        : `“${contact.label}” is linked from ${used} places on this board. Each signed slot keeps its saved name until you save it with another contact.`;
     confirmBox.hidden = false;
     confirmBox.scrollIntoView({ block: "nearest" });
     confirmCancel.focus({ preventScroll: true });
   }
 
   async function write(
-    entries: Contact[],
+    action: () => Promise<ContactRecord[]>,
     message: string,
     onSuccess?: () => void,
   ): Promise<boolean> {
@@ -227,7 +243,7 @@ export function createContactsDialog(
     setError(null);
     let saved = false;
     try {
-      await deps.saveContacts(entries);
+      await action();
       deps.announce(message);
       hideConfirm();
       saved = true;
@@ -242,13 +258,14 @@ export function createContactsDialog(
     return saved;
   }
 
-  async function removeContact(contact: Contact): Promise<void> {
-    const entries = deps
-      .getContacts()
-      .filter((entry) => entry.userId !== contact.userId);
-    const removed = await write(entries, `Removed ${contact.label}.`, () => {
-      if (dialog.open) labelInput.focus({ preventScroll: true });
-    });
+  async function removeContact(contact: ContactRecord): Promise<void> {
+    const removed = await write(
+      () => deps.removeContact(contact.userId),
+      `Removed ${contact.label}.`,
+      () => {
+        if (dialog.open) labelInput.focus({ preventScroll: true });
+      },
+    );
     if (!removed && dialog.open) {
       // The row is still there; leave focus on it so the error is in context.
       const row = list.querySelector<HTMLElement>(
@@ -317,30 +334,25 @@ export function createContactsDialog(
       labelInput.focus();
       return;
     }
-    const reservedLabels = deps.getReservedLabels?.() ?? [];
-    if (reservedLabels.includes(label)) {
-      setFieldWarning(
-        labelInput,
-        labelWarning,
-        "This is your board's name. Choose a different name for the contact.",
-      );
-      labelInput.focus();
-      return;
-    }
 
-    const contact: Contact = { label, userId };
-    void write([...contacts, contact], `Added ${label}.`, () => {
-      labelInput.value = "";
-      userIdInput.value = "";
-      clearWarnings();
-      if (selectOnAdd) {
-        selectOnAdd = false;
-        dialog.close();
-        deps.onAdded(contact);
-      } else if (dialog.open) {
-        labelInput.focus({ preventScroll: true });
-      }
-    });
+    // No address field yet: a new contact starts with a null address.
+    const contact: ContactRecord = { label, userId, address: null };
+    void write(
+      () => deps.addContact({ label, userId, address: null }),
+      `Added ${label}.`,
+      () => {
+        labelInput.value = "";
+        userIdInput.value = "";
+        clearWarnings();
+        if (selectOnAdd) {
+          selectOnAdd = false;
+          dialog.close();
+          deps.onAdded(contact);
+        } else if (dialog.open) {
+          labelInput.focus({ preventScroll: true });
+        }
+      },
+    );
   }
 
   function open(options: { selectOnAdd?: boolean } = {}): void {

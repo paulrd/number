@@ -6,8 +6,8 @@
 //! caller turns a [`LegPlan`] into signed slot records and one signed payments
 //! record.
 //!
-//! `BoardState` decodes both v4 and v5 JSON. `adjustments` is deliberately
-//! ignored here: v4.1 only auto-advances payments.
+//! `BoardState` decodes v4, v5 and v6 JSON. `adjustments` and the v6 name
+//! records are deliberately ignored here: auto-advance only advances payments.
 
 use crate::{Entry, Payment, Payments, USER_ID_HEX_LEN};
 use serde::Deserialize;
@@ -18,7 +18,7 @@ pub const ZERO_OWNER: &str = "00000000000000000000000000000000000000000000000000
 /// Maximum octal address length (`DESIGN-payments.md`).
 pub const MAX_ADDRESS_DIGITS: usize = 32;
 
-/// One slot's signed record, as read from either v4 or v5 state.
+/// One slot's signed record, as read from a v4, v5 or v6 state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SlotState {
     pub seq: u64,
@@ -26,10 +26,10 @@ pub struct SlotState {
     pub sig: Option<String>,
 }
 
-/// A minimal board view shared by v4 and v5 states.
+/// A minimal board view shared by v4, v5 and v6 states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardState {
-    /// State version (4 or 5).
+    /// State version (4, 5 or 6).
     pub v: u8,
     /// The owner key the instance is parameterised by (64 lowercase hex).
     pub owner: String,
@@ -76,12 +76,13 @@ fn empty_payments() -> Payments {
 }
 
 impl BoardState {
-    /// Decode a v4 or v5 JSON state under a known owner key.
+    /// Decode a v4, v5 or v6 JSON state under a known owner key.
     ///
-    /// Unknown fields (notably v5's `adjustments`) are ignored.
+    /// Unknown fields (v5's `adjustments`, v6's `selfName` and `childNames`)
+    /// are ignored: auto-advance never reads or writes them.
     pub fn decode(bytes: &[u8], owner: &str) -> Result<Self, AdvanceError> {
         let wire: WireState = serde_json::from_slice(bytes).map_err(|_| AdvanceError::State)?;
-        if wire.v != 4 && wire.v != 5 {
+        if wire.v != 4 && wire.v != 5 && wire.v != 6 {
             return Err(AdvanceError::State);
         }
         if wire.slots.len() != 8 {
@@ -512,8 +513,8 @@ pub fn plan_leg(
     from_owner: &str,
     max_amount: i64,
 ) -> Result<LegPlan, AdvanceError> {
-    // Version compatibility: never sign into a mixed v4/v5 tree.
-    if !matches!(own.state.v, 4 | 5) || !matches!(from.v, 4 | 5) || own.state.v != from.v {
+    // Version compatibility: never sign into a mixed v4/v5/v6 tree.
+    if !matches!(own.state.v, 4..=6) || !matches!(from.v, 4..=6) || own.state.v != from.v {
         return Err(AdvanceError::MixedVersion);
     }
     if let Some(destination) = own.destination {
@@ -1244,6 +1245,78 @@ mod tests {
             plan_leg(&own_board, &intent, &from, &prev, 0),
             Err(AdvanceError::NoUpstreamEvidence)
         );
+    }
+
+    #[test]
+    fn v6_states_decode_and_ignore_the_name_records() {
+        let bytes = br#"{
+            "v": 6,
+            "selfName": {"seq": 2, "name": "Mine", "sig": "aa"},
+            "parent": {"seq": 1, "userId": "1111111111111111111111111111111111111111111111111111111111111111", "sig": "00"},
+            "childNames": {"seq": 4, "entries": [{"slot": 0, "userId": "2222222222222222222222222222222222222222222222222222222222222222", "name": "Alice"}], "sig": "bb"},
+            "payments": {"seq": 0, "settled": [], "entry": null, "sig": null},
+            "slots": [
+                {"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},
+                {"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},
+                {"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},
+                {"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}
+            ]
+        }"#;
+        let owner_hex = owner(2).1;
+        let state = BoardState::decode(bytes, &owner_hex).expect("v6 decodes");
+        assert_eq!(state.v, 6);
+        assert_eq!(
+            state.parent.as_deref(),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        assert_eq!(state.slots.len(), 8);
+    }
+
+    #[test]
+    fn v6_board_advances_a_payment_leg_exactly_like_v5() {
+        fn three_hop_plan(version: u8) -> LegPlan {
+            let (src_key, src) = owner(1);
+            let (_own_key, own) = owner(2);
+            let root = owner(3).1;
+            let dst = owner(4).1;
+
+            let mut own_state = board(version, &own, Some(&root));
+            own_state.slots[2] = slot(4, 1000, &src);
+
+            let intent = payment(
+                PAYMENT_ID,
+                &src,
+                &dst,
+                100,
+                "52",
+                "3",
+                0,
+                "offered",
+                &own,
+                vec![],
+            );
+            let mut from = board(version, &src, Some(&own));
+            from.payments = Payments {
+                seq: 3,
+                settled: vec![],
+                entry: Some(intent.clone()),
+                sig: None,
+            };
+            sign_from(&src_key, &mut from);
+
+            let own_board = OwnBoard {
+                state: &own_state,
+                address: "5",
+                destination: None,
+            };
+            plan_leg(&own_board, &intent, &from, &src, 0).expect("leg plans")
+        }
+
+        let v5 = three_hop_plan(5);
+        let v6 = three_hop_plan(6);
+        assert_eq!(v5, v6, "a v6 board must plan the same leg as v5");
+        assert_eq!(v6.role, Role::Debit);
+        assert_eq!(v6.slots[0].entry.value, 900);
     }
 
     #[test]

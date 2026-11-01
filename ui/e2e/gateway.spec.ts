@@ -51,7 +51,7 @@ test.describe("gateway smoke", () => {
 
     const app = page.frameLocator("iframe#app");
     await expect(
-      app.getByRole("heading", { level: 1, name: "number" }),
+      app.getByRole("heading", { level: 1, name: "Tally" }),
     ).toBeVisible({ timeout: 30_000 });
     await expect(app.locator("#status-pill")).toHaveAttribute(
       "data-status",

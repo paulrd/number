@@ -6,16 +6,14 @@
  *   name has been saved.
  * - edit: opened from the Board name row; cancel/backdrop/Escape close it.
  *
- * A name is stored as the owner's own contact entry in the signed address book
- * (`{ label: name, userId: ownOwnerId }`), so it replicates from the same
- * record as the rest of the address book and needs no new key.
+ * In v6 a name is the board's own signed `selfName` record: it replicates as
+ * part of the board state and is independent of the private address book, so a
+ * contact may share the board's name.
  */
-import { LIMITS, type Contact } from "./state";
+import { LIMITS } from "./state";
 import { errorMessage, utf8Length } from "./util";
 
 export interface BoardNameDialogDeps {
-  /** Own contacts, excluding the self-entry. */
-  getContacts(): Contact[];
   getOwnOwnerId(): string | null;
   getCurrentName(): string | null;
   saveName(name: string): Promise<void>;
@@ -38,11 +36,11 @@ function byId<T extends HTMLElement>(id: string): T {
 const REQUIRED_TITLE = "Name your board";
 const EDIT_TITLE = "Rename your board";
 const REQUIRED_DESC =
-  "This name is how other boards see yours in their path. It is stored in " +
-  "your signed address book and can be changed later.";
+  "This name is how other boards see yours in their path. It is signed into " +
+  "this board and can be changed later.";
 const EDIT_DESC =
-  "Change how other boards see yours in their path. The new name is stored in " +
-  "your signed address book.";
+  "Change how other boards see yours in their path. The new name is signed " +
+  "into this board.";
 const DESCRIPTION_IDS = "board-name-desc board-name-hint";
 
 export function createBoardNameDialog(
@@ -132,9 +130,6 @@ export function createBoardNameDialog(
     if (name === "") return "Enter a name for this board.";
     if (utf8Length(name) > LIMITS.label) {
       return `Keep the name to ${LIMITS.label} characters or fewer.`;
-    }
-    if (deps.getContacts().some((contact) => contact.label === name)) {
-      return "Another contact already uses this name. Choose a different one.";
     }
     return null;
   }

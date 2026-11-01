@@ -59,6 +59,7 @@ function board(
   return {
     ownerId: owner(name),
     state,
+    contacts: [],
     codeHash: "hash",
     legacy: false,
   };

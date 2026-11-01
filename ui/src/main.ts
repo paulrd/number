@@ -7,9 +7,17 @@ import {
   type BoardSnapshot,
   type BoardStatus,
 } from "./board";
+import { APP_NAME } from "./brand";
 import { createContactsDialog } from "./contacts-dialog";
 import { createBoardNameDialog } from "./board-name-dialog";
-import { DelegateError, delegateNeverScanned, isDelegateStatusStale, type DelegateIdentity, type DelegateStatus } from "./delegate";
+import {
+  DelegateError,
+  delegateNeverScanned,
+  isDelegateStatusStale,
+  type ContactRecord,
+  type DelegateIdentity,
+  type DelegateStatus,
+} from "./delegate";
 import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
@@ -39,7 +47,6 @@ import {
   stateWarnings,
   validateEntry,
   type Adjustment,
-  type Contact,
   type Entry,
   type StateV3,
 } from "./state";
@@ -50,10 +57,9 @@ import {
   hasLiveChild,
   MAX_TREE_DEPTH,
   octalAddress,
+  parentGivenName,
   parentLink,
   parentValueFor,
-  selfContact,
-  selfNameOf,
   type AddressProblem,
   type LinkState,
   type TrailStep,
@@ -240,6 +246,8 @@ interface SlotView {
 interface ViewedBoard {
   ownerId: string;
   state: StateV3;
+  /** Only the owner's own board has a private address book. */
+  contacts: ContactRecord[];
   codeHash: string;
   legacy: boolean;
   isOwn: boolean;
@@ -272,6 +280,7 @@ let trailRequest = 0;
 let addressRequest = 0;
 let parentValueRequest = 0;
 let paymentsRequest = 0;
+let boardTitleRequest = 0;
 let noticeRetry: (() => void | Promise<void>) | null = null;
 /** True while the address book was opened from the parent dialog. */
 let addingForParent = false;
@@ -368,22 +377,17 @@ function shortUserId(userId: string): string {
   return userId.slice(0, 8);
 }
 
-function ownContacts(): Contact[] {
-  return ownState?.contacts.entries ?? [];
+function ownContacts(): ContactRecord[] {
+  return backend.contacts;
 }
 
-/** The owner's own entry; its label is the board name. */
-function ownSelfContact(): Contact | null {
-  if (!ownState || !ownIdentity) return null;
-  return selfContact(ownState, ownIdentity.pubkey);
+/** The board's own signed name, or null when it has not been named. */
+function ownSelfName(): string | null {
+  return ownState?.selfName.name ?? null;
 }
 
-/** The address book as the UI edits it: every contact except the board's own entry. */
-function ownContactsWithoutSelf(): Contact[] {
-  if (!ownIdentity) return ownContacts();
-  return ownContacts().filter(
-    (contact) => contact.userId !== ownIdentity?.pubkey,
-  );
+function contactLabel(userId: string): string | null {
+  return ownContacts().find((contact) => contact.userId === userId)?.label ?? null;
 }
 
 function unknownLabel(ownerId: string): string {
@@ -391,31 +395,11 @@ function unknownLabel(ownerId: string): string {
 }
 
 /**
- * Resolve a board owner to a label. Address-book sources come first, in the
- * order given, then the target board's own name, then a shortened id.
+ * A board's visible name: its own signed `selfName`, then a shortened id. The
+ * private address book never names another owner's board in v6.
  */
-function labelForOwner(
-  ownerId: string,
-  sources: Contact[][],
-  selfName: string | null = null,
-): string {
-  for (const entries of sources) {
-    const contact = entries.find((entry) => entry.userId === ownerId);
-    if (contact) return contact.label;
-  }
-  if (selfName !== null && selfName !== "") return selfName;
-  return unknownLabel(ownerId);
-}
-
-function findContact(state: StateV3, userId: string): Contact | null {
-  return state.contacts.entries.find((contact) => contact.userId === userId) ?? null;
-}
-
-/** A board's address book without its own self-entry, for label sources. */
-function contactsWithoutSelfOf(state: StateV3, ownerId: string): Contact[] {
-  return state.contacts.entries.filter(
-    (contact) => contact.userId !== ownerId,
-  );
+function boardNameOf(ownerId: string, state: StateV3): string {
+  return state.selfName.name ?? unknownLabel(ownerId);
 }
 
 /**
@@ -445,6 +429,7 @@ function ownSnapshot(): BoardSnapshot | null {
   return {
     ownerId: ownIdentity.pubkey,
     state: ownState,
+    contacts: backend.contacts,
     codeHash: BOARD_CONFIG.contractCodeHash,
     legacy: false,
   };
@@ -454,6 +439,7 @@ function toView(snapshot: BoardSnapshot): ViewedBoard {
   return {
     ownerId: snapshot.ownerId,
     state: snapshot.state,
+    contacts: snapshot.contacts,
     codeHash: snapshot.codeHash,
     legacy: snapshot.legacy,
     isOwn: ownIdentity !== null && snapshot.ownerId === ownIdentity.pubkey,
@@ -474,17 +460,13 @@ const linkDeps = {
 
 /** Cached own name for a remote board; undefined means "not read yet". */
 function cachedSelfName(ownerId: string): string | null | undefined {
-  if (ownIdentity && ownerId === ownIdentity.pubkey) {
-    return ownSelfContact()?.label ?? null;
-  }
+  if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSelfName();
   return nameCache.get(ownerId);
 }
 
 /** Read a board's own name for labels, without blocking render. */
 async function resolveSelfName(ownerId: string): Promise<string | null> {
-  if (ownIdentity && ownerId === ownIdentity.pubkey) {
-    return ownSelfContact()?.label ?? null;
-  }
+  if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSelfName();
   const cached = nameCache.get(ownerId);
   if (cached !== undefined) return cached;
   const pending = nameInflight.get(ownerId);
@@ -492,7 +474,7 @@ async function resolveSelfName(ownerId: string): Promise<string | null> {
 
   const request = readBoardForView(ownerId)
     .then((snapshot) =>
-      snapshot === null ? null : selfNameOf(snapshot.state, ownerId),
+      snapshot === null ? null : snapshot.state.selfName.name,
     )
     .catch(() => null)
     .then((name) => {
@@ -515,7 +497,9 @@ function applyResolvedSlotName(
   if (!current) return;
   const slot = current.state.slots[index];
   if (slot?.entry?.contact !== ownerId) return;
-  if (findContact(current.state, ownerId)) return;
+  // A signed parent-given name always wins; this fallback only fills a slot the
+  // viewed board has not named.
+  if (parentGivenName(current, ownerId) !== null) return;
   const slotView = slotViews[index];
   slotView.label.textContent = name;
   slotView.label.classList.remove("is-unknown");
@@ -664,9 +648,12 @@ function renderBoard(): void {
     );
     slotView.unit.textContent = entry?.unit ?? "";
 
-    const contact = entry ? findContact(state, entry.contact) : null;
+    // A slot's visible name is the one this board gave it in `childNames`.
+    // Only when that record does not describe the slot do we read the child
+    // board's own signed name.
+    const givenName = entry ? parentGivenName(current, entry.contact) : null;
     let resolvedName: string | null | undefined;
-    if (entry && !contact) {
+    if (entry && givenName === null) {
       resolvedName = cachedSelfName(entry.contact);
       if (resolvedName === undefined) {
         // Never block the grid on a remote read; fill the name in later.
@@ -674,7 +661,7 @@ function renderBoard(): void {
       }
     }
     const labelText = entry
-      ? contact?.label ??
+      ? givenName ??
         (typeof resolvedName === "string"
           ? resolvedName
           : unknownLabel(entry.contact))
@@ -682,13 +669,13 @@ function renderBoard(): void {
         ? "Cleared"
         : "Empty";
     const unknownSlotLabel =
-      Boolean(entry) && !contact && typeof resolvedName !== "string";
+      Boolean(entry) && givenName === null && typeof resolvedName !== "string";
 
     slotView.label.textContent = labelText;
     slotView.label.classList.toggle("is-placeholder", !entry);
     slotView.label.classList.toggle("is-unknown", unknownSlotLabel);
-    // The full key survives a removed contact; keep it available on hover.
-    slotView.label.title = entry && !contact ? entry.contact : "";
+    // The full key stays available on hover even when the name is local.
+    slotView.label.title = entry ? entry.contact : "";
 
     slotView.note.textContent = entry?.note ?? "";
     slotView.note.hidden = !entry?.note;
@@ -789,17 +776,13 @@ function renderBoardHeader(): void {
   boardMetaLabel.textContent = remote ? "Viewing" : "Board";
   boardNameRow.hidden = remote;
 
-  const self = ownSelfContact();
-  boardName.textContent = self?.label ?? "Not named";
+  const self = ownSelfName();
+  boardName.textContent = self ?? "Not named";
   boardName.classList.toggle("is-empty", self === null);
-  boardName.title = self?.label ?? "This board has no name yet.";
+  boardName.title = self ?? "This board has no name yet.";
   boardNameEdit.disabled = busy || navigating || self === null;
 
-  const label = labelForOwner(
-    current.ownerId,
-    [ownContactsWithoutSelf(), current.state.contacts.entries],
-    selfNameOf(current.state, current.ownerId),
-  );
+  const label = boardNameOf(current.ownerId, current.state);
   boardOwner.textContent = `${label} · ${shortUserId(current.ownerId)}`;
   boardOwner.title = current.ownerId;
   boardCopy.disabled = false;
@@ -818,6 +801,41 @@ function renderBoardHeader(): void {
     ? "Signed · two decimals"
     : `Read-only · ${shortUserId(current.ownerId)}`;
   boardHint.textContent = current.isOwn ? OWN_BOARD_HINT : REMOTE_BOARD_HINT;
+}
+
+/**
+ * Paint the board title area. A board is shown under the name its parent gave
+ * it (`childNames`), which is the one other boards see in their path; otherwise
+ * it falls back to its own signed `selfName`. The lookup is asynchronous, so a
+ * late parent read is ignored unless it still belongs to the current board.
+ */
+function renderBoardTitle(): void {
+  const request = ++boardTitleRequest;
+  const current = view;
+
+  if (!current) {
+    boardTitle.textContent = "The board";
+    boardTitle.removeAttribute("title");
+    return;
+  }
+
+  const ownName = current.state.selfName.name;
+  boardTitle.textContent = ownName ?? "The board";
+  boardTitle.removeAttribute("title");
+
+  if (current.state.parent.userId === null) return;
+  const board = current.isOwn ? (ownSnapshot() ?? current) : current;
+  void parentLink(board, linkDeps).then((info) => {
+    if (request !== boardTitleRequest || view !== current) return;
+    if (info.snapshot === null) return;
+    const given = parentGivenName(info.snapshot, current.ownerId);
+    if (given === null) return;
+    boardTitle.textContent = given;
+    boardTitle.title =
+      ownName !== null && ownName !== given
+        ? `As named by its parent. Its own name is “${ownName}”.`
+        : "As named by its parent.";
+  });
 }
 
 /**
@@ -953,7 +971,7 @@ function parentEmptyExplanation(state: LinkState, label: string): string {
     case "pending":
       return `${label} has not added this board yet, so no liability is recorded there.`;
     case "not-created":
-      return `${label} has not opened number yet, so there is no board to hold a liability.`;
+      return `${label} has not opened ${APP_NAME} yet, so there is no board to hold a liability.`;
     case "error":
       return `${label}'s board could not be read, so the liability could not be checked.`;
     case "root":
@@ -1070,11 +1088,10 @@ function renderParentValue(): void {
     if (request !== parentValueRequest || view !== current) return;
     if (info.state === "root") return;
 
-    const label = labelForOwner(
-      parentId,
-      [current.state.contacts.entries, ownContactsWithoutSelf()],
-      info.snapshot ? selfNameOf(info.snapshot.state, parentId) : null,
-    );
+    const label =
+      info.snapshot !== null
+        ? boardNameOf(parentId, info.snapshot.state)
+        : cachedSelfName(parentId) ?? unknownLabel(parentId);
 
     parentValueBox.hidden = false;
     parentValueBox.dataset.state = info.state;
@@ -1162,10 +1179,7 @@ function renderParentRow(): void {
     return;
   }
 
-  parentName.textContent = labelForOwner(parentId, [
-    current.state.contacts.entries,
-    ownContactsWithoutSelf(),
-  ]);
+  parentName.textContent = cachedSelfName(parentId) ?? unknownLabel(parentId);
   parentName.title = parentId;
   parentName.classList.remove("is-root");
   parentStatus.hidden = false;
@@ -1182,7 +1196,7 @@ function renderParentRow(): void {
     if (request !== parentStatusRequest || view !== current) return;
     paintBadge(parentStatus, info.state);
     const selfName = info.snapshot
-      ? selfNameOf(info.snapshot.state, parentId)
+      ? boardNameOf(parentId, info.snapshot.state)
       : null;
     if (selfName !== null && initialLabel === unknownLabel(parentId)) {
       parentName.textContent = selfName;
@@ -1217,18 +1231,13 @@ function legacyTrailBadge(step: TrailStep): HTMLElement | null {
   return badge;
 }
 
-function renderTrailItem(step: TrailStep, current: ViewedBoard): HTMLLIElement {
+function renderTrailItem(step: TrailStep): HTMLLIElement {
   const li = document.createElement("li");
   li.className = "breadcrumb-item";
-  const label = labelForOwner(
-    step.ownerId,
-    [
-      step.contacts,
-      contactsWithoutSelfOf(current.state, current.ownerId),
-      ownContactsWithoutSelf(),
-    ],
-    step.selfName,
-  );
+  // A step reads under the name its parent gave it; otherwise its own signed
+  // name; otherwise a shortened id. Private contacts never name another board.
+  const label =
+    step.parentName ?? step.selfName ?? unknownLabel(step.ownerId);
   const legacy = legacyTrailBadge(step);
 
   if (step.kind === "current") {
@@ -1292,14 +1301,14 @@ async function renderTrail(): Promise<void> {
   if (request !== trailRequest || view !== current) return;
 
   breadcrumbList.replaceChildren(
-    ...trail.steps.map((step) => renderTrailItem(step, current)),
+    ...trail.steps.map((step) => renderTrailItem(step)),
   );
   breadcrumbWarning.textContent = trail.warning ?? "";
   breadcrumbWarning.hidden = trail.warning === null;
 }
 
 function renderContactCount(): void {
-  const count = ownContactsWithoutSelf().length;
+  const count = ownContacts().length;
   contactsCount.textContent = String(count);
   contactsOpen.disabled =
     ownState === null || view === null || !view.isOwn || busy || navigating;
@@ -1318,7 +1327,7 @@ function renderControls(): void {
   reconnectButton.disabled = isOffline || busy || settling;
   boardHome.disabled = busy || navigating;
   boardNameEdit.disabled =
-    busy || navigating || !view?.isOwn || ownSelfContact() === null;
+    busy || navigating || !view?.isOwn || ownSelfName() === null;
   parentEdit.disabled = busy || !view?.isOwn;
   parentClear.disabled = busy;
 }
@@ -1332,6 +1341,7 @@ function renderAll(): void {
   renderWarnings();
   renderContactCount();
   renderBoardHeader();
+  renderBoardTitle();
   renderBoardAddress();
   renderParentValue();
   renderControls();
@@ -1374,7 +1384,7 @@ const ZERO_PAYMENT_OWNER = "0".repeat(64);
 
 /** The status area's label source: the own address book only. */
 function paymentOwnerLabel(ownerId: string): string {
-  return labelForOwner(ownerId, [ownContactsWithoutSelf()]);
+  return contactLabel(ownerId) ?? unknownLabel(ownerId);
 }
 
 function paymentAddresses(entry: PaymentEntry): string {
@@ -1474,9 +1484,10 @@ function renderPaymentInboxItem(item: IncomingPayment): HTMLLIElement {
   );
   head.append(amount, status);
 
-  const sources = [ownState?.contacts.entries ?? [], ownContactsWithoutSelf()];
-  const srcLabel = labelForOwner(item.entry.src, sources);
-  const dstLabel = labelForOwner(item.entry.dst, sources);
+  // Payment counterparties are named from this device's private address book;
+  // v6 has no public contact list to fall back to.
+  const srcLabel = contactLabel(item.entry.src) ?? unknownLabel(item.entry.src);
+  const dstLabel = contactLabel(item.entry.dst) ?? unknownLabel(item.entry.dst);
   const meta = createElement(
     "p",
     "payment-inbox-meta",
@@ -2503,7 +2514,7 @@ function setEditorBusy(value: boolean): void {
   }
 }
 
-function contactOption(contact: Contact): HTMLOptionElement {
+function contactOption(contact: ContactRecord): HTMLOptionElement {
   const option = document.createElement("option");
   option.value = contact.userId;
   option.textContent = `${contact.label} · ${shortUserId(contact.userId)}`;
@@ -2513,9 +2524,9 @@ function contactOption(contact: Contact): HTMLOptionElement {
 
 function populateContactOptions(
   selectedUserId: string,
-  extra?: Contact,
+  extra?: ContactRecord,
 ): void {
-  const entries = ownContactsWithoutSelf();
+  const entries = ownContacts();
   const known = new Set<string>();
   const options: HTMLOptionElement[] = [];
 
@@ -2524,7 +2535,7 @@ function populateContactOptions(
   blank.textContent = "Select a contact…";
   options.push(blank);
 
-  const add = (contact: Contact): void => {
+  const add = (contact: ContactRecord): void => {
     if (known.has(contact.userId)) return;
     known.add(contact.userId);
     options.push(contactOption(contact));
@@ -2564,7 +2575,7 @@ function childProblem(contact: string): string | null {
 }
 
 function updateContactState(): void {
-  const entries = ownContactsWithoutSelf();
+  const entries = ownContacts();
   const selected = contactSelect.value;
   const known =
     selected !== "" && entries.some((contact) => contact.userId === selected);
@@ -2627,11 +2638,11 @@ async function refreshChildLink(
   const info = await childLink(ownIdentity?.pubkey ?? "", contactId, linkDeps);
   if (generation !== editorRequest || !editor.open) return;
 
-  const label = labelForOwner(
-    contactId,
-    [ownContactsWithoutSelf()],
-    info.snapshot ? selfNameOf(info.snapshot.state, contactId) : null,
-  );
+  const label =
+    contactLabel(contactId) ??
+    (info.snapshot
+      ? boardNameOf(contactId, info.snapshot.state)
+      : unknownLabel(contactId));
   const legacyChild = info.snapshot?.legacy === true;
   childLinkStatus.dataset.state = info.state;
   childLinkStatus.textContent = LINK_LABELS[info.state];
@@ -2649,7 +2660,7 @@ async function refreshChildLink(
   } else if (info.state === "pending") {
     detail = `${label} has not set this board as its parent yet.`;
   } else if (info.state === "not-created") {
-    detail = `${label} has not opened number yet.`;
+    detail = `${label} has not opened ${APP_NAME} yet.`;
   } else if (info.state === "error") {
     detail = `Could not check this board: ${info.error ?? "the read failed"}.`;
   }
@@ -2790,7 +2801,7 @@ function renderAdjust(): void {
   const child = entry?.contact ?? "";
 
   adjustChild.textContent =
-    child === "" ? "Not set" : labelForOwner(child, [ownContactsWithoutSelf()]);
+    child === "" ? "Not set" : (contactLabel(child) ?? unknownLabel(child));
   adjustChild.classList.toggle("is-empty", child === "");
   if (child === "") adjustChild.removeAttribute("title");
   else adjustChild.title = child;
@@ -3109,14 +3120,11 @@ async function openBoard(ownerId: string): Promise<void> {
   try {
     const snapshot = await readBoardForView(ownerId);
     if (snapshot === null) {
-      const label = labelForOwner(ownerId, [
-        ownContactsWithoutSelf(),
-        view?.state.contacts.entries ?? [],
-      ]);
+      const label = cachedSelfName(ownerId) ?? unknownLabel(ownerId);
       showNotice(
         "info",
         "Board not created yet",
-        `${label} has not opened number yet, so there is no board to show.`,
+        `${label} has not opened ${APP_NAME} yet, so there is no board to show.`,
       );
       announce("That board has not been created yet.");
       return;
@@ -3125,11 +3133,7 @@ async function openBoard(ownerId: string): Promise<void> {
     view = toView(snapshot);
     hideErrorNotice();
     renderAll();
-    const label = labelForOwner(
-      ownerId,
-      [ownContactsWithoutSelf(), view.state.contacts.entries],
-      selfNameOf(view.state, ownerId),
-    );
+    const label = boardNameOf(ownerId, view.state);
     announce(`Viewing ${label}.`);
     boardTitle.focus({ preventScroll: true });
   } catch (error) {
@@ -3180,11 +3184,9 @@ async function handleParentSaved(): Promise<void> {
   const snapshot = ownSnapshot();
   if (snapshot === null) return;
   const info = await parentLink(snapshot, linkDeps);
-  const label = labelForOwner(
-    parentId,
-    [ownContactsWithoutSelf(), info.snapshot?.state.contacts.entries ?? []],
-    info.snapshot ? selfNameOf(info.snapshot.state, parentId) : null,
-  );
+  const label = info.snapshot
+    ? boardNameOf(parentId, info.snapshot.state)
+    : (cachedSelfName(parentId) ?? unknownLabel(parentId));
   const legacyNote = info.snapshot?.legacy
     ? " The parent board is on the previous version."
     : "";
@@ -3204,7 +3206,7 @@ async function handleParentSaved(): Promise<void> {
 
 function maybePromptForBoardName(): void {
   if (!ownState || !ownIdentity) return;
-  if (ownSelfContact() !== null) return;
+  if (ownSelfName() !== null) return;
   boardNameDialog.requireName();
 }
 
@@ -3275,16 +3277,13 @@ const paymentDeps: PaymentDeps = {
 };
 
 const boardNameDialog = createBoardNameDialog({
-  getContacts: ownContactsWithoutSelf,
   getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
-  getCurrentName: () => ownSelfContact()?.label ?? null,
+  getCurrentName: ownSelfName,
+  // v6: the name is the board's own signed `selfName`, not an address-book
+  // entry, so saving it never rewrites the private contacts.
   saveName: async (name) => {
     if (!ownIdentity) throw new Error("Your board is not loaded yet.");
-    const ownId = ownIdentity.pubkey;
-    const others = ownContactsWithoutSelf().filter(
-      (contact) => contact.userId !== ownId,
-    );
-    await backend.saveContacts([...others, { label: name, userId: ownId }]);
+    await backend.saveSelfName(name);
   },
   onSaved: (name) => {
     hideErrorNotice();
@@ -3297,15 +3296,13 @@ const boardNameDialog = createBoardNameDialog({
 let parentDialog: ParentDialog | null = null;
 
 const contactsDialog = createContactsDialog({
-  getContacts: ownContactsWithoutSelf,
-  getMaxContacts: () => (ownSelfContact() ? MAX_CONTACTS - 1 : MAX_CONTACTS),
-  getReservedLabels: () => {
-    const self = ownSelfContact();
-    return self ? [self.label] : [];
-  },
+  getContacts: ownContacts,
+  getMaxContacts: () => MAX_CONTACTS,
+  // The board's own key is not a contact; labels no longer share a namespace
+  // with the board name, so only the userId is reserved.
   getReservedUserIds: () => {
-    const self = ownSelfContact();
-    return self ? [self.userId] : [];
+    const ownId = ownIdentity?.pubkey;
+    return ownId ? [ownId] : [];
   },
   getUsedContactCount: (userId) => {
     if (!ownState) return 0;
@@ -3315,12 +3312,9 @@ const contactsDialog = createContactsDialog({
     const parentUse = ownState.parent.userId === userId ? 1 : 0;
     return slotUses + parentUse;
   },
-  saveContacts: (entries) => {
-    const ownId = ownIdentity?.pubkey ?? null;
-    const others = entries.filter((contact) => contact.userId !== ownId);
-    const self = ownSelfContact();
-    return backend.saveContacts(self ? [...others, self] : others);
-  },
+  addContact: (entry) => backend.addContact(entry),
+  updateContact: (userId, patch) => backend.updateContact(userId, patch),
+  removeContact: (userId) => backend.removeContact(userId),
   announce,
   onAdded: (contact) => {
     if (addingForParent) {
@@ -3340,7 +3334,7 @@ const contactsDialog = createContactsDialog({
 });
 
 parentDialog = createParentDialog({
-  getContacts: ownContactsWithoutSelf,
+  getContacts: ownContacts,
   getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
   getParent: () => ownState?.parent.userId ?? null,
   readBoard: readBoardForView,
@@ -3382,13 +3376,29 @@ const identityDialogs = createIdentityDialogs({
   offline: isOffline,
   getIdentity: () => ownIdentity,
   exportIdentity: () => backend.exportIdentity(),
-  importIdentity: (seed, nextSeq, contactsNextSeq, parentNextSeq, paymentsNextSeq) =>
+  importIdentity: (
+    seed,
+    nextSeq,
+    contactsNextSeq,
+    parentNextSeq,
+    paymentsNextSeq,
+    adjustmentsNextSeq,
+    childNamesNextSeq,
+    selfNameNextSeq,
+    payloadVersion,
+    contacts,
+  ) =>
     backend.importIdentity(
       seed,
       nextSeq,
       contactsNextSeq,
       parentNextSeq,
       paymentsNextSeq,
+      adjustmentsNextSeq,
+      childNamesNextSeq,
+      selfNameNextSeq,
+      payloadVersion,
+      contacts,
     ),
   announce,
   copy: copyToClipboard,
@@ -3574,8 +3584,8 @@ childOpen.addEventListener("click", () => {
 boardHome.addEventListener("click", goHome);
 boardNameEdit.addEventListener("click", () => {
   if (!view?.isOwn) return;
-  const self = ownSelfContact();
-  if (self) boardNameDialog.openEdit(self.label);
+  const name = ownSelfName();
+  if (name !== null) boardNameDialog.openEdit(name);
   else boardNameDialog.requireName();
 });
 boardCopy.addEventListener("click", () => {

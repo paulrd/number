@@ -7,9 +7,10 @@
     "repoRoot": "/build"
   },
   "contract": {
-    "codeHash": "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
+    "codeHash": "CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw",
     "file": "published/contract/number_contract.wasm",
     "generations": [
+      "CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw",
       "5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg",
       "C8AnGpZR7y2n73SUN9ftCctG83V3n83CruunfbTEFVGT",
       "6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57",
@@ -21,11 +22,16 @@
     ]
   },
   "delegate": {
-    "codeHash": "3PoWyq37qCRhFNzjhYzedtyqxHA6saaj3NBJyj993Jrb",
-    "key": "8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg",
+    "codeHash": "Cnfyn2fWBRSgyrmdxhUcZf2FrijvnHvoRMpznM85Lx5S",
+    "key": "9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA",
     "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
     "file": "published/delegate/number_delegate.wasm",
     "generations": [
+      {
+        "key": "9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA",
+        "codeHash": "Cnfyn2fWBRSgyrmdxhUcZf2FrijvnHvoRMpznM85Lx5S",
+        "webappId": "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k"
+      },
       {
         "key": "8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg",
         "codeHash": "3PoWyq37qCRhFNzjhYzedtyqxHA6saaj3NBJyj993Jrb",

@@ -1,15 +1,17 @@
 //! `number-contract` — one board per owner, with eight number slots, a signed
-//! address book, at most one signed parent, at most one signed cooperative
-//! payment and a signed issue/burn adjustment log.
+//! own-board name, at most one signed parent, parent-written child names, at
+//! most one signed cooperative payment and a signed issue/burn adjustment log.
 //!
 //! The contract is parameterised by the owner's raw 32-byte Ed25519 verifying
-//! key. Every non-empty (`seq > 0`) slot, contacts record, parent record,
-//! payments record and adjustments record carries an Ed25519 signature over the
-//! canonical bytes defined in `DESIGN.md` §2, `DESIGN-payments.md` and
-//! `DESIGN-v4.1-v5.md` "Pass 2". State is a fixed-size array of eight slots plus
-//! one contacts record, one parent record, one payments record and one
-//! adjustments record, so encoding is deterministic and the merge is a
-//! component-wise maximum; there are no maps, caps or removals in state.
+//! key. Every non-empty (`seq > 0`) slot, `selfName` record, parent record,
+//! `childNames` record, payments record and adjustments record carries an
+//! Ed25519 signature over the canonical bytes defined in `DESIGN.md` §2,
+//! `DESIGN-payments.md`, `DESIGN-v4.1-v5.md` "Pass 2" and `DESIGN-v6.md` §2–§3.
+//! The address book is no longer contract state (v6). State is a fixed-size
+//! array of eight slots plus one `selfName` record, one parent record, one
+//! `childNames` record, one payments record and one adjustments record, so
+//! encoding is deterministic and the merge is a component-wise maximum; there
+//! are no maps, caps or removals in state.
 //!
 //! The payments and adjustments records are evidence, not proof: the contract
 //! checks their shape and signatures but deliberately does not check tree
@@ -26,10 +28,8 @@ use serde::{Deserialize, Serialize};
 /// Number of slots in a board. This is fixed by the design.
 pub const SLOT_COUNT: usize = 8;
 
-/// Maximum number of contacts in the address book.
-pub const MAX_CONTACTS: usize = 64;
-/// Maximum length of a contact label in UTF-8 bytes.
-pub const MAX_CONTACT_LABEL_BYTES: usize = 64;
+/// Maximum length of a signed board/child name in UTF-8 bytes.
+pub const MAX_NAME_BYTES: usize = 64;
 /// Maximum length of `Entry::unit` in UTF-8 bytes.
 pub const MAX_UNIT_BYTES: usize = 16;
 /// Maximum length of `Entry::note` in UTF-8 bytes.
@@ -61,19 +61,24 @@ pub const MAX_ADJUSTMENT_NOTE_BYTES: usize = 128;
 
 /// State schema version written to (and required in) every wire object.
 ///
-/// v5 adds the `adjustments` record. The client upgrades a v4 state by adding
-/// `{"seq":0,"entries":[],"sig":null}` and setting `v:5`; slot, contacts,
-/// parent, payments and v2/v3/v4 signing bytes are unchanged, so every existing
-/// signature keeps validating.
-pub const STATE_VERSION: u8 = 5;
+/// v6 removes the replicated address book (`contacts`) and adds two signed
+/// naming records, `selfName` and `childNames`. The client upgrades a v5 state
+/// by dropping `contacts`, adding both empty records and setting `v:6`; slot,
+/// parent, payments and adjustments signing bytes are unchanged, so every
+/// surviving signature keeps validating. A v5 board is served by its own
+/// immutable v5 instance, so no compatibility path is needed here.
+pub const STATE_VERSION: u8 = 6;
 
 /// Domain prefix of the canonical slot signing bytes. Unchanged from v2 so a v2
-/// state's signatures keep validating after the client upgrades it to v5;
+/// state's signatures keep validating after the client upgrades it to v6;
 /// changing this is a breaking state change; see `DESIGN.md` §2.
 pub const SIGNING_DOMAIN_SLOT: &[u8] = b"number:v2:slot";
 
-/// Domain prefix of the canonical contacts signing bytes. Unchanged from v2.
-pub const SIGNING_DOMAIN_CONTACTS: &[u8] = b"number:v2:contacts";
+/// Domain prefix of the canonical `selfName` signing bytes (v6 only).
+pub const SIGNING_DOMAIN_SELF_NAME: &[u8] = b"number:v6:selfname";
+
+/// Domain prefix of the canonical `childNames` signing bytes (v6 only).
+pub const SIGNING_DOMAIN_CHILD_NAMES: &[u8] = b"number:v6:childnames";
 
 /// Domain prefix of the canonical parent signing bytes.
 pub const SIGNING_DOMAIN_PARENT: &[u8] = b"number:v3:parent";
@@ -519,35 +524,78 @@ pub fn adjustments_signing_bytes(seq: u64, entries: &[Adjustment]) -> Vec<u8> {
     out
 }
 
-/// One address-book entry. Both fields are covered by the contacts signature.
+/// The name the board owner gives their own board. `seq == 0` is the empty
+/// record (never named); `seq > 0` with `name == None` is a legal tombstone
+/// (the name was cleared).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Contact {
-    pub label: String,
-    #[serde(rename = "userId")]
-    pub user_id: String,
-}
-
-impl Contact {
-    /// Whether the label is non-empty and within bounds and `userId` is a
-    /// well-formed Ed25519 public key encoding.
-    pub fn is_valid(&self) -> bool {
-        !self.label.is_empty()
-            && self.label.len() <= MAX_CONTACT_LABEL_BYTES
-            && validate_contact(&self.user_id)
-    }
-}
-
-/// The signed address book. `seq == 0` is the empty record (no entries, no
-/// signature); `seq > 0` with an empty `entries` list is a legal tombstone.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Contacts {
+pub struct SelfName {
     pub seq: u64,
-    pub entries: Vec<Contact>,
+    pub name: Option<String>,
     pub sig: Option<String>,
 }
 
-impl Contacts {
-    /// The initial, empty address book.
+impl SelfName {
+    /// The initial, empty record.
+    pub fn empty() -> Self {
+        Self {
+            seq: 0,
+            name: None,
+            sig: None,
+        }
+    }
+
+    /// Whether this record is valid under the owner `key`.
+    ///
+    /// Covers the seq-0 invariant, the name bounds, the tombstone shape and the
+    /// Ed25519 signature over the canonical bytes.
+    pub fn is_valid(&self, key: &VerifyingKey) -> bool {
+        if self.seq == 0 {
+            return self.name.is_none() && self.sig.is_none();
+        }
+        if self.name.as_deref().is_some_and(|name| !valid_name(name)) {
+            return false;
+        }
+        let Some(signature) = self.sig.as_deref().and_then(parse_signature) else {
+            return false;
+        };
+        let bytes = self_name_signing_bytes(self.seq, self.name.as_deref());
+        key.verify_strict(&bytes, &signature).is_ok()
+    }
+}
+
+/// One child name written by the parent, keyed by the parent's own slot index.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChildName {
+    /// Slot index on the parent board, `0..=7`.
+    pub slot: u8,
+    /// The child owner's 64 lowercase hex public key.
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    /// The parent's name for that child, 1–64 UTF-8 bytes.
+    pub name: String,
+}
+
+impl ChildName {
+    /// Whether the slot, user id and name are within the schema bounds.
+    pub fn is_valid(&self) -> bool {
+        usize::from(self.slot) < SLOT_COUNT
+            && validate_contact(&self.user_id)
+            && valid_name(&self.name)
+    }
+}
+
+/// The names a parent gives its children. `seq == 0` is the empty record (no
+/// entries, no signature); `seq > 0` with an empty `entries` list is a legal
+/// tombstone. The whole record merges last-writer-wins, like the parent record.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChildNames {
+    pub seq: u64,
+    pub entries: Vec<ChildName>,
+    pub sig: Option<String>,
+}
+
+impl ChildNames {
+    /// The initial, empty record.
     pub fn empty() -> Self {
         Self {
             seq: 0,
@@ -556,25 +604,30 @@ impl Contacts {
         }
     }
 
-    /// Whether this record is valid under `key`.
+    /// Whether this record is valid under the owner `key`.
     ///
-    /// Covers the seq-0 invariant, the contact count and field bounds,
-    /// uniqueness of both `userId` and exact `label`, and the Ed25519 signature
-    /// over the canonical bytes.
+    /// Covers the seq-0 invariant, the entry count, strictly ascending slot
+    /// order (which also rejects duplicate slots), field bounds and the
+    /// Ed25519 signature over the canonical bytes.
+    ///
+    /// Deliberately does **not** compare entries with `slots`: the two records
+    /// merge independently, so a merged state may hold a name whose slot write
+    /// lost or was rebound. The reader enforces the binding.
     pub fn is_valid(&self, key: &VerifyingKey) -> bool {
         if self.seq == 0 {
             return self.entries.is_empty() && self.sig.is_none();
         }
-        if self.entries.len() > MAX_CONTACTS {
+        if self.entries.len() > SLOT_COUNT {
             return false;
         }
-        for (index, contact) in self.entries.iter().enumerate() {
-            if !contact.is_valid() {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !entry.is_valid() {
                 return false;
             }
-            let earlier = &self.entries[..index];
-            if earlier.iter().any(|other| other.user_id == contact.user_id)
-                || earlier.iter().any(|other| other.label == contact.label)
+            // Strictly ascending slot order: rejects duplicates and reordering.
+            if self.entries[..index]
+                .iter()
+                .any(|other| other.slot >= entry.slot)
             {
                 return false;
             }
@@ -582,9 +635,14 @@ impl Contacts {
         let Some(signature) = self.sig.as_deref().and_then(parse_signature) else {
             return false;
         };
-        let bytes = contacts_signing_bytes(self.seq, &self.entries);
+        let bytes = child_names_signing_bytes(self.seq, &self.entries);
         key.verify_strict(&bytes, &signature).is_ok()
     }
+}
+
+/// Whether `value` is a 1–[`MAX_NAME_BYTES`] UTF-8 string.
+fn valid_name(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_NAME_BYTES
 }
 
 /// The signed parent link. `seq == 0` is the never-set record (no parent and no
@@ -717,25 +775,34 @@ impl Slot {
     }
 }
 
-/// Full contract state v5 (§2 plus `DESIGN-payments.md` and the Pass 2
-/// adjustment log).
+/// Full contract state v6 (`DESIGN.md` §2 plus `DESIGN-payments.md`, the Pass 2
+/// adjustment log and `DESIGN-v6.md` §1).
+///
+/// `deny_unknown_fields` is deliberate: a peer must not be able to smuggle an
+/// unsigned `contacts` blob (or any other unvalidated key) into the encoded
+/// state, where two clients would disagree about bytes nothing validates.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateV5 {
+#[serde(deny_unknown_fields)]
+pub struct StateV6 {
     pub v: u8,
+    #[serde(rename = "selfName")]
+    pub self_name: SelfName,
     pub parent: Parent,
-    pub contacts: Contacts,
+    #[serde(rename = "childNames")]
+    pub child_names: ChildNames,
     pub payments: Payments,
     pub adjustments: Adjustments,
     pub slots: [Slot; SLOT_COUNT],
 }
 
-impl StateV5 {
+impl StateV6 {
     /// An all-empty board.
     pub fn empty() -> Self {
         Self {
             v: STATE_VERSION,
+            self_name: SelfName::empty(),
             parent: Parent::empty(),
-            contacts: Contacts::empty(),
+            child_names: ChildNames::empty(),
             payments: Payments::empty(),
             adjustments: Adjustments::empty(),
             slots: std::array::from_fn(|_| Slot::empty()),
@@ -749,24 +816,29 @@ impl StateV5 {
 
     /// Encode state deterministically as JSON.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StateV5 serialization cannot fail")
+        serde_json::to_vec(self).expect("StateV6 serialization cannot fail")
     }
 
-    /// Validate version, parent, contacts, payments, adjustments, slot count
-    /// (enforced by the array type), the seq-0 invariants, field bounds and
-    /// every signature under `key`.
+    /// Validate version, `selfName`, parent, `childNames`, payments,
+    /// adjustments, slot count (enforced by the array type), the seq-0
+    /// invariants, field bounds and every signature under `key`.
     ///
-    /// Merge-invariant only: adjustments are never compared with `slots` here.
-    /// The two records merge independently, so a merged state may legitimately
-    /// carry an adjustment whose referenced slot write was superseded.
+    /// Merge-invariant only: adjustments are never compared with `slots`, and
+    /// `childNames` entries are never compared with `slots`. The records merge
+    /// independently, so a merged state may legitimately carry an adjustment
+    /// whose referenced slot write was superseded, or a child name whose slot
+    /// write lost or was rebound. The reader resolves both bindings.
     pub fn validate(&self, key: &VerifyingKey) -> Result<(), ContractError> {
         if self.v != STATE_VERSION {
+            return Err(ContractError::InvalidState);
+        }
+        if !self.self_name.is_valid(key) {
             return Err(ContractError::InvalidState);
         }
         if !self.parent.is_valid(key) {
             return Err(ContractError::InvalidState);
         }
-        if !self.contacts.is_valid(key) {
+        if !self.child_names.is_valid(key) {
             return Err(ContractError::InvalidState);
         }
         if !self.payments.is_valid(key) {
@@ -786,13 +858,46 @@ impl StateV5 {
     /// Merge `other` component-wise. This is a maximum over the total order from
     /// §3/§5, so it is associative, commutative, idempotent and absorbing.
     pub fn merge(&mut self, other: &Self) {
+        self.self_name = merge_self_name(&self.self_name, &other.self_name);
         self.parent = merge_parent(&self.parent, &other.parent);
-        self.contacts = merge_contacts(&self.contacts, &other.contacts);
+        self.child_names = merge_child_names(&self.child_names, &other.child_names);
         self.payments = merge_payments(&self.payments, &other.payments);
         self.adjustments = merge_adjustments(&self.adjustments, &other.adjustments);
         for (index, other_slot) in other.slots.iter().enumerate() {
             self.slots[index] = merge_slot(&self.slots[index], other_slot);
         }
+    }
+}
+
+/// `selfName` merge: higher `seq` wins; on equal `seq` the lexicographically
+/// greater signature bytes win. A higher-seq tombstone clears the name.
+fn merge_self_name(a: &SelfName, b: &SelfName) -> SelfName {
+    if a.seq > b.seq {
+        return a.clone();
+    }
+    if b.seq > a.seq {
+        return b.clone();
+    }
+    if self_name_signature_bytes(a) >= self_name_signature_bytes(b) {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// `childNames` merge: whole-record last-writer-wins on `seq`; on equal `seq`
+/// the lexicographically greater signature bytes win.
+fn merge_child_names(a: &ChildNames, b: &ChildNames) -> ChildNames {
+    if a.seq > b.seq {
+        return a.clone();
+    }
+    if b.seq > a.seq {
+        return b.clone();
+    }
+    if child_names_signature_bytes(a) >= child_names_signature_bytes(b) {
+        a.clone()
+    } else {
+        b.clone()
     }
 }
 
@@ -806,22 +911,6 @@ fn merge_parent(a: &Parent, b: &Parent) -> Parent {
         return b.clone();
     }
     if parent_signature_bytes(a) >= parent_signature_bytes(b) {
-        a.clone()
-    } else {
-        b.clone()
-    }
-}
-
-/// Contacts merge: higher `seq` wins; on equal `seq` the lexicographically
-/// greater signature bytes win.
-fn merge_contacts(a: &Contacts, b: &Contacts) -> Contacts {
-    if a.seq > b.seq {
-        return a.clone();
-    }
-    if b.seq > a.seq {
-        return b.clone();
-    }
-    if contacts_signature_bytes(a) >= contacts_signature_bytes(b) {
         a.clone()
     } else {
         b.clone()
@@ -888,10 +977,24 @@ fn signature_bytes(slot: &Slot) -> [u8; 64] {
         .unwrap_or([0; 64])
 }
 
-/// The contacts signature field as bytes. An empty record (and any malformed
+/// The `selfName` signature field as bytes. An empty record (and any malformed
 /// sig, which the validators reject before merging) compares as all-zero bytes.
-fn contacts_signature_bytes(contacts: &Contacts) -> [u8; 64] {
-    contacts
+fn self_name_signature_bytes(record: &SelfName) -> [u8; 64] {
+    record
+        .sig
+        .as_deref()
+        .and_then(|sig| {
+            let bytes = hex::decode(sig).ok()?;
+            bytes.try_into().ok()
+        })
+        .unwrap_or([0; 64])
+}
+
+/// The `childNames` signature field as bytes. An empty record (and any
+/// malformed sig, which the validators reject before merging) compares as
+/// all-zero bytes.
+fn child_names_signature_bytes(record: &ChildNames) -> [u8; 64] {
+    record
         .sig
         .as_deref()
         .and_then(|sig| {
@@ -1000,30 +1103,62 @@ pub fn signing_bytes(slot_index: u8, seq: u64, entry: Option<&Entry>) -> Vec<u8>
     out
 }
 
-/// Canonical contacts signing bytes, hand-built exactly as specified in
-/// `DESIGN.md` §2.
+/// Canonical `selfName` signing bytes, hand-built exactly as specified in
+/// `DESIGN-v6.md` §2.
 ///
 /// ```text
-/// b"number:v2:contacts"
+/// b"number:v6:selfname"
+/// || seq: u64 little-endian
+/// || tag: u8                 // 0 = no name (cleared), 1 = name set
+/// // only when tag == 1:
+/// || len: u32 LE || name bytes (UTF-8)
+/// ```
+///
+/// A tombstone at `seq > 0` signs `tag = 0`; `seq == 0` is never signed.
+pub fn self_name_signing_bytes(seq: u64, name: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96);
+    out.extend_from_slice(SIGNING_DOMAIN_SELF_NAME);
+    out.extend_from_slice(&seq.to_le_bytes());
+    match name {
+        None => out.push(0),
+        Some(name) => {
+            out.push(1);
+            let bytes = name.as_bytes();
+            let len = u32::try_from(bytes.len()).expect("name bounds keep lengths below u32::MAX");
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+    }
+    out
+}
+
+/// Canonical `childNames` signing bytes, hand-built exactly as specified in
+/// `DESIGN-v6.md` §3.
+///
+/// ```text
+/// b"number:v6:childnames"
 /// || seq: u64 little-endian
 /// || count: u32 LE
-/// || for each entry, in order:
-///      label_len: u32 LE || label bytes
+/// || for each entry, in the given order:
+///      slot: u8
 ///      || userId: 32 raw bytes
+///      || len: u32 LE || name bytes (UTF-8)
 /// ```
-pub fn contacts_signing_bytes(seq: u64, entries: &[Contact]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(SIGNING_DOMAIN_CONTACTS);
+///
+/// Entry order is part of the signature. `seq == 0` is never signed.
+pub fn child_names_signing_bytes(seq: u64, entries: &[ChildName]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96 + entries.len() * 40);
+    out.extend_from_slice(SIGNING_DOMAIN_CHILD_NAMES);
     out.extend_from_slice(&seq.to_le_bytes());
-    let count = u32::try_from(entries.len()).expect("contact count is bounded by MAX_CONTACTS");
+    let count = u32::try_from(entries.len()).expect("child name count is bounded by SLOT_COUNT");
     out.extend_from_slice(&count.to_le_bytes());
-    for contact in entries {
-        let label = contact.label.as_bytes();
-        let label_len =
-            u32::try_from(label.len()).expect("label bounds keep lengths below u32::MAX");
-        out.extend_from_slice(&label_len.to_le_bytes());
-        out.extend_from_slice(label);
-        out.extend_from_slice(&contact_raw(&contact.user_id));
+    for entry in entries {
+        out.push(entry.slot);
+        out.extend_from_slice(&contact_raw(&entry.user_id));
+        let name = entry.name.as_bytes();
+        let name_len = u32::try_from(name.len()).expect("name bounds keep lengths below u32::MAX");
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(name);
     }
     out
 }
@@ -1058,19 +1193,22 @@ fn parse_signature(sig: &str) -> Option<Signature> {
     Some(Signature::from_bytes(&array))
 }
 
-/// Summary of one slot or the contacts record (§2.6):
+/// Summary of one slot or one signed record (§2.6):
 /// `[seq, first 16 bytes of BLAKE3(signing bytes)]`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SlotSummary(pub u64, pub String);
 
-/// State summary (§2.6). One parent pair, one contacts pair, one payments pair,
-/// one adjustments pair plus exactly eight slot pairs; the digest is all-zero
-/// for an empty record.
+/// State summary (§2.6, v6). One `selfName` pair, one parent pair, one
+/// `childNames` pair, one payments pair, one adjustments pair plus exactly
+/// eight slot pairs; the digest is all-zero for an empty record.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub v: u8,
     pub parent: SlotSummary,
-    pub contacts: SlotSummary,
+    #[serde(rename = "selfName")]
+    pub self_name: SlotSummary,
+    #[serde(rename = "childNames")]
+    pub child_names: SlotSummary,
     pub payments: SlotSummary,
     pub adjustments: SlotSummary,
     pub slots: [SlotSummary; SLOT_COUNT],
@@ -1078,7 +1216,7 @@ pub struct Summary {
 
 impl Summary {
     /// Build the summary for `state`.
-    pub fn of(state: &StateV5) -> Self {
+    pub fn of(state: &StateV6) -> Self {
         let parent = if state.parent.seq == 0 {
             SlotSummary(0, hex::encode([0u8; 16]))
         } else {
@@ -1088,14 +1226,23 @@ impl Summary {
             ));
             SlotSummary(state.parent.seq, hex::encode(digest))
         };
-        let contacts = if state.contacts.seq == 0 {
+        let self_name = if state.self_name.seq == 0 {
             SlotSummary(0, hex::encode([0u8; 16]))
         } else {
-            let digest = digest16(&contacts_signing_bytes(
-                state.contacts.seq,
-                &state.contacts.entries,
+            let digest = digest16(&self_name_signing_bytes(
+                state.self_name.seq,
+                state.self_name.name.as_deref(),
             ));
-            SlotSummary(state.contacts.seq, hex::encode(digest))
+            SlotSummary(state.self_name.seq, hex::encode(digest))
+        };
+        let child_names = if state.child_names.seq == 0 {
+            SlotSummary(0, hex::encode([0u8; 16]))
+        } else {
+            let digest = digest16(&child_names_signing_bytes(
+                state.child_names.seq,
+                &state.child_names.entries,
+            ));
+            SlotSummary(state.child_names.seq, hex::encode(digest))
         };
         let payments = if state.payments.seq == 0 {
             SlotSummary(0, hex::encode([0u8; 16]))
@@ -1128,7 +1275,8 @@ impl Summary {
         Self {
             v: STATE_VERSION,
             parent,
-            contacts,
+            self_name,
+            child_names,
             payments,
             adjustments,
             slots,
@@ -1151,8 +1299,12 @@ impl Summary {
         if summary.parent.0 == 0 && parent_digest != [0u8; 16] {
             return Err(ContractError::InvalidDelta);
         }
-        let contacts_digest = summary_digest(&summary.contacts.1)?;
-        if summary.contacts.0 == 0 && contacts_digest != [0u8; 16] {
+        let self_name_digest = summary_digest(&summary.self_name.1)?;
+        if summary.self_name.0 == 0 && self_name_digest != [0u8; 16] {
+            return Err(ContractError::InvalidDelta);
+        }
+        let child_names_digest = summary_digest(&summary.child_names.1)?;
+        if summary.child_names.0 == 0 && child_names_digest != [0u8; 16] {
             return Err(ContractError::InvalidDelta);
         }
         let payments_digest = summary_digest(&summary.payments.1)?;
@@ -1216,26 +1368,30 @@ impl DeltaSlot {
     }
 }
 
-/// Validated delta payload: the optional parent, contacts, payments and
-/// adjustments records plus changed slots.
+/// Validated delta payload: the optional `selfName`, parent, `childNames`,
+/// payments and adjustments records plus changed slots.
 type ValidatedDelta = (
+    Option<SelfName>,
     Option<Parent>,
-    Option<Contacts>,
+    Option<ChildNames>,
     Option<Payments>,
     Option<Adjustments>,
     Vec<(u8, Slot)>,
 );
 
-/// State delta (§2.7, v5).
+/// State delta (§2.7, v6).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Delta {
     pub v: u8,
+    /// `null`/absent when the `selfName` record is unchanged.
+    #[serde(default, rename = "selfName")]
+    pub self_name: Option<SelfName>,
     /// `null`/absent when the parent record is unchanged.
     #[serde(default)]
     pub parent: Option<Parent>,
-    /// `null`/absent when the contacts record is unchanged.
-    #[serde(default)]
-    pub contacts: Option<Contacts>,
+    /// `null`/absent when the `childNames` record is unchanged.
+    #[serde(default, rename = "childNames")]
+    pub child_names: Option<ChildNames>,
     /// `null`/absent when the payments record is unchanged.
     #[serde(default)]
     pub payments: Option<Payments>,
@@ -1256,13 +1412,22 @@ impl Delta {
         serde_json::from_slice(bytes).map_err(|_| ContractError::InvalidDelta)
     }
 
-    /// Validate the parent, contacts, payments and adjustments records and
-    /// every slot under `key`, returning them for merging. Validation is
-    /// all-or-nothing before anything is applied.
+    /// Validate the `selfName`, parent, `childNames`, payments and adjustments
+    /// records and every slot under `key`, returning them for merging.
+    /// Validation is all-or-nothing before anything is applied.
     fn validated(&self, key: &VerifyingKey) -> Result<ValidatedDelta, ContractError> {
         if self.v != STATE_VERSION {
             return Err(ContractError::InvalidDelta);
         }
+        let self_name = match &self.self_name {
+            None => None,
+            Some(self_name) => {
+                if !self_name.is_valid(key) {
+                    return Err(ContractError::InvalidDelta);
+                }
+                Some(self_name.clone())
+            }
+        };
         let parent = match &self.parent {
             None => None,
             Some(parent) => {
@@ -1272,13 +1437,13 @@ impl Delta {
                 Some(parent.clone())
             }
         };
-        let contacts = match &self.contacts {
+        let child_names = match &self.child_names {
             None => None,
-            Some(contacts) => {
-                if !contacts.is_valid(key) {
+            Some(child_names) => {
+                if !child_names.is_valid(key) {
                     return Err(ContractError::InvalidDelta);
                 }
-                Some(contacts.clone())
+                Some(child_names.clone())
             }
         };
         let payments = match &self.payments {
@@ -1310,7 +1475,7 @@ impl Delta {
             }
             slots.push((delta_slot.i, slot));
         }
-        Ok((parent, contacts, payments, adjustments, slots))
+        Ok((self_name, parent, child_names, payments, adjustments, slots))
     }
 }
 
@@ -1322,7 +1487,7 @@ impl Delta {
 /// pre-update slot value (0 for an empty slot) plus `delta`. This is not part of
 /// `validate`, because adjustments and slots merge independently.
 fn adjustments_provenance_holds(
-    current: &StateV5,
+    current: &StateV6,
     adjustments: &Adjustments,
     slots: &[(u8, Slot)],
 ) -> bool {
@@ -1364,10 +1529,11 @@ fn owner_key(parameters: &Parameters<'_>) -> Result<VerifyingKey, ContractError>
 
 /// Staged, already-validated incoming update.
 enum Incoming {
-    Full(Box<StateV5>),
+    Full(Box<StateV6>),
     Delta {
+        self_name: Option<SelfName>,
         parent: Option<Parent>,
-        contacts: Option<Contacts>,
+        child_names: Option<ChildNames>,
         payments: Option<Box<Payments>>,
         adjustments: Option<Box<Adjustments>>,
         slots: Vec<(u8, Slot)>,
@@ -1387,7 +1553,7 @@ impl ContractInterface for NumberContract {
         let Ok(key) = owner_key(&parameters) else {
             return Ok(ValidateResult::Invalid);
         };
-        let Ok(state) = StateV5::decode(state.as_ref()) else {
+        let Ok(state) = StateV6::decode(state.as_ref()) else {
             return Ok(ValidateResult::Invalid);
         };
         match state.validate(&key) {
@@ -1405,26 +1571,28 @@ impl ContractInterface for NumberContract {
             return Ok(UpdateModification::valid(state));
         }
         let key = owner_key(&parameters)?;
-        let mut current = StateV5::decode(state.as_ref())?;
+        let mut current = StateV6::decode(state.as_ref())?;
         current.validate(&key)?;
 
         // Stage and validate everything before mutating. A single invalid
-        // contact or slot rejects the whole update (single writer, so atomicity
+        // record or slot rejects the whole update (single writer, so atomicity
         // is correct).
         let mut staged = Vec::with_capacity(data.len());
         for item in &data {
             match item {
                 UpdateData::State(incoming) => {
-                    let incoming = StateV5::decode(incoming.as_ref())?;
+                    let incoming = StateV6::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                 }
                 UpdateData::Delta(delta) => {
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, payments, adjustments, slots) = delta.validated(&key)?;
+                    let (self_name, parent, child_names, payments, adjustments, slots) =
+                        delta.validated(&key)?;
                     staged.push(Incoming::Delta {
+                        self_name,
                         parent,
-                        contacts,
+                        child_names,
                         payments: payments.map(Box::new),
                         adjustments: adjustments.map(Box::new),
                         slots,
@@ -1434,14 +1602,16 @@ impl ContractInterface for NumberContract {
                     state: incoming,
                     delta,
                 } => {
-                    let incoming = StateV5::decode(incoming.as_ref())?;
+                    let incoming = StateV6::decode(incoming.as_ref())?;
                     incoming.validate(&key)?;
                     let delta = Delta::decode(delta.as_ref())?;
-                    let (parent, contacts, payments, adjustments, slots) = delta.validated(&key)?;
+                    let (self_name, parent, child_names, payments, adjustments, slots) =
+                        delta.validated(&key)?;
                     staged.push(Incoming::Full(Box::new(incoming)));
                     staged.push(Incoming::Delta {
+                        self_name,
                         parent,
-                        contacts,
+                        child_names,
                         payments: payments.map(Box::new),
                         adjustments: adjustments.map(Box::new),
                         slots,
@@ -1456,8 +1626,9 @@ impl ContractInterface for NumberContract {
             match incoming {
                 Incoming::Full(incoming) => current.merge(&incoming),
                 Incoming::Delta {
+                    self_name,
                     parent,
-                    contacts,
+                    child_names,
                     payments,
                     adjustments,
                     slots,
@@ -1471,11 +1642,14 @@ impl ContractInterface for NumberContract {
                             return Err(ContractError::InvalidDelta);
                         }
                     }
+                    if let Some(self_name) = self_name {
+                        current.self_name = merge_self_name(&current.self_name, &self_name);
+                    }
                     if let Some(parent) = parent {
                         current.parent = merge_parent(&current.parent, &parent);
                     }
-                    if let Some(contacts) = contacts {
-                        current.contacts = merge_contacts(&current.contacts, &contacts);
+                    if let Some(child_names) = child_names {
+                        current.child_names = merge_child_names(&current.child_names, &child_names);
                     }
                     if let Some(payments) = payments {
                         current.payments = merge_payments(&current.payments, &payments);
@@ -1498,7 +1672,7 @@ impl ContractInterface for NumberContract {
         _parameters: Parameters<'static>,
         state: State<'static>,
     ) -> Result<StateSummary<'static>, ContractError> {
-        let state = StateV5::decode(state.as_ref())?;
+        let state = StateV6::decode(state.as_ref())?;
         Ok(StateSummary::from(Summary::of(&state).to_bytes()))
     }
 
@@ -1507,7 +1681,7 @@ impl ContractInterface for NumberContract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        let state = StateV5::decode(state.as_ref())?;
+        let state = StateV6::decode(state.as_ref())?;
         // An empty summary is what a brand-new subscriber presents: it holds
         // nothing, so the full board is the delta. Treat an undecodable summary
         // the same way (send everything) rather than failing — a failed delta
@@ -1537,21 +1711,39 @@ impl ContractInterface for NumberContract {
             }
         };
 
-        let local_contacts_digest = if state.contacts.seq == 0 {
+        let local_self_name_digest = if state.self_name.seq == 0 {
             [0u8; 16]
         } else {
-            digest16(&contacts_signing_bytes(
-                state.contacts.seq,
-                &state.contacts.entries,
+            digest16(&self_name_signing_bytes(
+                state.self_name.seq,
+                state.self_name.name.as_deref(),
             ))
         };
-        let include_contacts = match &summary {
-            None => state.contacts.seq > 0,
+        let include_self_name = match &summary {
+            None => state.self_name.seq > 0,
             Some(summary) => {
-                let remote_digest = summary_digest(&summary.contacts.1)?;
-                state.contacts.seq > summary.contacts.0
-                    || (state.contacts.seq == summary.contacts.0
-                        && local_contacts_digest != remote_digest)
+                let remote_digest = summary_digest(&summary.self_name.1)?;
+                state.self_name.seq > summary.self_name.0
+                    || (state.self_name.seq == summary.self_name.0
+                        && local_self_name_digest != remote_digest)
+            }
+        };
+
+        let local_child_names_digest = if state.child_names.seq == 0 {
+            [0u8; 16]
+        } else {
+            digest16(&child_names_signing_bytes(
+                state.child_names.seq,
+                &state.child_names.entries,
+            ))
+        };
+        let include_child_names = match &summary {
+            None => state.child_names.seq > 0,
+            Some(summary) => {
+                let remote_digest = summary_digest(&summary.child_names.1)?;
+                state.child_names.seq > summary.child_names.0
+                    || (state.child_names.seq == summary.child_names.0
+                        && local_child_names_digest != remote_digest)
             }
         };
 
@@ -1612,8 +1804,9 @@ impl ContractInterface for NumberContract {
             }
         }
 
-        if !include_parent
-            && !include_contacts
+        if !include_self_name
+            && !include_parent
+            && !include_child_names
             && !include_payments
             && !include_adjustments
             && slots.is_empty()
@@ -1623,13 +1816,18 @@ impl ContractInterface for NumberContract {
         }
         let delta = Delta {
             v: STATE_VERSION,
+            self_name: if include_self_name {
+                Some(state.self_name.clone())
+            } else {
+                None
+            },
             parent: if include_parent {
                 Some(state.parent.clone())
             } else {
                 None
             },
-            contacts: if include_contacts {
-                Some(state.contacts.clone())
+            child_names: if include_child_names {
+                Some(state.child_names.clone())
             } else {
                 None
             },
@@ -1666,10 +1864,11 @@ mod tests {
         SigningKey::from_bytes(&TEST_SEED)
     }
 
-    fn contact(label: &str, user_id: &str) -> Contact {
-        Contact {
-            label: label.into(),
+    fn child_name(slot: u8, user_id: &str, name: &str) -> ChildName {
+        ChildName {
+            slot,
             user_id: user_id.into(),
+            name: name.into(),
         }
     }
 
@@ -1682,9 +1881,18 @@ mod tests {
         }
     }
 
-    fn signed_contacts(key: &SigningKey, seq: u64, entries: Vec<Contact>) -> Contacts {
-        let signature = key.sign(&contacts_signing_bytes(seq, &entries));
-        Contacts {
+    fn signed_self_name(key: &SigningKey, seq: u64, name: Option<&str>) -> SelfName {
+        let signature = key.sign(&self_name_signing_bytes(seq, name));
+        SelfName {
+            seq,
+            name: name.map(str::to_owned),
+            sig: Some(hex::encode(signature.to_bytes())),
+        }
+    }
+
+    fn signed_child_names(key: &SigningKey, seq: u64, entries: Vec<ChildName>) -> ChildNames {
+        let signature = key.sign(&child_names_signing_bytes(seq, &entries));
+        ChildNames {
             seq,
             entries,
             sig: Some(hex::encode(signature.to_bytes())),
@@ -1783,25 +1991,26 @@ mod tests {
         Parameters::from(key.verifying_key().to_bytes().to_vec())
     }
 
-    fn state_of(slots: Vec<Slot>, contacts: Contacts) -> StateV5 {
+    fn state_of(slots: Vec<Slot>, self_name: SelfName, child_names: ChildNames) -> StateV6 {
         let slots: [Slot; SLOT_COUNT] = slots
             .try_into()
             .expect("test helper always supplies eight slots");
-        StateV5 {
+        StateV6 {
             v: STATE_VERSION,
+            self_name,
             parent: Parent::empty(),
-            contacts,
+            child_names,
             payments: Payments::empty(),
             adjustments: Adjustments::empty(),
             slots,
         }
     }
 
-    fn state_with_slots(slots: Vec<Slot>) -> StateV5 {
-        state_of(slots, Contacts::empty())
+    fn state_with_slots(slots: Vec<Slot>) -> StateV6 {
+        state_of(slots, SelfName::empty(), ChildNames::empty())
     }
 
-    fn merged(a: &StateV5, b: &StateV5) -> StateV5 {
+    fn merged(a: &StateV6, b: &StateV6) -> StateV6 {
         let mut result = a.clone();
         result.merge(b);
         result
@@ -1816,10 +2025,11 @@ mod tests {
         }
     }
 
-    fn populated_state(key: &SigningKey) -> StateV5 {
-        let mut state = StateV5::empty();
+    fn populated_state(key: &SigningKey) -> StateV6 {
+        let mut state = StateV6::empty();
+        state.self_name = signed_self_name(key, 1, Some("My Board"));
         state.parent = signed_parent(key, 2, Some(CONTACT_22));
-        state.contacts = signed_contacts(key, 1, vec![contact("Alice", CONTACT_11)]);
+        state.child_names = signed_child_names(key, 1, vec![child_name(2, CONTACT_11, "Alice")]);
         state.slots[2] = signed_slot(key, 2, 4, Some(sample_entry()));
         state.slots[5] = signed_slot(key, 5, 1, None); // tombstone
         state.slots[7] = signed_slot(
@@ -1864,23 +2074,47 @@ mod tests {
     }
 
     #[test]
-    fn golden_contacts_signing_bytes_are_pinned() {
-        let entries = vec![contact("Alice", CONTACT_11)];
-        let bytes = contacts_signing_bytes(1, &entries);
+    fn golden_self_name_signing_bytes_are_pinned() {
+        let bytes = self_name_signing_bytes(1, Some("Alice"));
         assert_eq!(
             hex::encode(&bytes),
-            "6e756d6265723a76323a636f6e746163747301000000000000000100000005000000416c6963651111111111111111111111111111111111111111111111111111111111111111"
+            "6e756d6265723a76363a73656c666e616d6501000000000000000105000000416c696365"
         );
+        assert_eq!(bytes.len(), 18 + 8 + 1 + 4 + 5);
+
+        // A cleared name at seq > 0 signs tag 0.
         assert_eq!(
-            hex::encode(digest16(&bytes)),
-            "415fee80ba4f302cac4cd169a7f075a4"
+            hex::encode(self_name_signing_bytes(2, None)),
+            "6e756d6265723a76363a73656c666e616d65020000000000000000"
+        );
+
+        // `seq == 0` is never signed, but the encoder stays deterministic.
+        let mut zero = SIGNING_DOMAIN_SELF_NAME.to_vec();
+        zero.extend_from_slice(&0u64.to_le_bytes());
+        zero.push(0);
+        assert_eq!(self_name_signing_bytes(0, None), zero);
+    }
+
+    #[test]
+    fn golden_child_names_signing_bytes_are_pinned() {
+        let entries = vec![child_name(2, CONTACT_11, "Alice")];
+        let bytes = child_names_signing_bytes(1, &entries);
+        assert_eq!(
+            hex::encode(&bytes),
+            "6e756d6265723a76363a6368696c646e616d657301000000000000000100000002111111111111111111111111111111111111111111111111111111111111111105000000416c696365"
         );
 
         // An empty list at seq > 0 signs count = 0.
         assert_eq!(
-            hex::encode(contacts_signing_bytes(2, &[])),
-            "6e756d6265723a76323a636f6e7461637473020000000000000000000000"
+            hex::encode(child_names_signing_bytes(2, &[])),
+            "6e756d6265723a76363a6368696c646e616d6573020000000000000000000000"
         );
+
+        // `seq == 0` is never signed, but the encoder stays deterministic.
+        let mut zero = SIGNING_DOMAIN_CHILD_NAMES.to_vec();
+        zero.extend_from_slice(&0u64.to_le_bytes());
+        zero.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(child_names_signing_bytes(0, &[]), zero);
     }
 
     #[test]
@@ -1960,25 +2194,16 @@ mod tests {
         );
     }
 
-    /// Migration safety: the client upgrades a v2 state to v5 by adding an empty
-    /// parent, an empty payments record and an empty adjustments record. The v2
-    /// slot/contacts signing domains are unchanged, so the old signatures must
-    /// still validate under a v5 contract.
+    /// Migration safety: the client upgrades a v5 state to v6 by dropping
+    /// `contacts` and adding empty `selfName`/`childNames` records. The v2 slot
+    /// signing domain is unchanged, so the old signature must still validate
+    /// under a v6 contract.
     #[test]
-    fn v2_signed_slots_and_contacts_validate_with_empty_v5_records() {
+    fn v2_signed_slots_validate_with_empty_v6_records() {
         let key = test_key();
         let verifying = key.verifying_key();
-        let mut state = StateV5::empty();
-        // Produced by the v2 delegate for seed [7u8; 32]:
-        // contacts seq 1 `Alice`, slot 3 seq 7 value 12.
-        state.contacts = Contacts {
-            seq: 1,
-            entries: vec![contact("Alice", CONTACT_11)],
-            sig: Some(
-                "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906"
-                    .into(),
-            ),
-        };
+        let mut state = StateV6::empty();
+        // Produced by the v2 delegate for seed [7u8; 32]: slot 3 seq 7 value 12.
         state.slots[3] = Slot {
             seq: 7,
             entry: Some(Entry {
@@ -1993,8 +2218,10 @@ mod tests {
             ),
         };
 
-        assert_eq!(state.v, 5);
+        assert_eq!(state.v, 6);
+        assert_eq!(state.self_name, SelfName::empty());
         assert_eq!(state.parent, Parent::empty());
+        assert_eq!(state.child_names, ChildNames::empty());
         assert_eq!(state.payments, Payments::empty());
         assert_eq!(state.adjustments, Adjustments::empty());
         assert!(state.validate(&verifying).is_ok());
@@ -2034,25 +2261,6 @@ mod tests {
             ),
         };
         assert!(slot.is_valid(3, &verifying_key));
-    }
-
-    #[test]
-    fn delegate_golden_contacts_signature_verifies_under_contract_rules() {
-        let pubkey =
-            hex::decode("ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c")
-                .expect("golden pubkey is hex");
-        let verifying_key =
-            VerifyingKey::from_bytes(&pubkey.try_into().expect("golden pubkey is 32 bytes"))
-                .expect("golden pubkey is a valid point");
-        let contacts = Contacts {
-            seq: 1,
-            entries: vec![contact("Alice", CONTACT_11)],
-            sig: Some(
-                "c23847c3587eb9d295db216d0933aa592a54d5374232efa456c4e0cf64b5194da1a58aa0939fbf5a6bef2024ff8ac152ea75afe3a9a1cc655a4979de43cb0906"
-                    .into(),
-            ),
-        };
-        assert!(contacts.is_valid(&verifying_key));
     }
 
     #[test]
@@ -2217,25 +2425,246 @@ mod tests {
     }
 
     #[test]
-    fn contacts_seq_zero_requires_empty_entries_and_null_sig() {
+    fn self_name_seq_zero_requires_null_name_and_sig() {
         let key = test_key();
         let verifying = key.verifying_key();
 
-        assert!(Contacts::empty().is_valid(&verifying));
+        assert!(SelfName::empty().is_valid(&verifying));
 
-        let with_entry = Contacts {
+        let with_name = SelfName {
             seq: 0,
-            entries: vec![contact("Alice", CONTACT_11)],
+            name: Some("Mine".into()),
+            sig: None,
+        };
+        assert!(!with_name.is_valid(&verifying));
+
+        let stray_signature = SelfName {
+            seq: 0,
+            name: None,
+            sig: Some(hex::encode([1u8; 64])),
+        };
+        assert!(!stray_signature.is_valid(&verifying));
+    }
+
+    #[test]
+    fn self_name_bounds_are_enforced() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        // 1 and 64 bytes inclusive; measured in UTF-8 bytes.
+        assert!(signed_self_name(&key, 1, Some("M")).is_valid(&verifying));
+        assert!(signed_self_name(&key, 1, Some(&"n".repeat(MAX_NAME_BYTES))).is_valid(&verifying));
+        assert!(
+            signed_self_name(&key, 1, Some(&"é".repeat(MAX_NAME_BYTES / 2))).is_valid(&verifying)
+        );
+
+        for name in [
+            String::new(),
+            "n".repeat(MAX_NAME_BYTES + 1),
+            "é".repeat(MAX_NAME_BYTES / 2 + 1),
+        ] {
+            assert!(
+                !signed_self_name(&key, 1, Some(&name)).is_valid(&verifying),
+                "invalid self name must be rejected"
+            );
+        }
+    }
+
+    /// A cleared name is `seq > 0` with `name: null`: a legal tombstone, and a
+    /// higher-seq tombstone beats the earlier name in the merge.
+    #[test]
+    fn self_name_tombstone_is_valid_and_wins_merge() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        let named = signed_self_name(&key, 1, Some("My Board"));
+        let cleared = signed_self_name(&key, 2, None);
+        assert!(named.is_valid(&verifying));
+        assert!(cleared.is_valid(&verifying));
+        assert!(cleared.name.is_none());
+
+        assert_eq!(merge_self_name(&named, &cleared), cleared);
+        assert_eq!(merge_self_name(&cleared, &named), cleared);
+        assert_eq!(merge_self_name(&cleared, &cleared), cleared);
+    }
+
+    #[test]
+    fn self_name_merge_uses_seq_then_signature_bytes() {
+        let key = test_key();
+        let a = signed_self_name(&key, 1, Some("Alpha"));
+        let b = signed_self_name(&key, 1, Some("Beta"));
+        let expected = if self_name_signature_bytes(&a) >= self_name_signature_bytes(&b) {
+            a.clone()
+        } else {
+            b.clone()
+        };
+        assert_eq!(merge_self_name(&a, &b), expected);
+        assert_eq!(merge_self_name(&b, &a), expected);
+
+        let newer = signed_self_name(&key, 2, Some("Gamma"));
+        assert_eq!(merge_self_name(&a, &newer), newer);
+        assert_eq!(merge_self_name(&newer, &a), newer);
+
+        // An empty record loses to any signed record.
+        assert_eq!(merge_self_name(&SelfName::empty(), &a), a);
+    }
+
+    #[test]
+    fn child_names_seq_zero_requires_empty_entries_and_null_sig() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        assert!(ChildNames::empty().is_valid(&verifying));
+
+        let with_entry = ChildNames {
+            seq: 0,
+            entries: vec![child_name(0, CONTACT_11, "Alice")],
             sig: None,
         };
         assert!(!with_entry.is_valid(&verifying));
 
-        let stray_signature = Contacts {
+        let stray_signature = ChildNames {
             seq: 0,
             entries: Vec::new(),
             sig: Some(hex::encode([1u8; 64])),
         };
         assert!(!stray_signature.is_valid(&verifying));
+    }
+
+    #[test]
+    fn child_names_entry_bounds_are_enforced() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        for entries in [
+            // slot out of range
+            vec![child_name(8, CONTACT_11, "Alice")],
+            // empty name
+            vec![child_name(0, CONTACT_11, "")],
+            // name over the bound
+            vec![child_name(0, CONTACT_11, &"n".repeat(MAX_NAME_BYTES + 1))],
+            // malformed user ids
+            vec![child_name(0, "", "Alice")],
+            vec![child_name(0, &"11".repeat(31), "Alice")],
+            vec![child_name(0, &"11".repeat(33), "Alice")],
+            vec![child_name(0, &("11".repeat(31) + "AA"), "Alice")],
+            vec![child_name(0, &("11".repeat(31) + "zz"), "Alice")],
+        ] {
+            assert!(
+                !signed_child_names(&key, 1, entries).is_valid(&verifying),
+                "invalid child-names entry must be rejected"
+            );
+        }
+
+        // Inclusive name boundaries.
+        assert!(
+            signed_child_names(&key, 1, vec![child_name(0, CONTACT_11, "A")]).is_valid(&verifying)
+        );
+        assert!(
+            signed_child_names(
+                &key,
+                1,
+                vec![child_name(0, CONTACT_11, &"n".repeat(MAX_NAME_BYTES))]
+            )
+            .is_valid(&verifying)
+        );
+    }
+
+    #[test]
+    fn child_names_rejects_duplicate_and_out_of_order_slots() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+
+        let duplicate_slot = vec![
+            child_name(1, CONTACT_11, "Alice"),
+            child_name(1, CONTACT_22, "Bob"),
+        ];
+        assert!(!signed_child_names(&key, 1, duplicate_slot).is_valid(&verifying));
+
+        let descending = vec![
+            child_name(2, CONTACT_11, "Alice"),
+            child_name(1, CONTACT_22, "Bob"),
+        ];
+        assert!(!signed_child_names(&key, 1, descending).is_valid(&verifying));
+
+        // Ascending but with an out-of-range slot is still invalid.
+        let out_of_range = vec![
+            child_name(0, CONTACT_11, "Alice"),
+            child_name(8, CONTACT_22, "Bob"),
+        ];
+        assert!(!signed_child_names(&key, 1, out_of_range).is_valid(&verifying));
+
+        // A full, strictly ascending set of all eight slots is valid.
+        let all_slots: Vec<ChildName> = (0..SLOT_COUNT as u8)
+            .map(|slot| child_name(slot, CONTACT_11, &format!("child {slot}")))
+            .collect();
+        assert!(signed_child_names(&key, 1, all_slots).is_valid(&verifying));
+    }
+
+    #[test]
+    fn child_names_signature_covers_every_field() {
+        let key = test_key();
+        let verifying = key.verifying_key();
+        let record = signed_child_names(&key, 1, vec![child_name(2, CONTACT_11, "Alice")]);
+        assert!(record.is_valid(&verifying));
+
+        let mut changed_slot = record.clone();
+        changed_slot.entries[0].slot = 3;
+        assert!(!changed_slot.is_valid(&verifying));
+
+        let mut changed_user = record.clone();
+        changed_user.entries[0].user_id = CONTACT_22.into();
+        assert!(!changed_user.is_valid(&verifying));
+
+        let mut changed_name = record.clone();
+        changed_name.entries[0].name = "Mallory".into();
+        assert!(!changed_name.is_valid(&verifying));
+
+        let mut changed_seq = record.clone();
+        changed_seq.seq = 2;
+        assert!(!changed_seq.is_valid(&verifying));
+
+        // Reordering two entries is also a signature change.
+        let two = signed_child_names(
+            &key,
+            1,
+            vec![
+                child_name(1, CONTACT_11, "Alice"),
+                child_name(2, CONTACT_22, "Bob"),
+            ],
+        );
+        assert!(two.is_valid(&verifying));
+        let mut reordered = two;
+        reordered.entries.swap(0, 1);
+        assert!(!reordered.is_valid(&verifying));
+
+        let mut changed_sig = record;
+        let mut sig = hex::decode(changed_sig.sig.as_ref().unwrap()).unwrap();
+        sig[0] ^= 1;
+        changed_sig.sig = Some(hex::encode(sig));
+        assert!(!changed_sig.is_valid(&verifying));
+    }
+
+    #[test]
+    fn child_names_merge_uses_seq_then_signature_bytes() {
+        let key = test_key();
+        let a = signed_child_names(&key, 1, vec![child_name(0, CONTACT_11, "Alice")]);
+        let b = signed_child_names(&key, 1, vec![child_name(0, CONTACT_11, "Alicia")]);
+        let expected = if child_names_signature_bytes(&a) >= child_names_signature_bytes(&b) {
+            a.clone()
+        } else {
+            b.clone()
+        };
+        assert_eq!(merge_child_names(&a, &b), expected);
+        assert_eq!(merge_child_names(&b, &a), expected);
+        assert_eq!(merge_child_names(&a, &a), a);
+
+        let newer = signed_child_names(&key, 2, vec![]);
+        assert_eq!(merge_child_names(&a, &newer), newer);
+        assert_eq!(merge_child_names(&newer, &a), newer);
+        assert!(newer.entries.is_empty());
+
+        assert_eq!(merge_child_names(&ChildNames::empty(), &a), a);
     }
 
     #[test]
@@ -2317,88 +2746,6 @@ mod tests {
                 "malformed contact must be rejected"
             );
         }
-    }
-
-    #[test]
-    fn contacts_bounds_are_inclusive() {
-        let key = test_key();
-        let verifying = key.verifying_key();
-
-        let max_label = "l".repeat(MAX_CONTACT_LABEL_BYTES);
-        let at_limit = signed_contacts(&key, 1, vec![contact(&max_label, &"11".repeat(32))]);
-        assert!(at_limit.is_valid(&verifying));
-
-        // 64 entries are allowed; the 65th is not.
-        let entries: Vec<Contact> = (0..MAX_CONTACTS)
-            .map(|index| {
-                let mut user_id = [1u8; 32];
-                user_id[31] = index as u8;
-                contact(&format!("c{index}"), &hex::encode(user_id))
-            })
-            .collect();
-        assert!(signed_contacts(&key, 1, entries.clone()).is_valid(&verifying));
-        let mut too_many = entries;
-        let mut user_id = [2u8; 32];
-        user_id[31] = 200;
-        too_many.push(contact("overflow", &hex::encode(user_id)));
-        assert!(!signed_contacts(&key, 1, too_many).is_valid(&verifying));
-    }
-
-    #[test]
-    fn contacts_fields_must_be_valid() {
-        let key = test_key();
-        let verifying = key.verifying_key();
-
-        for entries in [
-            vec![contact("", CONTACT_11)],
-            vec![contact(
-                &"l".repeat(MAX_CONTACT_LABEL_BYTES + 1),
-                CONTACT_11,
-            )],
-            vec![contact("Alice", "")],
-            vec![contact("Alice", &"11".repeat(31))],
-            vec![contact("Alice", &"11".repeat(33))],
-            vec![contact("Alice", &("11".repeat(31) + "AA"))],
-        ] {
-            assert!(
-                !signed_contacts(&key, 1, entries).is_valid(&verifying),
-                "invalid contact field must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn contacts_duplicate_user_id_and_label_rejected() {
-        let key = test_key();
-        let verifying = key.verifying_key();
-
-        let duplicate_user = vec![contact("Alice", CONTACT_11), contact("Alicia", CONTACT_11)];
-        assert!(!signed_contacts(&key, 1, duplicate_user).is_valid(&verifying));
-
-        let duplicate_label = vec![contact("Alice", CONTACT_11), contact("Alice", CONTACT_22)];
-        assert!(!signed_contacts(&key, 1, duplicate_label).is_valid(&verifying));
-    }
-
-    #[test]
-    fn contacts_signature_tamper_fails() {
-        let key = test_key();
-        let verifying = key.verifying_key();
-        let contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
-        assert!(contacts.is_valid(&verifying));
-
-        let mut changed_entry = contacts.clone();
-        changed_entry.entries[0].label = "Mallory".into();
-        assert!(!changed_entry.is_valid(&verifying));
-
-        let mut changed_seq = contacts.clone();
-        changed_seq.seq = 2;
-        assert!(!changed_seq.is_valid(&verifying));
-
-        let mut changed_sig = contacts;
-        let mut sig = hex::decode(changed_sig.sig.as_ref().unwrap()).unwrap();
-        sig[0] ^= 1;
-        changed_sig.sig = Some(hex::encode(sig));
-        assert!(!changed_sig.is_valid(&verifying));
     }
 
     // ---- parent ----------------------------------------------------------
@@ -2549,7 +2896,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV5::decode(updated.as_ref()).unwrap().parent,
+            StateV6::decode(updated.as_ref()).unwrap().parent,
             newer.parent
         );
 
@@ -2558,7 +2905,8 @@ mod tests {
         let delta = Delta {
             v: STATE_VERSION,
             parent: Some(parent.clone()),
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: None,
             adjustments: None,
             slots: vec![],
@@ -2570,13 +2918,14 @@ mod tests {
         )
         .unwrap()
         .unwrap_valid();
-        assert_eq!(StateV5::decode(updated.as_ref()).unwrap().parent, parent);
+        assert_eq!(StateV6::decode(updated.as_ref()).unwrap().parent, parent);
 
         // Stale parent updates lose the merge without an error.
         let stale = Delta {
             v: STATE_VERSION,
             parent: Some(signed_parent(&key, 2, Some(CONTACT_22))),
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: None,
             adjustments: None,
             slots: vec![],
@@ -2589,7 +2938,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV5::decode(updated.as_ref()).unwrap().parent,
+            StateV6::decode(updated.as_ref()).unwrap().parent,
             base.parent
         );
     }
@@ -2604,10 +2953,14 @@ mod tests {
     }
 
     #[test]
-    fn state_with_invalid_contacts_is_invalid() {
+    fn state_with_invalid_naming_records_is_invalid() {
         let key = test_key();
         let mut state = populated_state(&key);
-        state.contacts.entries[0].label = String::new();
+        state.self_name.name = Some(String::new());
+        assert!(state.validate(&key.verifying_key()).is_err());
+
+        let mut state = populated_state(&key);
+        state.child_names.entries[0].name = String::new();
         assert!(state.validate(&key.verifying_key()).is_err());
     }
 
@@ -2673,7 +3026,7 @@ mod tests {
     #[test]
     fn update_state_merges_full_state_slot_wise() {
         let key = test_key();
-        let empty = StateV5::empty();
+        let empty = StateV6::empty();
         let incoming = populated_state(&key);
         let updated = NumberContract::update_state(
             params(&key),
@@ -2689,7 +3042,7 @@ mod tests {
     fn update_state_rejects_invalid_update_atomically() {
         let key = test_key();
         let valid = populated_state(&key);
-        let mut invalid = StateV5::empty();
+        let mut invalid = StateV6::empty();
         // Slot 0 is valid, slot 1 is tampered; the whole update must fail and
         // must not half-apply slot 0.
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
@@ -2699,7 +3052,7 @@ mod tests {
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2709,16 +3062,16 @@ mod tests {
     }
 
     #[test]
-    fn update_state_rejects_invalid_contacts_atomically() {
+    fn update_state_rejects_invalid_child_names_atomically() {
         let key = test_key();
-        let mut invalid = StateV5::empty();
+        let mut invalid = StateV6::empty();
         invalid.slots[0] = signed_slot(&key, 0, 1, Some(sample_entry()));
-        invalid.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
-        invalid.contacts.sig = Some(hex::encode([0u8; 64]));
+        // Genuinely signed, but the empty name violates the record bounds.
+        invalid.child_names = signed_child_names(&key, 1, vec![child_name(0, CONTACT_11, "")]);
 
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::State(State::from(invalid.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2733,7 +3086,8 @@ mod tests {
         let delta = Delta {
             v: STATE_VERSION,
             parent: None,
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: None,
             adjustments: None,
             slots: vec![
@@ -2743,28 +3097,29 @@ mod tests {
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
     }
 
     #[test]
-    fn update_state_rejects_invalid_delta_contacts_atomically() {
+    fn update_state_rejects_invalid_delta_self_name_atomically() {
         let key = test_key();
-        let mut contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
-        contacts.entries[0].label = "Mallory".into();
+        let mut self_name = signed_self_name(&key, 1, Some("Mine"));
+        self_name.name = Some("Mallory".into());
         let delta = Delta {
             v: STATE_VERSION,
+            self_name: Some(self_name),
             parent: None,
-            contacts: Some(contacts),
+            child_names: None,
             payments: None,
             adjustments: None,
             slots: vec![],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -2798,45 +3153,47 @@ mod tests {
 
     // ---- merge laws -------------------------------------------------------
 
+    /// `childNames` and `slots` merge independently, and the contract does not
+    /// couple them. A merged board may hold a name whose `userId` no longer
+    /// matches the slot: the reader resolves the binding. This is what keeps
+    /// the merge closed over the record.
     #[test]
-    fn contacts_merge_uses_seq_then_signature_bytes() {
-        let key = test_key();
-        let alice = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
-        let bob = signed_contacts(&key, 1, vec![contact("Bob", CONTACT_22)]);
-        let expected = if contacts_signature_bytes(&alice) >= contacts_signature_bytes(&bob) {
-            alice.clone()
-        } else {
-            bob.clone()
-        };
-
-        assert_eq!(merge_contacts(&alice, &bob), expected);
-        assert_eq!(merge_contacts(&bob, &alice), expected);
-
-        let newer = signed_contacts(&key, 2, vec![contact("Alice", CONTACT_11)]);
-        assert_eq!(merge_contacts(&alice, &newer), newer);
-        assert_eq!(merge_contacts(&newer, &alice), newer);
-    }
-
-    #[test]
-    fn contacts_and_slots_merge_independently() {
+    fn child_names_and_slots_merge_independently_and_stay_valid() {
         let key = test_key();
         let mut a = populated_state(&key);
-        a.contacts = signed_contacts(&key, 5, vec![contact("Alice", CONTACT_11)]);
-        let mut b = StateV5::empty();
+        a.child_names = signed_child_names(&key, 5, vec![child_name(2, CONTACT_11, "Alice")]);
+        let mut b = StateV6::empty();
         b.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
-        b.contacts = signed_contacts(&key, 2, vec![contact("Bob", CONTACT_22)]);
+        // Same slot, different child: either record may win independently.
+        b.child_names = signed_child_names(&key, 2, vec![child_name(2, CONTACT_22, "Bob")]);
 
         let result = merged(&a, &b);
-        assert_eq!(result.contacts, a.contacts);
+        assert_eq!(result.child_names, a.child_names);
         assert_eq!(
             result.slots, a.slots,
             "lower-seq slots must not disturb the existing ones"
+        );
+        assert_eq!(result.to_bytes(), merged(&b, &a).to_bytes());
+        assert!(result.validate(&key.verifying_key()).is_ok());
+
+        // The winning name (slot 2, userId 11) does not match the slot contact
+        // (also 11 here), so also build the mismatching direction explicitly.
+        let mut mismatched = StateV6::empty();
+        mismatched.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
+        mismatched.child_names =
+            signed_child_names(&key, 3, vec![child_name(2, CONTACT_22, "Bob")]);
+        assert!(mismatched.validate(&key.verifying_key()).is_ok());
+        let merged_mismatched = merged(&mismatched, &a);
+        assert!(merged_mismatched.validate(&key.verifying_key()).is_ok());
+        assert_eq!(
+            merged_mismatched.to_bytes(),
+            merged(&a, &mismatched).to_bytes()
         );
     }
 
     // ---- summary and delta ------------------------------------------------
 
-    fn summarize(state: &StateV5) -> StateSummary<'static> {
+    fn summarize(state: &StateV6) -> StateSummary<'static> {
         NumberContract::summarize_state(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -2844,7 +3201,7 @@ mod tests {
         .unwrap()
     }
 
-    fn delta_from(state: &StateV5, summary: &StateSummary<'_>) -> StateDelta<'static> {
+    fn delta_from(state: &StateV6, summary: &StateSummary<'_>) -> StateDelta<'static> {
         NumberContract::get_state_delta(
             Parameters::from(vec![0u8; 32]),
             State::from(state.to_bytes()),
@@ -2855,8 +3212,8 @@ mod tests {
 
     #[test]
     fn initial_state_json_is_the_empty_board() {
-        let initial: StateV5 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
-        assert_eq!(initial, StateV5::empty());
+        let initial: StateV6 = serde_json::from_str(include_str!("../initial_state.json")).unwrap();
+        assert_eq!(initial, StateV6::empty());
     }
 
     #[test]
@@ -2869,8 +3226,10 @@ mod tests {
         assert_eq!(summary["v"], STATE_VERSION);
         assert_eq!(summary["parent"][0], 2);
         assert_eq!(summary["parent"][1].as_str().unwrap().len(), 32);
-        assert_eq!(summary["contacts"][0], 1);
-        assert_eq!(summary["contacts"][1].as_str().unwrap().len(), 32);
+        assert_eq!(summary["selfName"][0], 1);
+        assert_eq!(summary["selfName"][1].as_str().unwrap().len(), 32);
+        assert_eq!(summary["childNames"][0], 1);
+        assert_eq!(summary["childNames"][1].as_str().unwrap().len(), 32);
         assert_eq!(
             summary["payments"],
             serde_json::json!([0, "00000000000000000000000000000000"])
@@ -2890,29 +3249,59 @@ mod tests {
         assert_eq!(digest.len(), 32);
         assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
 
-        let mut delta_state = StateV5::empty();
+        let mut delta_state = StateV6::empty();
         delta_state.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
-        delta_state.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
+        delta_state.child_names =
+            signed_child_names(&key, 3, vec![child_name(2, CONTACT_11, "Alice")]);
         let delta = Delta {
             v: STATE_VERSION,
+            self_name: None,
             parent: None,
-            contacts: Some(delta_state.contacts.clone()),
+            child_names: Some(delta_state.child_names.clone()),
             payments: None,
             adjustments: None,
             slots: vec![DeltaSlot::from_slot(2, &delta_state.slots[2])],
         };
         let decoded: serde_json::Value = serde_json::from_slice(&delta.to_bytes()).unwrap();
         assert_eq!(decoded["v"], STATE_VERSION);
+        assert!(decoded["selfName"].is_null());
         assert!(decoded["parent"].is_null());
         assert!(decoded["payments"].is_null());
         assert!(decoded["adjustments"].is_null());
-        assert_eq!(decoded["contacts"]["seq"], 3);
-        assert_eq!(decoded["contacts"]["entries"][0]["label"], "Alice");
-        assert_eq!(decoded["contacts"]["entries"][0]["userId"], CONTACT_11);
+        assert_eq!(decoded["childNames"]["seq"], 3);
+        assert_eq!(decoded["childNames"]["entries"][0]["slot"], 2);
+        assert_eq!(decoded["childNames"]["entries"][0]["name"], "Alice");
+        assert_eq!(decoded["childNames"]["entries"][0]["userId"], CONTACT_11);
         assert_eq!(decoded["slots"][0]["i"], 2);
         assert_eq!(decoded["slots"][0]["seq"], 4);
         assert_eq!(decoded["slots"][0]["entry"]["value"], -42);
         assert!(decoded["slots"][0]["sig"].is_string());
+
+        // The state wire shape carries the naming records and no contacts key.
+        let state_json: serde_json::Value = serde_json::from_slice(&state.to_bytes()).unwrap();
+        assert!(state_json.get("contacts").is_none());
+        assert_eq!(state_json["selfName"]["name"], "My Board");
+        assert_eq!(state_json["childNames"]["entries"][0]["userId"], CONTACT_11);
+    }
+
+    #[test]
+    fn state_encoding_is_deterministic_and_round_trips() {
+        let key = test_key();
+        let state = populated_state(&key);
+        let first = state.to_bytes();
+        let second = state.to_bytes();
+        assert_eq!(first, second);
+
+        let decoded = StateV6::decode(&first).unwrap();
+        assert_eq!(decoded, state);
+        assert_eq!(decoded.to_bytes(), first);
+
+        // Array order and the naming records survive exactly.
+        assert_eq!(decoded.self_name, state.self_name);
+        assert_eq!(decoded.child_names.entries.len(), 1);
+        assert_eq!(decoded.child_names.entries[0].slot, 2);
+        assert_eq!(decoded.child_names.entries[0].user_id, CONTACT_11);
+        assert_eq!(decoded.child_names.entries[0].name, "Alice");
     }
 
     #[test]
@@ -2937,13 +3326,17 @@ mod tests {
     #[test]
     fn delta_summary_round_trip() {
         let key = test_key();
-        let from = StateV5::empty();
+        let from = StateV6::empty();
         let to = populated_state(&key);
 
         let delta = delta_from(&to, &summarize(&from));
         assert!(delta.size() > 0);
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert!(parsed.contacts.is_some(), "new subscriber needs contacts");
+        assert!(parsed.self_name.is_some(), "new subscriber needs selfName");
+        assert!(
+            parsed.child_names.is_some(),
+            "new subscriber needs childNames"
+        );
 
         let synced = NumberContract::update_state(
             params(&key),
@@ -2959,21 +3352,22 @@ mod tests {
         assert_eq!(reverse.size(), 0);
     }
 
+    /// A delta may carry only `selfName`; every other optional record is null.
     #[test]
-    fn contacts_only_delta_round_trips() {
+    fn self_name_only_delta_round_trips() {
         let key = test_key();
-        let mut before = StateV5::empty();
-        before.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
+        let mut before = StateV6::empty();
+        before.self_name = signed_self_name(&key, 1, Some("First"));
         let mut after = before.clone();
-        after.contacts = signed_contacts(
-            &key,
-            2,
-            vec![contact("Alice", CONTACT_11), contact("Bob", CONTACT_22)],
-        );
+        after.self_name = signed_self_name(&key, 2, Some("Second"));
 
         let delta = delta_from(&after, &summarize(&before));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert_eq!(parsed.contacts.as_ref(), Some(&after.contacts));
+        assert_eq!(parsed.self_name.as_ref(), Some(&after.self_name));
+        assert!(parsed.parent.is_none());
+        assert!(parsed.child_names.is_none());
+        assert!(parsed.payments.is_none());
+        assert!(parsed.adjustments.is_none());
         assert!(parsed.slots.is_empty());
 
         let synced = NumberContract::update_state(
@@ -2984,12 +3378,49 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(synced.as_ref(), after.to_bytes().as_slice());
+        assert_eq!(delta_from(&after, &summarize(&after)).size(), 0);
+    }
+
+    /// A delta may carry only `childNames`; every other optional record is null.
+    #[test]
+    fn child_names_only_delta_round_trips() {
+        let key = test_key();
+        let mut before = StateV6::empty();
+        before.child_names = signed_child_names(&key, 1, vec![child_name(0, CONTACT_11, "Alice")]);
+        let mut after = before.clone();
+        after.child_names = signed_child_names(
+            &key,
+            2,
+            vec![
+                child_name(0, CONTACT_11, "Alice"),
+                child_name(1, CONTACT_22, "Bob"),
+            ],
+        );
+
+        let delta = delta_from(&after, &summarize(&before));
+        let parsed = Delta::decode(delta.as_ref()).unwrap();
+        assert_eq!(parsed.child_names.as_ref(), Some(&after.child_names));
+        assert!(parsed.self_name.is_none());
+        assert!(parsed.parent.is_none());
+        assert!(parsed.payments.is_none());
+        assert!(parsed.adjustments.is_none());
+        assert!(parsed.slots.is_empty());
+
+        let synced = NumberContract::update_state(
+            params(&key),
+            State::from(before.to_bytes()),
+            vec![UpdateData::Delta(delta)],
+        )
+        .unwrap()
+        .unwrap_valid();
+        assert_eq!(synced.as_ref(), after.to_bytes().as_slice());
+        assert_eq!(delta_from(&after, &summarize(&after)).size(), 0);
     }
 
     #[test]
     fn summary_includes_parent_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV5::empty();
+        let empty = StateV6::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.parent.0, 0);
         assert_eq!(summary.parent.1, "00000000000000000000000000000000");
@@ -3008,14 +3439,15 @@ mod tests {
     #[test]
     fn parent_delta_round_trips_set_and_clear() {
         let key = test_key();
-        let before = StateV5::empty();
+        let before = StateV6::empty();
         let mut after = before.clone();
         after.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
         let delta = delta_from(&after, &summarize(&before));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
         assert_eq!(parsed.parent.as_ref(), Some(&after.parent));
-        assert!(parsed.contacts.is_none());
+        assert!(parsed.self_name.is_none());
+        assert!(parsed.child_names.is_none());
         assert!(parsed.slots.is_empty());
 
         let synced = NumberContract::update_state(
@@ -3059,9 +3491,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_parent_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV5::empty();
+        let mut local = StateV6::empty();
         local.parent = signed_parent(&key, 3, Some(CONTACT_11));
-        let mut remote = StateV5::empty();
+        let mut remote = StateV6::empty();
         remote.parent = signed_parent(&key, 3, Some(CONTACT_22));
 
         let delta = delta_from(&local, &summarize(&remote));
@@ -3072,7 +3504,7 @@ mod tests {
     #[test]
     fn empty_summary_includes_parent() {
         let key = test_key();
-        let mut state = StateV5::empty();
+        let mut state = StateV6::empty();
         state.parent = signed_parent(&key, 1, Some(CONTACT_11));
 
         let delta = delta_from(&state, &StateSummary::from(vec![]));
@@ -3081,16 +3513,16 @@ mod tests {
     }
 
     #[test]
-    fn get_state_delta_includes_contacts_when_local_is_newer() {
+    fn get_state_delta_includes_self_name_when_local_is_newer() {
         let key = test_key();
         let mut before = populated_state(&key);
-        before.contacts = signed_contacts(&key, 1, vec![contact("Alice", CONTACT_11)]);
+        before.self_name = signed_self_name(&key, 1, Some("First"));
         let mut after = before.clone();
-        after.contacts = signed_contacts(&key, 2, vec![contact("Bob", CONTACT_22)]);
+        after.self_name = signed_self_name(&key, 2, Some("Second"));
 
         let delta = delta_from(&after, &summarize(&before));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert_eq!(parsed.contacts.as_ref(), Some(&after.contacts));
+        assert_eq!(parsed.self_name.as_ref(), Some(&after.self_name));
         assert!(
             parsed.slots.is_empty(),
             "unchanged slots must not be resent"
@@ -3098,21 +3530,22 @@ mod tests {
     }
 
     #[test]
-    fn get_state_delta_equals_seq_with_different_digest_heals() {
+    fn get_state_delta_heals_equal_child_names_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV5::empty();
-        local.contacts = signed_contacts(&key, 3, vec![contact("Alice", CONTACT_11)]);
-        let mut remote_summary_state = StateV5::empty();
+        let mut local = StateV6::empty();
+        local.child_names = signed_child_names(&key, 3, vec![child_name(0, CONTACT_11, "Alice")]);
+        let mut remote_summary_state = StateV6::empty();
         // Same seq, different signed record (owner equivocation).
-        remote_summary_state.contacts = signed_contacts(&key, 3, vec![contact("Bob", CONTACT_22)]);
+        remote_summary_state.child_names =
+            signed_child_names(&key, 3, vec![child_name(0, CONTACT_22, "Bob")]);
 
         let delta = delta_from(&local, &summarize(&remote_summary_state));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert_eq!(parsed.contacts.as_ref(), Some(&local.contacts));
+        assert_eq!(parsed.child_names.as_ref(), Some(&local.child_names));
     }
 
     #[test]
-    fn delta_omits_unchanged_contacts() {
+    fn delta_omits_unchanged_naming_records() {
         let key = test_key();
         let before = populated_state(&key);
         let mut after = before.clone();
@@ -3120,7 +3553,8 @@ mod tests {
 
         let delta = delta_from(&after, &summarize(&before));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert!(parsed.contacts.is_none());
+        assert!(parsed.self_name.is_none());
+        assert!(parsed.child_names.is_none());
         assert_eq!(parsed.slots.len(), 1);
     }
 
@@ -3136,11 +3570,12 @@ mod tests {
         assert!(delta.size() > 0);
 
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert_eq!(parsed.contacts.as_ref(), Some(&state.contacts));
+        assert_eq!(parsed.self_name.as_ref(), Some(&state.self_name));
+        assert_eq!(parsed.child_names.as_ref(), Some(&state.child_names));
 
         let synced = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::Delta(delta)],
         )
         .unwrap()
@@ -3156,7 +3591,8 @@ mod tests {
         let delta = delta_from(&state, &junk);
         assert!(delta.size() > 0);
         let parsed = Delta::decode(delta.as_ref()).unwrap();
-        assert_eq!(parsed.contacts.as_ref(), Some(&state.contacts));
+        assert_eq!(parsed.self_name.as_ref(), Some(&state.self_name));
+        assert_eq!(parsed.child_names.as_ref(), Some(&state.child_names));
         assert_eq!(
             parsed.slots.len(),
             state.slots.iter().filter(|s| s.seq > 0).count()
@@ -3166,7 +3602,7 @@ mod tests {
     #[test]
     fn tombstone_round_trips_through_delta() {
         let key = test_key();
-        let mut before = StateV5::empty();
+        let mut before = StateV6::empty();
         before.slots[2] = signed_slot(&key, 2, 4, Some(sample_entry()));
 
         let mut after = before.clone();
@@ -3258,14 +3694,15 @@ mod tests {
         let delta = Delta {
             v: STATE_VERSION,
             parent: None,
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: None,
             adjustments: None,
             slots: vec![DeltaSlot::from_slot(8, &slot)],
         };
         let err = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         );
         assert!(err.is_err());
@@ -3286,33 +3723,46 @@ mod tests {
 
         for bad in [
             serde_json::json!({
-                "v": 5,
+                "v": 6,
                 "parent": [0, "11111111111111111111111111111111"],
-                "contacts": [0, "00000000000000000000000000000000"],
+                "selfName": [0, "00000000000000000000000000000000"],
+                "childNames": [0, "00000000000000000000000000000000"],
                 "payments": [0, "00000000000000000000000000000000"],
                 "adjustments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 5,
+                "v": 6,
                 "parent": [0, "00000000000000000000000000000000"],
-                "contacts": [0, "11111111111111111111111111111111"],
+                "selfName": [0, "11111111111111111111111111111111"],
+                "childNames": [0, "00000000000000000000000000000000"],
                 "payments": [0, "00000000000000000000000000000000"],
                 "adjustments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 5,
+                "v": 6,
                 "parent": [0, "00000000000000000000000000000000"],
-                "contacts": [0, "00000000000000000000000000000000"],
+                "selfName": [0, "00000000000000000000000000000000"],
+                "childNames": [0, "11111111111111111111111111111111"],
+                "payments": [0, "00000000000000000000000000000000"],
+                "adjustments": [0, "00000000000000000000000000000000"],
+                "slots": zero_slots.clone(),
+            }),
+            serde_json::json!({
+                "v": 6,
+                "parent": [0, "00000000000000000000000000000000"],
+                "selfName": [0, "00000000000000000000000000000000"],
+                "childNames": [0, "00000000000000000000000000000000"],
                 "payments": [0, "11111111111111111111111111111111"],
                 "adjustments": [0, "00000000000000000000000000000000"],
                 "slots": zero_slots.clone(),
             }),
             serde_json::json!({
-                "v": 5,
+                "v": 6,
                 "parent": [0, "00000000000000000000000000000000"],
-                "contacts": [0, "00000000000000000000000000000000"],
+                "selfName": [0, "00000000000000000000000000000000"],
+                "childNames": [0, "00000000000000000000000000000000"],
                 "payments": [0, "00000000000000000000000000000000"],
                 "adjustments": [0, "11111111111111111111111111111111"],
                 "slots": zero_slots,
@@ -3666,7 +4116,7 @@ mod tests {
     #[test]
     fn payments_delta_round_trips_settled() {
         let key = test_key();
-        let before = StateV5::empty();
+        let before = StateV6::empty();
         let mut after = before.clone();
         after.payments = signed_payments_with_settled(
             &key,
@@ -3720,7 +4170,7 @@ mod tests {
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV5::decode(updated.as_ref()).unwrap().payments,
+            StateV6::decode(updated.as_ref()).unwrap().payments,
             incoming
         );
 
@@ -3728,20 +4178,21 @@ mod tests {
         let delta = Delta {
             v: STATE_VERSION,
             parent: None,
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: Some(delta_payments.clone()),
             adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::decode(updated.as_ref()).unwrap().to_bytes()),
+            State::from(StateV6::decode(updated.as_ref()).unwrap().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         )
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV5::decode(updated.as_ref()).unwrap().payments,
+            StateV6::decode(updated.as_ref()).unwrap().payments,
             delta_payments
         );
 
@@ -3749,20 +4200,21 @@ mod tests {
         let stale = Delta {
             v: STATE_VERSION,
             parent: None,
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: Some(signed_payments(&key, 2, Some(sample_payment()))),
             adjustments: None,
             slots: vec![],
         };
         let updated = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::decode(updated.as_ref()).unwrap().to_bytes()),
+            State::from(StateV6::decode(updated.as_ref()).unwrap().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(stale.to_bytes()))],
         )
         .unwrap()
         .unwrap_valid();
         assert_eq!(
-            StateV5::decode(updated.as_ref()).unwrap().payments,
+            StateV6::decode(updated.as_ref()).unwrap().payments,
             delta_payments
         );
     }
@@ -3770,7 +4222,7 @@ mod tests {
     #[test]
     fn summary_includes_payments_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV5::empty();
+        let empty = StateV6::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.payments.0, 0);
         assert_eq!(summary.payments.1, "0".repeat(32));
@@ -3795,15 +4247,16 @@ mod tests {
     #[test]
     fn payments_delta_round_trips_and_clear() {
         let key = test_key();
-        let before = StateV5::empty();
+        let before = StateV6::empty();
         let mut after = before.clone();
         after.payments = signed_payments(&key, 1, Some(sample_payment()));
 
         let delta = delta_from(&after, &summarize(&before));
         let parsed = Delta::decode(delta.as_ref()).unwrap();
         assert_eq!(parsed.payments.as_ref(), Some(&after.payments));
+        assert!(parsed.self_name.is_none());
         assert!(parsed.parent.is_none());
-        assert!(parsed.contacts.is_none());
+        assert!(parsed.child_names.is_none());
         assert!(parsed.slots.is_empty());
 
         let synced = NumberContract::update_state(
@@ -3837,9 +4290,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_payments_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV5::empty();
+        let mut local = StateV6::empty();
         local.payments = signed_payments(&key, 3, Some(sample_payment()));
-        let mut remote = StateV5::empty();
+        let mut remote = StateV6::empty();
         remote.payments = signed_payments(&key, 3, Some(terminal_payment()));
 
         let delta = delta_from(&local, &summarize(&remote));
@@ -3850,7 +4303,7 @@ mod tests {
     #[test]
     fn empty_summary_includes_payments() {
         let key = test_key();
-        let mut state = StateV5::empty();
+        let mut state = StateV6::empty();
         state.payments = signed_payments(&key, 1, Some(sample_payment()));
 
         let delta = delta_from(&state, &StateSummary::from(vec![]));
@@ -3874,15 +4327,15 @@ mod tests {
 
         // v4 without the payments field also fails to decode.
         let missing_payments = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
-        assert!(StateV5::decode(missing_payments.as_bytes()).is_err());
+        assert!(StateV6::decode(missing_payments.as_bytes()).is_err());
 
         // A complete v4 state has no adjustments field and is rejected.
         let v4 = r#"{"v":4,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"payments":{"seq":0,"settled":[],"entry":null,"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
-        assert!(StateV5::decode(v4.as_bytes()).is_err());
+        assert!(StateV6::decode(v4.as_bytes()).is_err());
 
         // v5 without the adjustments field also fails to decode.
         let missing_adjustments = r#"{"v":5,"parent":{"seq":0,"userId":null,"sig":null},"contacts":{"seq":0,"entries":[],"sig":null},"payments":{"seq":0,"settled":[],"entry":null,"sig":null},"slots":[{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null},{"seq":0,"entry":null,"sig":null}]}"#;
-        assert!(StateV5::decode(missing_adjustments.as_bytes()).is_err());
+        assert!(StateV6::decode(missing_adjustments.as_bytes()).is_err());
     }
 
     #[test]
@@ -3898,8 +4351,9 @@ mod tests {
         let mut delta: serde_json::Value = serde_json::from_slice(
             &Delta {
                 v: STATE_VERSION,
+                self_name: None,
                 parent: None,
-                contacts: Some(state.contacts.clone()),
+                child_names: Some(state.child_names.clone()),
                 payments: None,
                 adjustments: None,
                 slots: vec![],
@@ -3907,10 +4361,10 @@ mod tests {
             .to_bytes(),
         )
         .unwrap();
-        delta["v"] = serde_json::json!(4);
+        delta["v"] = serde_json::json!(5);
         let error = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(
                 serde_json::to_vec(&delta).unwrap(),
             ))],
@@ -3919,36 +4373,78 @@ mod tests {
     }
 
     #[test]
-    fn v5_empty_state_round_trips() {
+    fn v6_empty_state_round_trips() {
         let key = test_key();
-        let empty = StateV5::empty();
-        let decoded = StateV5::decode(&empty.to_bytes()).unwrap();
+        let empty = StateV6::empty();
+        let decoded = StateV6::decode(&empty.to_bytes()).unwrap();
         assert_eq!(decoded, empty);
-        assert_eq!(decoded.v, 5);
+        assert_eq!(decoded.v, 6);
+        assert_eq!(decoded.self_name, SelfName::empty());
+        assert_eq!(decoded.child_names, ChildNames::empty());
         assert_eq!(decoded.payments, Payments::empty());
         assert_eq!(decoded.adjustments, Adjustments::empty());
         assert!(decoded.validate(&key.verifying_key()).is_ok());
     }
 
-    /// The v4 -> v5 client upgrade only adds an empty adjustments record and
-    /// bumps `v`. Every v2/v3/v4 signature stays valid.
+    /// The v5 -> v6 client upgrade drops `contacts`, adds empty `selfName` and
+    /// `childNames` records and bumps `v`. Every surviving (slot, parent,
+    /// payments, adjustments) signature stays valid.
     #[test]
-    fn v4_state_upgrades_to_v5_by_adding_an_empty_adjustments_record() {
+    fn v5_state_upgrades_to_v6_by_dropping_contacts_and_adding_naming_records() {
         let key = test_key();
         let mut state = populated_state(&key);
         state.payments = signed_payments(&key, 4, Some(sample_payment()));
+        // The upgrade seeds naming separately; keep the old records empty so
+        // the decoded result is directly comparable.
+        state.self_name = SelfName::empty();
+        state.child_names = ChildNames::empty();
 
+        // Build the v5 wire shape: no naming records, a contacts blob, `v: 5`.
         let mut json: serde_json::Value = serde_json::from_slice(&state.to_bytes()).unwrap();
-        json.as_object_mut().unwrap().remove("adjustments");
-        json["v"] = serde_json::json!(4);
-        let v4_bytes = serde_json::to_vec(&json).unwrap();
-        assert!(StateV5::decode(&v4_bytes).is_err());
-
+        json.as_object_mut().unwrap().remove("selfName");
+        json.as_object_mut().unwrap().remove("childNames");
+        json["contacts"] = serde_json::json!({
+            "seq": 1,
+            "entries": [{ "label": "Alice", "userId": CONTACT_11 }],
+            "sig": null
+        });
         json["v"] = serde_json::json!(5);
-        json["adjustments"] = serde_json::json!({"seq": 0, "entries": [], "sig": null});
-        let upgraded = StateV5::decode(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let v5_bytes = serde_json::to_vec(&json).unwrap();
+        assert!(StateV6::decode(&v5_bytes).is_err());
+
+        // Now apply the documented upgrade.
+        json.as_object_mut().unwrap().remove("contacts");
+        json["selfName"] = serde_json::json!({ "seq": 0, "name": null, "sig": null });
+        json["childNames"] = serde_json::json!({ "seq": 0, "entries": [], "sig": null });
+        json["v"] = serde_json::json!(6);
+        let upgraded = StateV6::decode(&serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(upgraded, state);
         assert!(upgraded.validate(&key.verifying_key()).is_ok());
+    }
+
+    /// `deny_unknown_fields` is what stops an unsigned `contacts` blob from
+    /// riding along in a v6 state.
+    #[test]
+    fn v6_state_rejects_an_unknown_contacts_key() {
+        let key = test_key();
+        let state = populated_state(&key);
+        let mut json: serde_json::Value = serde_json::from_slice(&state.to_bytes()).unwrap();
+        json["contacts"] = serde_json::json!({
+            "seq": 0,
+            "entries": [],
+            "sig": null
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        assert!(StateV6::decode(&bytes).is_err());
+        assert_eq!(
+            NumberContract::validate_state(
+                params(&key),
+                State::from(bytes),
+                RelatedContracts::default(),
+            )
+            .unwrap(),
+            ValidateResult::Invalid
+        );
     }
 
     // ---- adjustments ------------------------------------------------------
@@ -3974,22 +4470,23 @@ mod tests {
 
     fn apply_delta(
         key: &SigningKey,
-        state: &StateV5,
+        state: &StateV6,
         delta: Delta,
-    ) -> Result<StateV5, ContractError> {
+    ) -> Result<StateV6, ContractError> {
         NumberContract::update_state(
             params(key),
             State::from(state.to_bytes()),
             vec![UpdateData::Delta(StateDelta::from(delta.to_bytes()))],
         )
-        .map(|updated| StateV5::decode(updated.unwrap_valid().as_ref()).unwrap())
+        .map(|updated| StateV6::decode(updated.unwrap_valid().as_ref()).unwrap())
     }
 
     fn adjustments_delta(adjustments: Adjustments, slots: Vec<(u8, Slot)>) -> Delta {
         Delta {
             v: STATE_VERSION,
             parent: None,
-            contacts: None,
+            self_name: None,
+            child_names: None,
             payments: None,
             adjustments: Some(adjustments),
             slots: slots
@@ -4294,8 +4791,8 @@ mod tests {
 
     /// Build a board whose slot 2 is 100 at seq 3 and whose log says the next
     /// write (seq 4) issued 25 to reach 125.
-    fn provenance_state(key: &SigningKey) -> StateV5 {
-        let mut state = StateV5::empty();
+    fn provenance_state(key: &SigningKey) -> StateV6 {
+        let mut state = StateV6::empty();
         state.slots[2] = signed_slot(key, 2, 3, Some(entry_with_value(100)));
         state.adjustments = signed_adjustments(key, 1, vec![sample_adjustment()]);
         state
@@ -4404,14 +4901,14 @@ mod tests {
         let key = test_key();
         // A full state may carry an adjustment/slot mismatch: validation only
         // checks signatures and bounds (the migration path).
-        let mut full = StateV5::empty();
+        let mut full = StateV6::empty();
         full.slots[2] = signed_slot(&key, 2, 4, Some(entry_with_value(999)));
         full.adjustments = signed_adjustments(&key, 1, vec![sample_adjustment()]);
         assert!(full.validate(&key.verifying_key()).is_ok());
 
         let updated = NumberContract::update_state(
             params(&key),
-            State::from(StateV5::empty().to_bytes()),
+            State::from(StateV6::empty().to_bytes()),
             vec![UpdateData::State(State::from(full.to_bytes()))],
         )
         .unwrap()
@@ -4463,7 +4960,7 @@ mod tests {
         let updated = apply_delta(&key, &state, delta).unwrap();
         assert_eq!(updated.adjustments, state.adjustments);
         assert_eq!(
-            StateV5::decode(
+            StateV6::decode(
                 NumberContract::update_state(
                     params(&key),
                     State::from(state.to_bytes()),
@@ -4481,7 +4978,7 @@ mod tests {
     #[test]
     fn summary_includes_adjustments_digest_and_zeros_when_empty() {
         let key = test_key();
-        let empty = StateV5::empty();
+        let empty = StateV6::empty();
         let summary = Summary::of(&empty);
         assert_eq!(summary.adjustments.0, 0);
         assert_eq!(summary.adjustments.1, "0".repeat(32));
@@ -4504,7 +5001,7 @@ mod tests {
     #[test]
     fn adjustments_delta_round_trips() {
         let key = test_key();
-        let mut before = StateV5::empty();
+        let mut before = StateV6::empty();
         before.slots[2] = signed_slot(&key, 2, 3, Some(entry_with_value(100)));
         let mut after = before.clone();
         after.slots[2] = signed_slot(&key, 2, 4, Some(entry_with_value(125)));
@@ -4529,9 +5026,9 @@ mod tests {
     #[test]
     fn get_state_delta_heals_equal_adjustments_seq_with_different_digest() {
         let key = test_key();
-        let mut local = StateV5::empty();
+        let mut local = StateV6::empty();
         local.adjustments = signed_adjustments(&key, 3, vec![sample_adjustment()]);
-        let mut remote = StateV5::empty();
+        let mut remote = StateV6::empty();
         remote.adjustments = signed_adjustments(
             &key,
             3,
@@ -4563,7 +5060,7 @@ mod tests {
     #[test]
     fn merged_states_stay_valid_with_an_adjustment_slot_mismatch() {
         let key = test_key();
-        let mut a = StateV5::empty();
+        let mut a = StateV6::empty();
         a.slots[0] = signed_slot(&key, 0, 2, Some(entry_with_value(100)));
         a.adjustments = signed_adjustments(
             &key,
@@ -4577,7 +5074,7 @@ mod tests {
             }],
         );
 
-        let mut b = StateV5::empty();
+        let mut b = StateV6::empty();
         b.slots[0] = signed_slot(&key, 0, 3, Some(entry_with_value(50)));
         b.adjustments = signed_adjustments(
             &key,
@@ -4642,23 +5139,45 @@ mod tests {
         ]
     }
 
-    /// Generate 0..=8 contacts with unique user ids and labels.
-    fn arb_contacts_entries() -> impl Strategy<Value = Vec<Contact>> {
-        proptest::collection::vec(proptest::array::uniform32(any::<u8>()), 0..=8).prop_map(|raws| {
-            raws.into_iter()
-                .enumerate()
-                .map(|(index, mut user_id)| {
-                    // Make user ids unique inside the record.
-                    user_id[31] = index as u8;
-                    contact(&format!("c{index}"), &hex::encode(user_id))
-                })
-                .collect()
+    /// A non-empty 1..=`MAX_NAME_BYTES` ASCII name.
+    fn arb_name() -> impl Strategy<Value = String> {
+        proptest::collection::vec(proptest::char::range('a', 'z'), 1..=MAX_NAME_BYTES)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn arb_self_name() -> impl Strategy<Value = SelfName> {
+        (0u64..=100, prop::option::of(arb_name())).prop_map(|(seq, name)| {
+            if seq == 0 {
+                SelfName::empty()
+            } else {
+                signed_self_name(&test_key(), seq, name.as_deref())
+            }
         })
     }
 
-    fn arb_contacts() -> impl Strategy<Value = Contacts> {
-        (1u64..=100, arb_contacts_entries())
-            .prop_map(|(seq, entries)| signed_contacts(&test_key(), seq, entries))
+    /// Generate child names for a random subset of the eight slots, in
+    /// strictly ascending slot order (the only valid order).
+    fn arb_child_names_entries() -> impl Strategy<Value = Vec<ChildName>> {
+        proptest::collection::vec((any::<bool>(), arb_name(), arb_user_id()), SLOT_COUNT).prop_map(
+            |specs| {
+                specs
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, (keep, _, _))| *keep)
+                    .map(|(slot, (_, name, user_id))| child_name(slot as u8, &user_id, &name))
+                    .collect()
+            },
+        )
+    }
+
+    fn arb_child_names() -> impl Strategy<Value = ChildNames> {
+        (0u64..=100, arb_child_names_entries()).prop_map(|(seq, entries)| {
+            if seq == 0 {
+                ChildNames::empty()
+            } else {
+                signed_child_names(&test_key(), seq, entries)
+            }
+        })
     }
 
     fn arb_parent() -> impl Strategy<Value = Parent> {
@@ -4765,32 +5284,36 @@ mod tests {
         })
     }
 
-    fn arb_state() -> impl Strategy<Value = StateV5> {
+    fn arb_state() -> impl Strategy<Value = StateV6> {
         (
+            arb_self_name(),
             arb_parent(),
-            arb_contacts(),
+            arb_child_names(),
             arb_payments(),
             arb_adjustments(),
             proptest::collection::vec(arb_slot_spec(), SLOT_COUNT),
         )
-            .prop_map(|(parent, contacts, payments, adjustments, specs)| {
-                let key = test_key();
-                let slots = std::array::from_fn(|index| match &specs[index] {
-                    SlotSpec::Empty => Slot::empty(),
-                    SlotSpec::Tombstone(seq) => signed_slot(&key, index as u8, *seq, None),
-                    SlotSpec::Value(seq, entry) => {
-                        signed_slot(&key, index as u8, *seq, Some(entry.clone()))
+            .prop_map(
+                |(self_name, parent, child_names, payments, adjustments, specs)| {
+                    let key = test_key();
+                    let slots = std::array::from_fn(|index| match &specs[index] {
+                        SlotSpec::Empty => Slot::empty(),
+                        SlotSpec::Tombstone(seq) => signed_slot(&key, index as u8, *seq, None),
+                        SlotSpec::Value(seq, entry) => {
+                            signed_slot(&key, index as u8, *seq, Some(entry.clone()))
+                        }
+                    });
+                    StateV6 {
+                        v: STATE_VERSION,
+                        self_name,
+                        parent,
+                        child_names,
+                        payments,
+                        adjustments,
+                        slots,
                     }
-                });
-                StateV5 {
-                    v: STATE_VERSION,
-                    parent,
-                    contacts,
-                    payments,
-                    adjustments,
-                    slots,
-                }
-            })
+                },
+            )
     }
 
     proptest! {
@@ -4822,7 +5345,7 @@ mod tests {
 
         #[test]
         fn merge_identity(a in arb_state()) {
-            let empty = StateV5::empty();
+            let empty = StateV6::empty();
             prop_assert_eq!(merged(&a, &empty).to_bytes(), a.to_bytes());
             prop_assert_eq!(merged(&empty, &a).to_bytes(), a.to_bytes());
         }
@@ -4834,19 +5357,37 @@ mod tests {
         }
 
         #[test]
-        fn contacts_merge_is_commutative_and_associative(
-            a in arb_contacts(),
-            b in arb_contacts(),
-            c in arb_contacts(),
+        fn self_name_merge_is_commutative_and_associative(
+            a in arb_self_name(),
+            b in arb_self_name(),
+            c in arb_self_name(),
         ) {
-            let ab = merge_contacts(&a, &b);
-            let ba = merge_contacts(&b, &a);
+            let ab = merge_self_name(&a, &b);
+            let ba = merge_self_name(&b, &a);
             prop_assert_eq!(ab.clone(), ba);
             prop_assert_eq!(
-                merge_contacts(&ab, &c),
-                merge_contacts(&a, &merge_contacts(&b, &c))
+                merge_self_name(&ab, &c),
+                merge_self_name(&a, &merge_self_name(&b, &c))
             );
-            prop_assert_eq!(merge_contacts(&a, &a), a);
+            prop_assert_eq!(merge_self_name(&a, &a), a.clone());
+            prop_assert!(a.is_valid(&test_key().verifying_key()));
+        }
+
+        #[test]
+        fn child_names_merge_is_commutative_and_associative(
+            a in arb_child_names(),
+            b in arb_child_names(),
+            c in arb_child_names(),
+        ) {
+            let ab = merge_child_names(&a, &b);
+            let ba = merge_child_names(&b, &a);
+            prop_assert_eq!(ab.clone(), ba);
+            prop_assert_eq!(
+                merge_child_names(&ab, &c),
+                merge_child_names(&a, &merge_child_names(&b, &c))
+            );
+            prop_assert_eq!(merge_child_names(&a, &a), a.clone());
+            prop_assert!(a.is_valid(&test_key().verifying_key()));
         }
 
         #[test]
@@ -4866,10 +5407,14 @@ mod tests {
         }
 
         #[test]
-        fn parent_contacts_and_slot_merges_are_independent(a in arb_state(), b in arb_state()) {
+        fn record_and_slot_merges_are_independent(a in arb_state(), b in arb_state()) {
             let result = merged(&a, &b);
+            prop_assert_eq!(result.self_name, merge_self_name(&a.self_name, &b.self_name));
             prop_assert_eq!(result.parent, merge_parent(&a.parent, &b.parent));
-            prop_assert_eq!(result.contacts, merge_contacts(&a.contacts, &b.contacts));
+            prop_assert_eq!(
+                result.child_names,
+                merge_child_names(&a.child_names, &b.child_names)
+            );
             prop_assert_eq!(result.payments, merge_payments(&a.payments, &b.payments));
             prop_assert_eq!(
                 result.adjustments,

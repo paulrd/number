@@ -10,7 +10,11 @@
  * The backup dialog only ever puts the seed in a readonly textarea after the
  * user asks to reveal it, and clears it again on hide or close.
  */
-import type { DelegateIdentity, ExportedSecrets } from "./delegate";
+import type {
+  ContactRecord,
+  DelegateIdentity,
+  ExportedSecrets,
+} from "./delegate";
 import {
   decodeIdentityBackup,
   encodeIdentityBackup,
@@ -23,12 +27,22 @@ export interface IdentityDialogDeps {
   offline: boolean;
   getIdentity(): DelegateIdentity | null;
   exportIdentity(): Promise<ExportedSecrets>;
+  /**
+   * Restore a decoded backup. A v2 payload also carries the private address
+   * book and both v6 name counters, so a restore brings contacts back with the
+   * seed; a v1 payload defaults those to empty and 1.
+   */
   importIdentity(
     seed: string,
     nextSeq: number[],
     contactsNextSeq: number,
     parentNextSeq: number,
-    paymentsNextSeq?: number,
+    paymentsNextSeq: number,
+    adjustmentsNextSeq: number,
+    childNamesNextSeq: number,
+    selfNameNextSeq: number,
+    payloadVersion: number,
+    contacts: ContactRecord[],
   ): Promise<void>;
   announce(message: string): void;
   copy(
@@ -198,6 +212,11 @@ export function createIdentityDialogs(
           decoded.contactsNextSeq,
           decoded.parentNextSeq,
           decoded.paymentsNextSeq,
+          decoded.adjustmentsNextSeq,
+          decoded.childNamesNextSeq,
+          decoded.selfNameNextSeq,
+          decoded.payloadVersion,
+          decoded.contacts,
         );
       } catch (error) {
         setImporting(false);

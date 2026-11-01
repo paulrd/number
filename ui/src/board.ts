@@ -19,6 +19,7 @@ import {
   DEFAULT_MAX_AMOUNT,
   DelegateClient,
   DelegateError,
+  type ContactRecord,
   type DelegateIdentity,
   type DelegateStatus,
   type ExportedSecrets,
@@ -29,21 +30,29 @@ import {
   MAX_ADJUSTMENTS,
   MAX_PAYMENT_SETTLED,
   decodeDelta,
+  decodeLegacyV5State,
   decodeState,
+  emptyChildNames,
+  emptySelfName,
+  encodeState,
   entryFromInputs,
   mergeDelta,
+  mergeStates,
   optionalText,
   validateAdjustment,
   validateAdjustmentList,
-  validateContactList,
+  validateChildNameList,
   validateEntry,
   validatePaymentEntry,
   type Adjustment,
-  type Contact,
+  type ChildName,
+  type ChildNames,
   type Delta,
   type DeltaSlot,
   type Entry,
+  type SelfName,
   type StateV3,
+  type StateV5,
 } from "./state";
 import { paymentId, type PaymentEntry, type PaymentsRecord } from "./payments";
 import { errorMessage, hexToBytes, isLowerHex } from "./util";
@@ -59,6 +68,103 @@ export { entryFromInputs };
  */
 const CURRENT_BOARD_READ_TIMEOUT_MS = 12_000;
 const LEGACY_BOARD_READ_TIMEOUT_MS = 4_000;
+
+/**
+ * Durable "this owner's v5 address book has already been imported" marker.
+ *
+ * The import must be a once-only event: the v5 instance is readable forever, so
+ * a guard based only on the delegate book being empty would resurrect a contact
+ * the user deleted (or the self-entry they removed) on every load. The marker
+ * lives in this browser, scoped to the owner key, because the delegate has no
+ * spare secret and adding one would re-key it.
+ *
+ * Key format: `number.v6.legacy-contacts-imported:<64-lowercase-hex-owner-id>`.
+ */
+export const CONTACTS_IMPORT_MARKER_PREFIX = "number.v6.legacy-contacts-imported";
+const CONTACTS_IMPORT_MARKER_VALUE = "1";
+
+export function contactsImportMarkerKey(ownerId: string): string {
+  return `${CONTACTS_IMPORT_MARKER_PREFIX}:${ownerId}`;
+}
+
+type ImportMarkerState = "imported" | "absent" | "unavailable";
+
+/**
+ * Read the once-only marker. "unavailable" means storage is blocked or absent;
+ * the automatic repair must then be skipped rather than risk resurrecting a
+ * deleted book, because the import could not be remembered.
+ */
+function readContactsImportMarker(ownerId: string): ImportMarkerState {
+  let storage: Storage | null;
+  try {
+    storage = typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    // Access itself throws when the browser blocks storage for the origin.
+    return "unavailable";
+  }
+  if (storage === null) return "unavailable";
+  try {
+    return storage.getItem(contactsImportMarkerKey(ownerId)) ===
+      CONTACTS_IMPORT_MARKER_VALUE
+      ? "imported"
+      : "absent";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/** Record a completed import. False when the marker could not be stored. */
+function writeContactsImportMarker(ownerId: string): boolean {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    localStorage.setItem(
+      contactsImportMarkerKey(ownerId),
+      CONTACTS_IMPORT_MARKER_VALUE,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Canonical byte equality: `encodeState` validates and fixes key order. */
+function sameState(a: StateV3, b: StateV3): boolean {
+  const left = encodeState(a);
+  const right = encodeState(b);
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * Surviving records where the legacy board is ahead of the v6 board, as
+ * human-readable descriptions for the heal warning. `selfName`/`childNames` do
+ * not exist on a v5 board, so they cannot be compared (or lost) here.
+ */
+function legacyAheadRecords(legacy: StateV5, current: StateV3): string[] {
+  const ahead: string[] = [];
+  if (legacy.parent.seq > current.parent.seq) {
+    ahead.push(`parent (seq ${current.parent.seq} to ${legacy.parent.seq})`);
+  }
+  if (legacy.payments.seq > current.payments.seq) {
+    ahead.push(
+      `payments (seq ${current.payments.seq} to ${legacy.payments.seq})`,
+    );
+  }
+  if (legacy.adjustments.seq > current.adjustments.seq) {
+    ahead.push(
+      `adjustments (seq ${current.adjustments.seq} to ${legacy.adjustments.seq})`,
+    );
+  }
+  legacy.slots.forEach((slot, index) => {
+    if (slot.seq > current.slots[index].seq) {
+      ahead.push(`slot ${index} (seq ${current.slots[index].seq} to ${slot.seq})`);
+    }
+  });
+  return ahead;
+}
 
 export type BoardStatus =
   | "starting"
@@ -108,6 +214,12 @@ export interface BoardSnapshot {
   /** Owner pubkey of this board (64 lowercase hex). */
   ownerId: string;
   state: StateV3;
+  /**
+   * The private address book that labels slots in the editor. Only the owner's
+   * own board carries one (the delegate owns it); every other board's list is
+   * empty, because v6 removed public contacts from contract state.
+   */
+  contacts: ContactRecord[];
   /** Base58 code hash of the contract instance the state was read from. */
   codeHash: string;
   /** True when the state came from a superseded (v2) contract generation. */
@@ -146,13 +258,30 @@ export interface BoardBackend {
   readonly identity: DelegateIdentity | null;
   readonly contractKeyBase58: string | null;
   readonly currentState: StateV3 | null;
+  /** The owner's private address book, as last read from the delegate. */
+  readonly contacts: ContactRecord[];
   /** Latest delegate auto-advance status (online backend only). */
   readonly delegateStatus?: DelegateStatus | null;
   start(): Promise<StateV3>;
   save(slotIndex: number, entry: Entry): Promise<void>;
   clear(slotIndex: number): Promise<void>;
-  /** Replace the signed address book with `entries`. */
-  saveContacts(entries: Contact[]): Promise<void>;
+  /** Read the private address book back from the delegate. */
+  listContacts(): Promise<ContactRecord[]>;
+  /** Add one address-book entry; the delegate rejects duplicates. */
+  addContact(entry: {
+    label: string;
+    userId: string;
+    address?: string | null;
+  }): Promise<ContactRecord[]>;
+  /** Change one entry's label and/or address; the address is preserved. */
+  updateContact(
+    userId: string,
+    patch: { label?: string; address?: string | null },
+  ): Promise<ContactRecord[]>;
+  /** Remove one address-book entry by userId. */
+  removeContact(userId: string): Promise<ContactRecord[]>;
+  /** Sign a `selfName` record (null clears it) and write it in one delta. */
+  saveSelfName(name: string | null): Promise<void>;
   /** Set (or clear with null) this board's signed parent link. */
   saveParent(userId: string | null): Promise<void>;
   /**
@@ -188,6 +317,10 @@ export interface BoardBackend {
     parentNextSeq: number,
     paymentsNextSeq?: number,
     adjustmentsNextSeq?: number,
+    childNamesNextSeq?: number,
+    selfNameNextSeq?: number,
+    payloadVersion?: number,
+    contacts?: ContactRecord[],
   ): Promise<void>;
   /** Register the bundled delegate on this node (a fresh device). */
   installDelegate(): Promise<void>;
@@ -205,6 +338,20 @@ export class OnlineBoard implements BoardBackend {
   contractKeyBase58: string | null = null;
   currentState: StateV3 | null = null;
   delegateStatus: DelegateStatus | null = null;
+  /** The delegate's private address book, cached for synchronous renders. */
+  contactsCache: ContactRecord[] = [];
+  /**
+   * True once the address book has been read successfully at least once. A read
+   * failure is not an empty book: the migration and repair paths must not treat
+   * "unreadable" as "nothing there".
+   */
+  private contactsReadable = false;
+  private contactsReadWarningShown = false;
+  private importMarkerWarningShown = false;
+
+  get contacts(): ContactRecord[] {
+    return this.contactsCache.map((entry) => ({ ...entry }));
+  }
 
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
@@ -326,6 +473,10 @@ export class OnlineBoard implements BoardBackend {
             exported.parentNextSeq,
             exported.paymentsNextSeq ?? 1,
             exported.adjustmentsNextSeq ?? 1,
+            exported.childNamesNextSeq ?? 1,
+            exported.selfNameNextSeq ?? 1,
+            exported.payloadVersion ?? 1,
+            exported.contacts,
           );
           this.callbacks.onWarning?.(
             "Recovered the owner identity from the previous delegate.",
@@ -342,6 +493,384 @@ export class OnlineBoard implements BoardBackend {
         );
       }
     }
+  }
+
+  /**
+   * Upgrade a probed legacy board to v6 (DESIGN-v6.md §6).
+   *
+   * The order is the point of this method:
+   *   1. write the old address book into the delegate (once only),
+   *   2. sign `selfName` from the old self-entry,
+   *   3. sign `childNames` from the labels the parent already showed,
+   *   4. return the v6 state for the caller to PUT.
+   *
+   * Every surviving record (`parent`, `slots`, `payments`, `adjustments`) is
+   * copied unmodified: their signing bytes did not change, so re-signing would
+   * only invalidate what the old board already proved. `contacts` is dropped,
+   * never carried. The caller PUTs this only if every step above succeeded, so
+   * a delegate failure leaves the legacy instance as the only copy.
+   */
+  private async upgradeLegacyBoard(
+    raw: Uint8Array,
+    codeHash: string,
+  ): Promise<StateV3> {
+    const identity = this.identity;
+    if (!identity) {
+      throw new Error("the owner identity is not available yet");
+    }
+
+    try {
+      const legacy = decodeLegacyV5State(raw);
+      // The first migration is the only chance to save the book, so it imports
+      // even when the once-only marker cannot be recorded.
+      await this.importLegacyContacts(legacy, identity, false);
+      return await this.assembleMigratedState(legacy, identity, true);
+    } catch (error) {
+      const message =
+        `Could not migrate the previous board (${codeHash}): ${errorMessage(error)} ` +
+        "Nothing was written, so the old board is untouched. " +
+        "Fix the cause and retry; the old board stays readable until then.";
+      this.callbacks.onWarning?.(message);
+      throw new Error(message);
+    }
+  }
+
+  /**
+   * The v6 board a legacy v5 state implies: surviving records untouched, and the
+   * name records signed from the old book/slots when `seedNames` is set.
+   *
+   * The heal passes `seedNames: false` unless the v6 board has no names at all:
+   * signing again would replay the pre-migration label over a rename the user
+   * made after migrating.
+   */
+  private async assembleMigratedState(
+    legacy: StateV5,
+    identity: DelegateIdentity,
+    seedNames: boolean,
+  ): Promise<StateV3> {
+    const selfName = seedNames
+      ? await this.seedSelfName(identity, legacy)
+      : emptySelfName();
+    const childNames = seedNames
+      ? await this.seedChildNames(identity, legacy)
+      : emptyChildNames();
+
+    return {
+      v: 6,
+      selfName,
+      parent: legacy.parent,
+      childNames,
+      payments: legacy.payments,
+      adjustments: legacy.adjustments,
+      slots: legacy.slots,
+    };
+  }
+
+  /**
+   * Copy a v5 address book into the delegate as unsaved entries (`address:
+   * null`: a v5 contact was public signed data, not a payment route).
+   *
+   * This is a once-only event, guarded in this order:
+   *   1. the durable per-owner marker must be absent — book emptiness alone
+   *      would resurrect contacts the user has deleted, because the v5 instance
+   *      stays readable forever;
+   *   2. the delegate book must be readable and empty — the user's own entries
+   *      are never overwritten;
+   *   3. the old book must still have entries after dropping the owner's
+   *      self-entry, which v6 keeps as `selfName` instead of a contact.
+   *
+   * The marker is written only after the whole import succeeds, so a retry
+   * after a partial failure still runs. `automatic` marks the background repair
+   * pass: it must not import when the marker cannot be recorded, because the
+   * book could then be resurrected after the user clears it.
+   */
+  private async importLegacyContacts(
+    legacy: StateV5,
+    identity: DelegateIdentity,
+    automatic: boolean,
+  ): Promise<boolean> {
+    const marker = readContactsImportMarker(identity.pubkey);
+    if (marker === "imported") return false;
+    if (marker === "unavailable") {
+      if (automatic) {
+        if (!this.importMarkerWarningShown) {
+          this.importMarkerWarningShown = true;
+          this.callbacks.onWarning?.(
+            "This browser blocks local storage, so the address book was not " +
+              "imported automatically: without a record of the import it could " +
+              "come back after you clear it.",
+          );
+        }
+        return false;
+      }
+      // The first migration still imports (it is the only chance to save the
+      // book); `recordLegacyImport` reports that it could not be remembered.
+    }
+
+    // Read through, not from the cache: another tab may have written since.
+    const existing = await this.delegate.listContacts();
+    this.contactsCache = existing;
+    this.contactsReadable = true;
+    if (existing.length > 0) return false;
+
+    // The owner's own entry was the address book's self-entry. v6 keeps it as
+    // the signed `selfName` record, so importing it would create a phantom
+    // contact that the delegate refuses to re-add once removed.
+    const entries = legacy.contacts.entries.filter(
+      (entry) => entry.userId !== identity.pubkey,
+    );
+    if (entries.length === 0) {
+      // Nothing to import; still record that the legacy book is consumed so the
+      // probe is not repeated on every start.
+      this.recordLegacyImport(identity.pubkey);
+      return false;
+    }
+
+    const imported: string[] = [];
+    try {
+      for (const entry of entries) {
+        this.contactsCache = await this.delegate.addContact({
+          label: entry.label,
+          userId: entry.userId,
+          address: null,
+        });
+        imported.push(entry.userId);
+      }
+    } catch (error) {
+      // A partial book would satisfy the empty-book guard on the retry and
+      // silently strand the remaining entries, so undo what this run added.
+      await this.rollbackContacts(imported);
+      throw error;
+    }
+    this.recordLegacyImport(identity.pubkey);
+    return true;
+  }
+
+  /** Write the once-only marker, warning when the browser will not keep it. */
+  private recordLegacyImport(ownerId: string): void {
+    if (writeContactsImportMarker(ownerId)) return;
+    this.callbacks.onWarning?.(
+      "Could not record the address book import in this browser; it may be " +
+        "offered again if you clear the book.",
+    );
+  }
+
+  /**
+   * Best-effort undo of the entries one failed import added. Skipped when the
+   * book holds anything this run did not add (a concurrent edit wins).
+   */
+  private async rollbackContacts(userIds: string[]): Promise<void> {
+    if (userIds.length === 0) return;
+    try {
+      const current = await this.delegate.listContacts();
+      const own = new Set(userIds);
+      if (current.some((entry) => !own.has(entry.userId))) return;
+      for (const userId of userIds) {
+        this.contactsCache = await this.delegate.removeContact(userId);
+      }
+    } catch (error) {
+      console.warn(
+        "[migration] could not roll back a partial contact import:",
+        errorMessage(error),
+      );
+    }
+  }
+
+  /**
+   * `selfName` from the old self-entry: the address-book entry whose `userId`
+   * is the owner. No self-entry means the board was never named, so the empty
+   * record is right and there is nothing to sign.
+   */
+  private async seedSelfName(
+    identity: DelegateIdentity,
+    legacy: StateV5,
+  ): Promise<SelfName> {
+    const selfEntry = legacy.contacts.entries.find(
+      (entry) => entry.userId === identity.pubkey,
+    );
+    if (selfEntry === undefined) return emptySelfName();
+
+    const seq = Math.max(1, identity.selfNameNextSeq ?? 1);
+    const sig = await this.delegate.signSelfName(seq, selfEntry.label);
+    this.identity = { ...identity, selfNameNextSeq: seq + 1 };
+    return { seq, name: selfEntry.label, sig };
+  }
+
+  /**
+   * `childNames` from what the parent already showed: for each slot holding a
+   * contact, the label of that `userId` in the old address book. Slots with no
+   * contact, or with a contact the old book no longer labels, are skipped.
+   * Ascending slot order is guaranteed by iterating the slots in order.
+   */
+  private async seedChildNames(
+    identity: DelegateIdentity,
+    legacy: StateV5,
+  ): Promise<ChildNames> {
+    const labels = new Map(
+      legacy.contacts.entries.map((entry) => [entry.userId, entry.label]),
+    );
+    const entries: ChildName[] = [];
+    legacy.slots.forEach((slot, index) => {
+      const contact = slot.entry?.contact ?? null;
+      if (contact === null) return;
+      const label = labels.get(contact);
+      if (label === undefined || label.length === 0) return;
+      entries.push({ slot: index, userId: contact, name: label });
+    });
+    if (entries.length === 0) return emptyChildNames();
+
+    const validated = validateChildNameList(entries);
+    const seq = Math.max(1, identity.childNamesNextSeq ?? 1);
+    const sig = await this.delegate.signChildNames(seq, validated);
+    this.identity = {
+      ...(this.identity ?? identity),
+      childNamesNextSeq: seq + 1,
+    };
+    return { seq, entries: validated, sig };
+  }
+
+  /**
+   * Reconcile this board with an untouched legacy instance. Runs after
+   * configure and never blocks the first render.
+   *
+   * Two independent repairs share one legacy probe:
+   *   - records: a stale bundle (or the pre-v9 delegate auto-advancing legs)
+   *     can keep writing the v5 instance after this board migrated, so heal any
+   *     record where the legacy board is ahead;
+   *   - contacts: the once-only import of the old address book.
+   */
+  private async reconcileLegacyGeneration(): Promise<void> {
+    const identity = this.identity;
+    if (!identity || !this.started || !this.contract) return;
+    const legacy = await this.readLegacyBoard(identity.pubkey);
+    if (legacy === null) return;
+    await this.healLegacyAheadRecords(legacy, identity);
+    await this.repairLegacyContacts(legacy, identity);
+  }
+
+  /**
+   * Heal a fork: the v5 instance stayed writable after migration, so a stale
+   * bundle can have written records there that never merge back on their own.
+   * When any surviving record is ahead, build its v6 form and merge it into the
+   * current state. Same owner signed both sides, so this is the contract's own
+   * whole-record merge: idempotent, and a no-op once the sides have converged.
+   */
+  private async healLegacyAheadRecords(
+    legacy: StateV5,
+    identity: DelegateIdentity,
+  ): Promise<void> {
+    const contract = this.contract;
+    const current = this.currentState;
+    if (!contract || !current || this.mutating) return;
+
+    const ahead = legacyAheadRecords(legacy, current);
+    if (ahead.length === 0) return;
+
+    // An empty v6 instance never received the legacy records (the known gap):
+    // seed its names too. A board that already has names keeps them.
+    const seedNames =
+      current.selfName.seq === 0 && current.childNames.seq === 0;
+
+    let merged: StateV3;
+    try {
+      merged = mergeStates(
+        current,
+        await this.assembleMigratedState(legacy, identity, seedNames),
+      );
+    } catch (error) {
+      if (!seedNames) {
+        this.callbacks.onWarning?.(
+          "Could not reconcile records from the previous board generation: " +
+            errorMessage(error),
+        );
+        return;
+      }
+      // Names are cosmetic; the surviving records are not. Do not leave the
+      // fork unhealed over a name that could not be signed.
+      try {
+        merged = mergeStates(
+          current,
+          await this.assembleMigratedState(legacy, identity, false),
+        );
+      } catch (fallbackError) {
+        this.callbacks.onWarning?.(
+          "Could not reconcile records from the previous board generation: " +
+            errorMessage(fallbackError),
+        );
+        return;
+      }
+    }
+    if (sameState(merged, current)) return;
+
+    try {
+      await contract.publishState(hexToBytes(identity.pubkey), merged);
+    } catch (error) {
+      this.callbacks.onWarning?.(
+        `Could not recover newer records from the previous board generation: ${errorMessage(error)}`,
+      );
+      return;
+    }
+
+    this.callbacks.onWarning?.(
+      `Recovered newer records from the previous board generation: ${ahead.join(", ")}.`,
+    );
+    try {
+      const fresh = await contract.getState();
+      this.currentState = fresh;
+      this.callbacks.onState(fresh);
+    } catch (error) {
+      this.currentState = merged;
+      this.callbacks.onState(merged);
+      this.callbacks.onWarning?.(
+        `Recovered the records, but could not refresh the board: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Once-only address-book repair: a v6 board exists but this browser never
+   * imported the old book. Guarded by the marker, then by readability, then by
+   * the book being empty, so deleted contacts stay deleted.
+   */
+  private async repairLegacyContacts(
+    legacy: StateV5,
+    identity: DelegateIdentity,
+  ): Promise<void> {
+    if (readContactsImportMarker(identity.pubkey) === "imported") return;
+    // "Could not read" is not "empty": never import over an unknown book.
+    if (!this.contactsReadable) return;
+    if (this.contactsCache.length > 0) return;
+
+    try {
+      if (await this.importLegacyContacts(legacy, identity, true)) {
+        this.repaintAfterContactsChange();
+        this.callbacks.onWarning?.(
+          "Recovered the private address book from the previous board generation.",
+        );
+      }
+    } catch (error) {
+      this.callbacks.onWarning?.(
+        `Could not recover the previous board's address book: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /** Probe the migratable legacy instances for this owner's old board. */
+  private async readLegacyBoard(ownerId: string): Promise<StateV5 | null> {
+    const parameters = hexToBytes(ownerId);
+    for (const codeHash of LEGACY_CONTRACT_CODE_HASHES) {
+      try {
+        const viewer = await this.viewerFor(codeHash);
+        const raw = await viewer.readStateRaw(
+          parameters,
+          LEGACY_BOARD_READ_TIMEOUT_MS,
+        );
+        return decodeLegacyV5State(raw);
+      } catch {
+        // No instance, unreadable, or not a pre-v6 board: next generation.
+      }
+    }
+    return null;
   }
 
   private async doStart(): Promise<StateV3> {
@@ -424,6 +953,10 @@ export class OnlineBoard implements BoardBackend {
       this.identity = identity;
       this.callbacks.onIdentity(identity);
 
+      // The address book is delegate-owned in v6. Read it before the first
+      // state render so slot labels and the editor's contact list are ready.
+      await this.refreshContacts();
+
       const parameters = hexToBytes(identity.pubkey);
       if (parameters.length !== 32) {
         throw new Error(
@@ -435,6 +968,10 @@ export class OnlineBoard implements BoardBackend {
       const state = await this.contract.ensureState(
         parameters,
         LEGACY_CONTRACT_CODE_HASHES,
+        // v5→v6: the old board's address book moves into the delegate and the
+        // name records are signed before the first PUT. Throwing here aborts
+        // the PUT, so a half-migrated board is impossible.
+        (raw, codeHash) => this.upgradeLegacyBoard(raw, codeHash),
       );
       this.currentState = state;
 
@@ -452,7 +989,13 @@ export class OnlineBoard implements BoardBackend {
       // board. It must not delay the first render; a failure is non-fatal
       // (auto-advance stays inert) and is reported as a warning.
       this.delegateStatus = null;
-      void this.reconfigureDelegate();
+      // Reconcile with an untouched legacy instance, then configure: records
+      // from a stale bundle are healed and the old address book is imported
+      // once, both off the first-render path. Serialised through the configure
+      // chain so the legacy viewers are not used by two address walks at once.
+      void this.reconfigureDelegate().then(() =>
+        this.reconcileLegacyGeneration(),
+      );
       return state;
     } catch (error) {
       this.started = false;
@@ -522,18 +1065,89 @@ export class OnlineBoard implements BoardBackend {
   }
 
   /**
-   * Write the whole address book as one signed contacts record. Same
-   * optimistic/rollback shape as `write`, and the same single-write guard.
+   * Read the delegate's private address book. A delegate that predates v9 has
+   * no `contacts` command; treat that as an empty book rather than failing the
+   * board, because names are signed records and do not depend on it.
+   *
+   * A genuine read failure is different: the cache is left as it was (never
+   * replaced with a fake empty book) and the user is told once. The migration
+   * and repair paths check `contactsReadable` before importing anything.
    */
-  async saveContacts(entries: Contact[]): Promise<void> {
-    const normalised = entries.map((entry) => ({
-      label: entry.label.trim(),
-      userId: entry.userId.trim().toLowerCase(),
-    }));
-    const validated = validateContactList(normalised);
+  private async refreshContacts(): Promise<ContactRecord[]> {
+    try {
+      this.contactsCache = await this.delegate.listContacts();
+      this.contactsReadable = true;
+    } catch (error) {
+      this.contactsReadable = false;
+      console.warn(
+        "[delegate] could not read the private address book:",
+        errorMessage(error),
+      );
+      if (!this.contactsReadWarningShown) {
+        this.contactsReadWarningShown = true;
+        this.callbacks.onWarning?.(
+          `Could not read the private address book: ${errorMessage(error)}. ` +
+            "No contact was imported; the book is shown as last seen.",
+        );
+      }
+    }
+    return this.contactsCache;
+  }
 
+  async listContacts(): Promise<ContactRecord[]> {
+    return this.refreshContacts();
+  }
+
+  /**
+   * Address-book mutations never touch contract state. The delegate answers
+   * with the resulting array, which becomes the cached list; a repaint follows
+   * so every open view (grid, editor, dialog) sees the same book.
+   */
+  async addContact(entry: {
+    label: string;
+    userId: string;
+    address?: string | null;
+  }): Promise<ContactRecord[]> {
+    this.contactsCache = await this.delegate.addContact(entry);
+    this.contactsReadable = true;
+    this.repaintAfterContactsChange();
+    return this.contactsCache;
+  }
+
+  async updateContact(
+    userId: string,
+    patch: { label?: string; address?: string | null },
+  ): Promise<ContactRecord[]> {
+    this.contactsCache = await this.delegate.updateContact(userId, patch);
+    this.contactsReadable = true;
+    this.repaintAfterContactsChange();
+    return this.contactsCache;
+  }
+
+  async removeContact(userId: string): Promise<ContactRecord[]> {
+    this.contactsCache = await this.delegate.removeContact(userId);
+    this.contactsReadable = true;
+    this.repaintAfterContactsChange();
+    return this.contactsCache;
+  }
+
+  private repaintAfterContactsChange(): void {
+    if (this.currentState) this.callbacks.onState(this.currentState);
+  }
+
+  /**
+   * Sign and write the owner's `selfName`. A null name is a legal tombstone
+   * (seq > 0 with a null name). The seq is one past the committed record or the
+   * delegate's counter, whichever is ahead, exactly like a slot write.
+   */
+  async saveSelfName(name: string | null): Promise<void> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
       throw new Error("The board is not connected yet");
+    }
+    if (name !== null) {
+      const trimmed = name.trim();
+      if (trimmed === "") throw new Error("A board name must not be empty.");
+      name = trimmed;
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -542,17 +1156,17 @@ export class OnlineBoard implements BoardBackend {
     let updateStarted = false;
 
     try {
-      // Same rule as slots: beat the contract's record and the delegate counter.
       const seq = Math.max(
-        previous.contacts.seq + 1,
-        this.identity.contactsNextSeq ?? 1,
+        previous.selfName.seq + 1,
+        this.identity.selfNameNextSeq ?? 1,
       );
-      const sig = await this.delegate.signContacts(seq, validated);
+      const sig = await this.delegate.signSelfName(seq, name);
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
+        selfName: { seq, name, sig },
         parent: null,
-        contacts: { seq, entries: validated, sig },
+        childNames: null,
         payments: null,
         adjustments: null,
         slots: [],
@@ -562,7 +1176,7 @@ export class OnlineBoard implements BoardBackend {
       this.currentState = optimistic;
       this.callbacks.onState(optimistic);
 
-      this.identity = { ...this.identity, contactsNextSeq: seq + 1 };
+      this.identity = { ...this.identity, selfNameNextSeq: seq + 1 };
       this.callbacks.onIdentity(this.identity);
 
       updateStarted = true;
@@ -574,7 +1188,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Saved the address book, but could not refresh the board: ${errorMessage(error)}`,
+          `Saved the board name, but could not refresh the board: ${errorMessage(error)}`,
         );
       }
     } catch (error) {
@@ -621,9 +1235,10 @@ export class OnlineBoard implements BoardBackend {
       const sig = await this.delegate.signParent(seq, userId);
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: { seq, userId, sig },
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: null,
         adjustments: null,
         slots: [],
@@ -765,9 +1380,10 @@ export class OnlineBoard implements BoardBackend {
       );
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: {
           seq: paymentsSeq,
           settled,
@@ -834,9 +1450,10 @@ export class OnlineBoard implements BoardBackend {
       const settled = nextSettled(payments, null);
       const sig = await this.delegate.signPayments(seq, null, settled);
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: { seq, settled, entry: null, sig },
         adjustments: null,
         slots: [],
@@ -935,9 +1552,10 @@ export class OnlineBoard implements BoardBackend {
       const signed = await this.delegate.signAdjustment(adjustmentsSeq, capped);
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames: null,
         payments: null,
         adjustments: { seq: signed.seq, entries: capped, sig: signed.sig },
         slots: [{ i: slotIndex, seq: slotSeq, entry, sig }],
@@ -1009,6 +1627,7 @@ export class OnlineBoard implements BoardBackend {
       return {
         ownerId,
         state: this.currentState,
+        contacts: this.contacts,
         codeHash: this.config.contractCodeHash,
         legacy: false,
       };
@@ -1026,7 +1645,9 @@ export class OnlineBoard implements BoardBackend {
       try {
         const viewer = await this.viewerFor(codeHash);
         const state = await viewer.readState(parameters, timeout);
-        return { ownerId, state, codeHash, legacy };
+        // Other owners' address books are private, so a remote board never has
+        // one to show. Public slot labels come from its signed `childNames`.
+        return { ownerId, state, contacts: [], codeHash, legacy };
       } catch {
         // No instance, unreadable state, or a timeout: try the next generation.
       }
@@ -1072,6 +1693,10 @@ export class OnlineBoard implements BoardBackend {
     parentNextSeq: number,
     paymentsNextSeq = 1,
     adjustmentsNextSeq = 1,
+    childNamesNextSeq = 1,
+    selfNameNextSeq = 1,
+    payloadVersion = 1,
+    contacts?: ContactRecord[],
   ): Promise<void> {
     await this.delegate.importSecrets(
       seed,
@@ -1080,7 +1705,14 @@ export class OnlineBoard implements BoardBackend {
       parentNextSeq,
       paymentsNextSeq,
       adjustmentsNextSeq,
+      childNamesNextSeq,
+      selfNameNextSeq,
+      payloadVersion,
+      contacts,
     );
+    // A restored backup carries the private address book; make the in-memory
+    // cache match before the board is read.
+    await this.refreshContacts();
   }
 
   /**
@@ -1221,12 +1853,63 @@ export class OnlineBoard implements BoardBackend {
       {
         ownerId: this.identity.pubkey,
         state: this.currentState,
+        contacts: this.contacts,
         codeHash: this.config.contractCodeHash,
         legacy: false,
       },
       { readBoard: (ownerId) => this.readBoard(ownerId) },
     );
     return info.address;
+  }
+
+  /**
+   * The `childNames` record a slot write implies. A parent names each child by
+   * its own slot index, so saving a slot (re)writes that slot's entry with the
+   * selected contact's label; clearing the slot removes it. The record is only
+   * re-signed when its entries actually change. A signed name whose contact has
+   * since been removed from the private book is preserved while it still
+   * describes this slot.
+   */
+  private async nextChildNamesForSlot(
+    state: StateV3,
+    identity: DelegateIdentity,
+    slotIndex: number,
+    entry: Entry | null,
+  ): Promise<ChildNames | null> {
+    const current = state.childNames;
+    const existing = current.entries.find(
+      (candidate) => candidate.slot === slotIndex,
+    );
+    const contact =
+      entry === null
+        ? null
+        : (this.contactsCache.find(
+            (candidate) => candidate.userId === entry.contact,
+          ) ?? null);
+
+    const entries = current.entries.filter(
+      (candidate) => candidate.slot !== slotIndex,
+    );
+    if (entry !== null) {
+      if (contact !== null) {
+        entries.push({
+          slot: slotIndex,
+          userId: entry.contact,
+          name: contact.label,
+        });
+      } else if (existing !== undefined && existing.userId === entry.contact) {
+        entries.push(existing);
+      }
+    }
+    entries.sort((a, b) => a.slot - b.slot);
+    const validated = validateChildNameList(entries);
+    if (JSON.stringify(validated) === JSON.stringify(current.entries)) {
+      return null;
+    }
+
+    const seq = Math.max(current.seq + 1, identity.childNamesNextSeq ?? 1);
+    const sig = await this.delegate.signChildNames(seq, validated);
+    return { seq, entries: validated, sig };
   }
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
@@ -1249,11 +1932,18 @@ export class OnlineBoard implements BoardBackend {
       const seq = this.nextSlotSeq(previous, this.identity, slotIndex);
 
       const sig = await this.delegate.sign(slotIndex, seq, entry);
+      const childNames = await this.nextChildNamesForSlot(
+        previous,
+        this.identity,
+        slotIndex,
+        entry,
+      );
 
       const delta: Delta = {
-        v: 5,
+        v: 6,
         parent: null,
-        contacts: null,
+        selfName: null,
+        childNames,
         payments: null,
         adjustments: null,
         slots: [{ i: slotIndex, seq, entry, sig }],
@@ -1270,6 +1960,10 @@ export class OnlineBoard implements BoardBackend {
         nextSeq: this.identity.nextSeq.map((value, index) =>
           index === slotIndex ? seq + 1 : value,
         ),
+        childNamesNextSeq:
+          childNames === null
+            ? this.identity.childNamesNextSeq
+            : childNames.seq + 1,
       };
       this.callbacks.onIdentity(this.identity);
 
