@@ -584,7 +584,10 @@ async function resolveSlotName(index: number, ownerId: string): Promise<void> {
 /** Contract key shown in the header: the viewed board's instance id. */
 function currentContractKey(): string | null {
   if (!view) return null;
-  if (view.isOwn) return contractKeyFull;
+  // The own board's key arrives from the client once the instance resolves,
+  // but that callback is tied to the connection lifecycle. Derive it from the
+  // code hash and owner key instead, so a reconnect cannot blank the id.
+  if (view.isOwn && contractKeyFull) return contractKeyFull;
   try {
     return deriveInstanceId(view.codeHash, hexToBytes(view.ownerId)).base58;
   } catch {

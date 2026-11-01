@@ -4,25 +4,30 @@ UI display name: **Tally**. The repository, crate names and on-disk keys keep
 `number`: renaming them changes the WASM bytes, and so the contract id and
 delegate key, which would strand every existing board.
 
-A small Freenet dApp: one personal board of **8 number slots** and a shared
+A small Freenet dApp: one personal board of **8 number slots** and a private
 **address book**, arranged as a **tree of boards**. Each board is a node: its 8
 slots are its children (each linked to a contact — label + user id/public key)
 and it has at most one parent board. A slot holds a two-decimal number
 (optional; blank is `0.00`) plus optional unit and note. The child contact is
 mandatory; the slot stores the contact's public key, so renaming a label keeps
-the link.
+the link. The name a child sees is the one signed with the slot (`childNames`),
+so renaming a contact does not rewrite it.
 
 A parent/child edge is a tree edge only when **both sides agree**: the parent
 board has a slot for the child, and the child board's parent points back to the
-parent. One-sided links are shown as pending. Other owners' boards are readable
-in the UI but only the owner can sign them.
+parent. A slot counts as a child slot only then; a one-sided link is shown
+separately as unconfirmed, and while viewing another owner's board only mutual
+links are listed. Other owners' boards are readable in the UI but only the
+owner can sign them.
 
 - **Contract** (`contract/`) — shared, replicated state. One instance per owner,
-  parameterised by the owner's Ed25519 verifying key. Signed slot and address
-  book updates, last-writer-wins on a monotonic `seq`, tombstones for cleared
-  slots/contacts, canonical JSON state, small fixed-size summary, delta sync.
-- **Delegate** (`delegate/`) — holds the owner's signing key locally and signs
-  slot, address-book, parent, payment and adjustment updates. **v4.1:** while
+  parameterised by the owner's Ed25519 verifying key. Signed slot, parent,
+  payment, adjustment, `selfName` and `childNames` records, last-writer-wins on
+  a monotonic `seq`, tombstones for cleared slots, canonical JSON state, small
+  fixed-size summary, delta sync. There is no address book in contract state.
+- **Delegate** (`delegate/`) — holds the owner's signing key and the private
+  address book (`label`, `userId`, octal `address`) locally, and signs slot,
+  parent, payment, adjustment and name updates. **v4.1:** while
   the node runs it subscribes to the board's parent and children and can
   advance a forward payment leg with no tab open (Background permission
   required). Secrets never leave the node.
@@ -37,7 +42,9 @@ in the UI but only the owner can sign them.
 Values are i64 **counts of hundredths** in the contract (the wire type did not
 change; the UI divides by 100 and shows exactly two decimals).
 
-Design and exact wire formats: [DESIGN.md](./DESIGN.md).
+Design and exact wire formats: [DESIGN.md](./DESIGN.md) (v4/v5) and
+[DESIGN-v6.md](./DESIGN-v6.md) (private address book, signed names). UI
+information architecture: [DESIGN-views.md](./DESIGN-views.md).
 Current deployment state, done work, and the remaining backlog:
 [BACKLOG.md](./BACKLOG.md).
 

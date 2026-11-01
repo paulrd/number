@@ -767,7 +767,10 @@ export class NumberContract {
   private closeSocket(): void {
     const api = this.api;
     this.api = null;
-    this.key = null;
+    // `this.key` is derived from the code hash and parameters, not from the
+    // connection, so it stays valid across a reconnect. Clearing it here made
+    // the contract id read "Not derived" after any socket drop, even though
+    // the board kept working.
     if (api) {
       void api.disconnect(new DisconnectRequest("connection timeout")).catch(() => {});
     }

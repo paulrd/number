@@ -646,12 +646,21 @@ export class OnlineBoard implements BoardBackend {
     return true;
   }
 
-  /** Write the once-only marker, warning when the browser will not keep it. */
+  /**
+   * Write the once-only marker.
+   *
+   * The published app runs in a sandboxed, opaque-origin iframe, where
+   * `localStorage` always throws, so the marker is normally unavailable. That
+   * is expected, not a failure the user should see: without a marker the
+   * automatic repair simply never runs, which is the safe direction (a deleted
+   * contact is never resurrected). A real storage failure in a normal tab has
+   * the same benign consequence, so this stays out of the notice area.
+   */
   private recordLegacyImport(ownerId: string): void {
     if (writeContactsImportMarker(ownerId)) return;
-    this.callbacks.onWarning?.(
-      "Could not record the address book import in this browser; it may be " +
-        "offered again if you clear the book.",
+    console.info(
+      "[migration] address book imported; this environment cannot record it, " +
+        "so the import will not be repeated automatically",
     );
   }
 

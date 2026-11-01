@@ -6,9 +6,12 @@ This file is the durable state for the project. Read it with `README.md` and
 ## Current state
 
 Published on the live Freenet network (same webapp id as local; the website key
-did not change). The local node remains the owner's node. v3 (boards as a tree)
-is recorded in `published/` and deployed to both the local node and the live VPS
-peer; the live test identity opens the v3 contract as a root board.
+did not change). The local node remains the owner's node. **v6** (private
+address book in the delegate, signed `selfName`/`childNames`) and delegate
+**v9** are recorded in `published/` and deployed to all four live peers on
+2026-11-01; the live owner board migrated from v5 on first load, importing its
+two contacts into the delegate. The UI is leaf-first: the default view shows
+five things and everything else is behind Advanced.
 
 | Item | Value |
 |---|---|
@@ -20,16 +23,17 @@ peer; the live test identity opens the v3 contract as a root board.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg` (v8, current; `Fwgf…`, `5C2sivo…` and earlier are registered legacy generations) |
-| Current delegate code hash | `3PoWyq37qCRhFNzjhYzedtyqxHA6saaj3NBJyj993Jrb` |
-| Current contract code hash | `5YKHJAKaLcMoKaM9nhXJweGytK6CpDvsskEzPfFJ3jrg` (v5) |
+| Current delegate key | `9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA` (v9, current, published to `7509` on 2026-11-01; `8G5…` (v8), `Fwgf…`, `5C2sivo…` and earlier are registered legacy generations) |
+| Current delegate code hash | `Cnfyn2fWBRSgyrmdxhUcZf2FrijvnHvoRMpznM85Lx5S` |
+| Current contract code hash | `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` (v6) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
-| Owner board contract id | `9x5e6rygfV58TPC3S6qncZ9ENTZ4x4pEoJ3oSVXsSPtv` (v3; v2 `Ge6f…` migrates into it) |
+| Owner board contract id | `5vwEEpEB…STBWB4dL` (v6; the v5 instance remains readable and is probed once per start for the legacy-ahead heal) |
 | Live v4 test board | `EFegBMVna68Rn7VhXxYeRavJBCXLWJqqsXpKeA5Q7wKo` (live test identity `3f84…`; root “Dad”; slot 1 “Alice” = `12.00`) |
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v5 + v8 deployed and identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-DnKdzgd6.js` (UI-only publish 2026-11-01, display name **Tally**; version `1793544465`) |
+| Live site | v6 + v9 + leaf-first UI, identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-4tx9bKN-.js`; version `1793557217` (2026-11-01) |
+| Address book | private, in the delegate (`number.v9.contacts`, `{label,userId,address}`); the export is its backup. Not in contract state since v6 |
 | Tooling | local `freenet` 0.2.153 (`310e494`) and `fdev` 0.3.315; all four VPS nodes upgraded and restarted 2026-11-01 (previously 0.2.151 / 0.3.313, backups at `*.0.2.151.bak`); CI pin still 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
 | Local node | stopped; loopback-only, so it will not fetch the live update. When started on `:7510`, run `fdev --port 7510 website update --key number-local ui/dist` to serve the Tally bundle |
@@ -750,3 +754,40 @@ Handoff notes:
   update --key number-local ui/dist`, `make publish-delegate`); the four-node
   API is reached through SSH forwards from the development machine.
 
+## v6 / v9 known issues (2026-11-01)
+
+Added by the leaf-first pass; none block the current deployment.
+
+1. **The once-only address-book import marker cannot persist in the shipped
+   app.** The site runs in a sandboxed, opaque-origin iframe where
+   `localStorage` throws, so the marker is never written. Consequence: the
+   import runs during v5→v6 migration (it did, on the live owner board) and the
+   automatic repair never runs afterwards — the safe direction, since a deleted
+   contact can never be resurrected. Moving the marker into a delegate secret
+   would fix it properly and costs another delegate re-key (v10).
+2. **The address book no longer syncs across devices.** It lives in the
+   delegate; the exported identity (payload v2) is the backup and the restore
+   path carries it.
+3. **Contact validation is duplicated** in `delegate/src/lib.rs`,
+   `delegate.ts`, `identity.ts` and `mock.ts`. The delegate is the authority;
+   consolidate before adding rules.
+4. **A contact rename does not re-sign `childNames`.** The child keeps seeing
+   the name signed with the slot until the parent saves the slot again. Copy
+   says so; do not let a future UI imply otherwise.
+5. **`Send a payment…` in Advanced is not disabled for a pending parent** (the
+   default-view `Send payment` is). First press fails with the route error.
+6. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not.** State
+   is strict for byte agreement; a peer can still add ignored delta keys.
+
+## v6 / v9 migration notes
+
+- v5 → v6 is client-side and migratable: `contacts` is dropped, `selfName` and
+  `childNames` are seeded, every surviving signature still verifies.
+- The v5 instance stays readable forever. On every start the UI probes it once
+  (4 s budget, after configure) and heals any record where the legacy board is
+  ahead, merging the same owner's signed records into the v6 instance. This
+  closes the window where a stale cached bundle kept writing the v5 board.
+- A failed migration fails the start rather than creating an empty v6 board;
+  the v5 instance remains the only copy and `retry()` re-runs it.
+- Delegates: v8 → v9 goes through `LEGACY_DELEGATES` (export/import carries the
+  seed, every counter, and the address book).
