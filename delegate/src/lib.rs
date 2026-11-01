@@ -42,8 +42,9 @@ pub const USER_ID_HEX_LEN: usize = 64;
 /// Length of the webapp contract instance id carried in the delegate params.
 pub const WEBAPP_ID_LEN: usize = 32;
 
-/// Bumped when the delegate protocol changes; reported by `status`/`export`.
-pub const DELEGATE_VERSION: u32 = 9;
+/// The delegate protocol version; v10 routes payments whose source or
+/// destination is the LCA.
+pub const DELEGATE_VERSION: u32 = 10;
 
 /// Version of the export/import payload shape (independent of the wire state
 /// version). Version 1 payloads are accepted by `import`.
@@ -2707,13 +2708,40 @@ fn ensure_subscription(
     ));
 }
 
-fn plan_is_final(address: &str, intent: &Payment) -> bool {
+/// What kind of final hop an intent has for this board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalLeg {
+    /// Not the final actor.
+    None,
+    /// A destination-side credit to a separate child board.
+    Destination,
+    /// The `dD = 0` LCA burn: this board itself is the destination.
+    SelfDestination,
+}
+
+/// Classify this board's route step. The `dD = 0` LCA terminal has no credit
+/// slot, so it must not try to resolve its own owner as a destination board.
+fn final_leg(address: &str, intent: &Payment) -> FinalLeg {
     let Ok(route) = advance::plan_route(&intent.src_addr, &intent.dst_addr) else {
-        return false;
+        return FinalLeg::None;
     };
-    advance::actor_step(&route, intent.cursor, Some(address))
-        .map(|step| step.next_address.is_none())
-        .unwrap_or(false)
+    let Ok(step) = advance::actor_step(&route, intent.cursor, Some(address)) else {
+        return FinalLeg::None;
+    };
+    if step.next_address.is_some() {
+        return FinalLeg::None;
+    }
+    if step
+        .slots
+        .iter()
+        .any(|slot| slot.direction == advance::Direction::Credit)
+    {
+        FinalLeg::Destination
+    } else if step.role == advance::StepRole::Lca {
+        FinalLeg::SelfDestination
+    } else {
+        FinalLeg::None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3059,7 +3087,8 @@ fn scan(host: &mut impl ContractHost, force_subscribe: bool, out: &mut Vec<Outbo
             continue;
         }
 
-        let destination = if plan_is_final(&config.address, intent) {
+        let final_leg = final_leg(&config.address, intent);
+        let destination = if final_leg == FinalLeg::Destination {
             match resolve_owner(host, &hashes, &intent.dst, &mut inbox, out) {
                 Ok(resolved_destination) => resolved_destination.state,
                 Err(error) => {
@@ -3070,7 +3099,7 @@ fn scan(host: &mut impl ContractHost, force_subscribe: bool, out: &mut Vec<Outbo
         } else {
             None
         };
-        if plan_is_final(&config.address, intent) && destination.is_none() {
+        if final_leg == FinalLeg::Destination && destination.is_none() {
             inbox.last_error = Some("destination-unknown".to_owned());
             continue;
         }
@@ -5674,5 +5703,36 @@ mod tests {
                 signing_bytes(3, 7, Some(&decoded))
             );
         }
+    }
+
+    #[test]
+    fn final_leg_distinguishes_a_destination_credit_from_an_lca_burn() {
+        let intent = |src_addr: &str, dst_addr: &str, cursor: u8| Payment {
+            id: PAYMENT_ID.into(),
+            src: CONTACT_22.into(),
+            dst: CONTACT_11.into(),
+            amount: 100,
+            src_addr: src_addr.into(),
+            dst_addr: dst_addr.into(),
+            cursor,
+            phase: "forward".into(),
+            status: "acted".into(),
+            next: PAYMENT_NEXT.into(),
+            fail: None,
+            legs: Vec::new(),
+        };
+
+        // Root -> grandchild: the first destination-side child is the final
+        // actor and credits a separate child board.
+        assert_eq!(final_leg("3", &intent("", "31", 1)), FinalLeg::Destination);
+        // Grandchild -> root: the root is the LCA and the destination, so the
+        // final hop is a debit-only burn with no destination board to resolve.
+        assert_eq!(
+            final_leg("", &intent("31", "", 1)),
+            FinalLeg::SelfDestination
+        );
+        // Non-final hops.
+        assert_eq!(final_leg("3", &intent("31", "", 0)), FinalLeg::None);
+        assert_eq!(final_leg("3", &intent("", "31", 0)), FinalLeg::None);
     }
 }

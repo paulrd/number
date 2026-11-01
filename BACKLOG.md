@@ -23,8 +23,8 @@ five things and everything else is behind Advanced.
 | Live test identity | `3f841147…505c27b0` (fresh, created on the VPS peer for the #12 smoke test) |
 | Live test board | `3v52c7az…rEvmrEkW` (slot 1 = `42`, seq 1; v1 only, abandoned by the v2 re-key) |
 | Live bootstrap | delegate WASM bundled in the site; first-run install on consent (#14) |
-| Current delegate key | `9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA` (v9, current, published to `7509` on 2026-11-01; `8G5…` (v8), `Fwgf…`, `5C2sivo…` and earlier are registered legacy generations) |
-| Current delegate code hash | `Cnfyn2fWBRSgyrmdxhUcZf2FrijvnHvoRMpznM85Lx5S` |
+| Current delegate key | `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV` (v10, current, published to `7509` on 2026-11-01; `9a34…` (v9), `8G5…` (v8), `Fwgf…`, `5C2sivo…` and earlier are registered legacy generations) |
+| Current delegate code hash | `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` (v10; v9 was `Cnfyn…`) |
 | Current contract code hash | `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` (v6) |
 | Owner identity | `7193df714c57b79be0fb550f3150ccb0a23680dd2ccc305cef87a712c244e351` |
 | Owner board contract id | `5vwEEpEB…STBWB4dL` (v6; the v5 instance remains readable and is probed once per start for the legacy-ahead heal) |
@@ -32,7 +32,7 @@ five things and everything else is behind Advanced.
 | Stage v4 test board | `FkZL1LQ14QKjW236t6hBAUk5Qpa1ybXiVNhy3mu2ouZ5` (`:7512`, identity `4e7a…`; “Alice” parent “Dad”) |
 | Slot 1 | empty (v2 board was new; the v1 board `4JkW…` remains unmigratable) |
 | Published artifacts | `published/manifest.json` (source of truth for the address) |
-| Live site | v6 + v9 + leaf-first UI with children and parent on the default view, identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-DASu5Zmd.js`; version `1793561053` (2026-11-01) |
+| Live site | v6 + v10 + leaf-first UI, no board navigation, LCA-endpoint payments; identical on `7509`/`7511`/`7512`/`7513`; bundle `assets/index-EEsm_3TS.js`; version `1793563931` (2026-11-01) |
 | Address book | private, in the delegate (`number.v9.contacts`, `{label,userId,address}`); the export is its backup. Not in contract state since v6 |
 | Tooling | local `freenet` 0.2.153 (`310e494`) and `fdev` 0.3.315; all four VPS nodes upgraded and restarted 2026-11-01 (previously 0.2.151 / 0.3.313, backups at `*.0.2.151.bak`); CI pin still 0.2.151 |
 | VPS peer | four network nodes on `unstate.ca`, APIs reached through local SSH forwards |
@@ -796,3 +796,18 @@ Added by the leaf-first pass; none block the current deployment.
   the v5 instance remains the only copy and `retry()` re-runs it.
 - Delegates: v8 → v9 goes through `LEGACY_DELEGATES` (export/import carries the
   seed, every counter, and the address book).
+
+## LCA-endpoint payments + no navigation (2026-11-01)
+
+- A payment route may now have either endpoint at the LCA, so a board with any
+  link can pay and be paid: downward-only is an implicit issue to the first
+  child on the path, upward-only an implicit burn at the payee. The route table
+  is implemented twice (UI planner and delegate auto-advance) and both are
+  table-driven from the same fixture tree; `DESIGN-payments-lca.md` is the
+  normative description, including the collapsed source step and the terminating
+  reversal.
+- Navigating to other owners' boards is gone. Protocol reads of neighbouring
+  boards (parent name/value, mutual-link checks, payment routes) remain.
+- Known: a stalled downward payment leaves the amount issued at the payer until
+  the payer withdraws or overwrites the slot. The UI says "Issued, not
+  delivered"; this follows from the requested rule and is not silent.

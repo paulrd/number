@@ -39,6 +39,7 @@ import {
   paymentProgress,
   planPayment,
   planRoute,
+  withdrawPayment,
   type IncomingPayment,
   type PaymentDeps,
   type PaymentEntry,
@@ -58,7 +59,6 @@ import {
 } from "./state";
 import {
   BoardCache,
-  buildTrail,
   childLink,
   hasLiveChild,
   MAX_TREE_DEPTH,
@@ -70,7 +70,6 @@ import {
   type AddressProblem,
   type LinkInfo,
   type LinkState,
-  type TrailStep,
 } from "./tree-view";
 import { errorMessage, hexToBytes, shorten, utf8Length } from "./util";
 
@@ -97,16 +96,9 @@ const statusDetail = byId<HTMLParagraphElement>("status-detail");
 const identityShort = byId<HTMLElement>("identity-short");
 const identityCopy = byId<HTMLButtonElement>("identity-copy");
 const identityBackup = byId<HTMLButtonElement>("identity-backup");
-const boardMeta = byId<HTMLElement>("board-meta");
-const boardMetaLabel = byId<HTMLElement>("board-meta-label");
 const boardNameRow = byId<HTMLElement>("board-name-row");
 const boardName = byId<HTMLElement>("board-name");
 const boardNameEdit = byId<HTMLButtonElement>("board-name-edit");
-const boardOwner = byId<HTMLElement>("board-owner");
-const boardCopy = byId<HTMLButtonElement>("board-copy");
-const boardHome = byId<HTMLButtonElement>("board-home");
-const readOnlyBadge = byId<HTMLElement>("read-only-badge");
-const legacyBadge = byId<HTMLElement>("legacy-badge");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
 const detailsBox = byId<HTMLDetailsElement>("details");
@@ -134,7 +126,6 @@ const autoAdvanceRefresh = byId<HTMLButtonElement>("auto-advance-refresh");
 const parentName = byId<HTMLElement>("parent-name");
 const parentStatus = byId<HTMLSpanElement>("parent-status");
 const parentNote = byId<HTMLParagraphElement>("parent-note");
-const parentOpen = byId<HTMLButtonElement>("parent-open");
 const parentEdit = byId<HTMLButtonElement>("parent-edit");
 const parentClear = byId<HTMLButtonElement>("parent-clear");
 const contactsOpen = byId<HTMLButtonElement>("contacts-open");
@@ -149,9 +140,6 @@ const noticeDismiss = byId<HTMLButtonElement>("notice-dismiss");
 
 const warningsBox = byId<HTMLDivElement>("warnings");
 const warningList = byId<HTMLUListElement>("warning-list");
-const breadcrumbs = byId<HTMLElement>("breadcrumbs");
-const breadcrumbList = byId<HTMLOListElement>("breadcrumb-list");
-const breadcrumbWarning = byId<HTMLParagraphElement>("breadcrumb-warning");
 const boardTitle = byId<HTMLHeadingElement>("board-title");
 const boardTitleName = byId<HTMLElement>("board-title-name");
 const boardMode = byId<HTMLParagraphElement>("board-mode");
@@ -236,7 +224,6 @@ const noteInput = byId<HTMLTextAreaElement>("note-input");
 const childLinkBox = byId<HTMLElement>("child-link");
 const childLinkStatus = byId<HTMLSpanElement>("child-link-status");
 const childLinkDetail = byId<HTMLParagraphElement>("child-link-detail");
-const childOpen = byId<HTMLButtonElement>("child-open");
 const editorError = byId<HTMLParagraphElement>("editor-error");
 const clearButton = byId<HTMLButtonElement>("clear-button");
 const cancelButton = byId<HTMLButtonElement>("cancel-button");
@@ -293,7 +280,6 @@ interface ViewedBoard {
   contacts: ContactRecord[];
   codeHash: string;
   legacy: boolean;
-  isOwn: boolean;
 }
 
 /** Newest adjustments kept in the child's "Held by parent" band. */
@@ -302,10 +288,10 @@ const ADJUST_NOTE_BYTES = 128;
 
 const slotViews: SlotView[] = [];
 
-/** The viewer's own board, kept live even while another board is on screen. */
+/** The viewer's own board. The app always shows this board. */
 let ownState: StateV3 | null = null;
 let ownIdentity: DelegateIdentity | null = null;
-/** The board currently on screen: own, or another owner's read-only board. */
+/** The own board on screen. */
 let view: ViewedBoard | null = null;
 
 type ViewMode = "simple" | "advanced";
@@ -334,15 +320,11 @@ const RECEIVE_LINK_COPIED_LABEL = "Copied";
 let contractKeyFull: string | null = null;
 let boardStatus: BoardStatus = "starting";
 let busy = false;
-let navigating = false;
 /** True while an adjustment is being signed, for the button's own label. */
 let adjusting = false;
 let currentSlot = 0;
-let currentChildId: string | null = null;
-let childLinkOpenable = false;
 let editorRequest = 0;
 let parentStatusRequest = 0;
-let trailRequest = 0;
 let addressRequest = 0;
 let parentValueRequest = 0;
 let paymentsRequest = 0;
@@ -378,7 +360,7 @@ let autoAdvanceDirty = false;
 let ownLiveChild: boolean | null = null;
 let ownLiveChildRequest = 0;
 
-/** Session cache for remote boards' own names (the board cache holds states). */
+/** Session cache for neighbour boards' own names (the board cache holds states). */
 const nameCache = new Map<string, string | null>();
 const nameInflight = new Map<string, Promise<string | null>>();
 
@@ -391,11 +373,6 @@ const OWN_BOARD_HINT =
   "it. Every change is signed by the owner key and merged by the contract. " +
   "Clearing a slot records that it was cleared, so an older copy cannot bring " +
   "it back.";
-
-const REMOTE_BOARD_HINT =
-  "You are viewing another owner's board. It is read-only here, and only the " +
-  "owner can change its values. Select a filled slot to open that child board, " +
-  "or use Home to return to your own board.";
 
 const LINK_LABELS: Record<LinkState, string> = {
   root: "Root",
@@ -431,8 +408,6 @@ const ADDRESS_PROBLEM_REASONS: Record<AddressProblem, string> = {
   truncated: `the path is more than ${MAX_TREE_DEPTH} boards deep`,
 };
 
-const LEGACY_BOARD_TITLE =
-  "This board is on the previous version. Its owner must open the new app to set a parent.";
 const LEGACY_PARENT_NOTE = "Parent board is on the previous version.";
 const LEGACY_PARENT_TITLE =
   "The parent cannot set its own parent until its owner opens the new app, but this edge is still valid.";
@@ -517,13 +492,12 @@ function toView(snapshot: BoardSnapshot): ViewedBoard {
     contacts: snapshot.contacts,
     codeHash: snapshot.codeHash,
     legacy: snapshot.legacy,
-    isOwn: ownIdentity !== null && snapshot.ownerId === ownIdentity.pubkey,
   };
 }
 
 const boardCache = new BoardCache((ownerId) => backend.readBoard(ownerId));
 
-/** Remote boards are cached; the own board always comes from live state. */
+/** Other boards are cached; the own board always comes from live state. */
 async function readBoardForView(ownerId: string): Promise<BoardSnapshot | null> {
   if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSnapshot();
   return boardCache.get(ownerId);
@@ -533,7 +507,7 @@ const linkDeps = {
   readBoard: readBoardForView,
 };
 
-/** Cached own name for a remote board; undefined means "not read yet". */
+/** Cached own name for a neighbour board; undefined means "not read yet". */
 function cachedSelfName(ownerId: string): string | null | undefined {
   if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSelfName();
   return nameCache.get(ownerId);
@@ -592,7 +566,7 @@ function currentContractKey(): string | null {
   // The own board's key arrives from the client once the instance resolves,
   // but that callback is tied to the connection lifecycle. Derive it from the
   // code hash and owner key instead, so a reconnect cannot blank the id.
-  if (view.isOwn && contractKeyFull) return contractKeyFull;
+  if (contractKeyFull) return contractKeyFull;
   try {
     return deriveInstanceId(view.codeHash, hexToBytes(view.ownerId)).base58;
   } catch {
@@ -644,43 +618,14 @@ function buildSlots(): void {
 }
 
 function handleSlotClick(index: number): void {
-  if (!view || busy || navigating) return;
-  if (view.isOwn) {
-    openEditor(index);
-    return;
-  }
-
-  const entry = view.state.slots[index].entry;
-  if (!view.isOwn) {
-    // Only a mutual child slot is navigable; a one-sided slot stays hidden.
-    if (
-      !slotExistsForView(
-        entry !== null,
-        view.ownerId,
-        slotExistenceOwner,
-        slotExistence,
-        index,
-      )
-    ) {
-      return;
-    }
-  }
-  if (entry === null) {
-    showNotice(
-      "info",
-      "Empty slot",
-      "This slot is empty. The board belongs to another owner and is read-only.",
-    );
-    return;
-  }
-  void openBoard(entry.contact);
+  if (!view || busy) return;
+  openEditor(index);
 }
 
 /**
- * Whether a written slot is a child of the board on screen. The map is keyed by
- * slot index and set only after the child's signed parent points back, so a
- * one-sided slot is excluded for own and remote boards alike. The grid, the
- * count and navigation all use this one predicate.
+ * Whether a written slot is a child of the own board. The map is keyed by slot
+ * index and set only after the child's signed parent points back, so a
+ * one-sided slot is excluded. The grid and the count use this one predicate.
  */
 function slotExistsForView(
   hasEntry: boolean,
@@ -739,14 +684,13 @@ function renderBoard(): void {
 
   const state = current.state;
   const ready = boardStatus === "ready" || boardStatus === "offline";
-  const canEdit = current.isOwn && ready && !busy && !navigating;
+  const canEdit = ready && !busy;
 
   state.slots.forEach((slot, index) => {
     const slotView = slotViews[index];
     const entry = slot.entry;
-    // Existence is mutual for every board, own or remote: the parent has the
-    // slot and the child's signed parent names this board. A remote one-sided
-    // slot must not inflate the count or be navigable.
+    // Existence is mutual: the parent has the slot and the child's signed
+    // parent names this board. A one-sided slot must not inflate the count.
     const exists = slotExistsForView(
       entry !== null,
       current.ownerId,
@@ -754,24 +698,18 @@ function renderBoard(): void {
       slotExistence,
       index,
     );
-    const canOpen = !current.isOwn && exists && !navigating;
 
     // Empty and one-sided slots stay in the DOM but out of the grid; the
     // Unconfirmed slots block below lists the one-sided ones as facts.
     slotView.button.hidden = !exists;
-    slotView.button.disabled = !canEdit && !canOpen;
+    slotView.button.disabled = !canEdit;
     slotView.button.className = "slot";
     if (entry) slotView.button.classList.add("is-filled");
     else if (slot.seq > 0) slotView.button.classList.add("is-tombstone");
     else slotView.button.classList.add("is-empty");
 
-    if (current.isOwn) {
-      slotView.button.setAttribute("aria-haspopup", "dialog");
-      slotView.button.setAttribute("aria-controls", "editor");
-    } else {
-      slotView.button.removeAttribute("aria-haspopup");
-      slotView.button.removeAttribute("aria-controls");
-    }
+    slotView.button.setAttribute("aria-haspopup", "dialog");
+    slotView.button.setAttribute("aria-controls", "editor");
 
     const valueText = entry
       ? formatCents(entry.value)
@@ -797,7 +735,7 @@ function renderBoard(): void {
     if (entry && givenName === null) {
       resolvedName = cachedSelfName(entry.contact);
       if (resolvedName === undefined) {
-        // Never block the grid on a remote read; fill the name in later.
+        // Never block the grid on a neighbour read; fill the name in later.
         void resolveSlotName(index, entry.contact);
       }
     }
@@ -829,11 +767,7 @@ function renderBoard(): void {
         : slot.seq > 0
           ? "Edit or set a new value."
           : "Add a value."
-      : canOpen
-        ? "Open child board."
-        : current.isOwn
-          ? "Read-only."
-          : "Read-only slot.";
+      : "Read-only.";
   });
 
   renderChildSlotsMeta();
@@ -903,9 +837,7 @@ function renderChildSlotsMeta(): void {
   );
   childSlotsTitle.textContent = `Child slots (${count} of 8)`;
   childSlotsEmpty.hidden = count > 0;
-  const hasEmpty = current.isOwn
-    ? current.state.slots.some((slot) => slot.entry === null)
-    : false;
+  const hasEmpty = current.state.slots.some((slot) => slot.entry === null);
   addChildSlot.hidden = !hasEmpty;
 }
 
@@ -948,7 +880,7 @@ function unconfirmedRow(index: number): HTMLLIElement {
 
 function renderUnconfirmed(): void {
   const current = view;
-  if (current === null || !current.isOwn) {
+  if (current === null) {
     unconfirmedSlots.hidden = true;
     unconfirmedList.replaceChildren();
     return;
@@ -968,7 +900,7 @@ function renderUnconfirmed(): void {
 }
 
 async function clearUnconfirmedSlot(index: number): Promise<void> {
-  if (busy || !view?.isOwn) return;
+  if (busy) return;
   busy = true;
   renderBoard();
   renderControls();
@@ -1101,57 +1033,26 @@ function renderBoardHeader(): void {
   const current = view;
 
   if (!current) {
-    boardMeta.hidden = true;
-    boardMetaLabel.textContent = "Board";
     boardNameRow.hidden = true;
     boardName.textContent = "Not named";
     boardName.classList.add("is-empty");
     boardName.removeAttribute("title");
     boardNameEdit.disabled = true;
-    boardOwner.textContent = "Loading…";
-    boardOwner.removeAttribute("title");
-    boardCopy.disabled = true;
-    boardCopy.removeAttribute("title");
-    boardHome.hidden = true;
-    readOnlyBadge.hidden = true;
-    legacyBadge.hidden = true;
     boardMode.textContent = "Signed · two decimals";
     boardHint.textContent = OWN_BOARD_HINT;
     return;
   }
 
-  const remote = !current.isOwn;
-  // On the own board the Board name row is the identity/board row; when
-  // viewing another owner the Viewing row takes its place.
-  boardMeta.hidden = !remote;
-  boardMetaLabel.textContent = remote ? "Viewing" : "Board";
-  boardNameRow.hidden = remote;
+  boardNameRow.hidden = false;
 
   const self = ownSelfName();
   boardName.textContent = self ?? "Not named";
   boardName.classList.toggle("is-empty", self === null);
   boardName.title = self ?? "This board has no name yet.";
-  boardNameEdit.disabled = busy || navigating || self === null;
+  boardNameEdit.disabled = busy || self === null;
 
-  const label = boardNameOf(current.ownerId, current.state);
-  boardOwner.textContent = `${label} · ${shortUserId(current.ownerId)}`;
-  boardOwner.title = current.ownerId;
-  boardCopy.disabled = false;
-  boardCopy.title = current.ownerId;
-  boardCopy.setAttribute(
-    "aria-label",
-    `Copy board owner ${boardOwner.textContent}`,
-  );
-
-  boardHome.hidden = current.isOwn;
-  boardHome.disabled = busy || navigating;
-  readOnlyBadge.hidden = current.isOwn;
-  legacyBadge.hidden = !current.legacy;
-  legacyBadge.title = LEGACY_BOARD_TITLE;
-  boardMode.textContent = current.isOwn
-    ? "Signed · two decimals"
-    : `Read-only · ${shortUserId(current.ownerId)}`;
-  boardHint.textContent = current.isOwn ? OWN_BOARD_HINT : REMOTE_BOARD_HINT;
+  boardMode.textContent = "Signed · two decimals";
+  boardHint.textContent = OWN_BOARD_HINT;
 }
 
 /**
@@ -1173,7 +1074,7 @@ function renderBoardAddress(): void {
   const request = ++addressRequest;
   const current = view;
 
-  if (current?.isOwn) {
+  if (current) {
     ownReceiveAddress = null;
     ownReceiveAddressOwner = current.ownerId;
     renderSimpleActions();
@@ -1202,15 +1103,13 @@ function renderBoardAddress(): void {
   boardAddress.title = "Working out this board's octal address.";
   boardAddress.setAttribute("aria-label", "Octal address: checking");
 
-  const board = current.isOwn ? (ownSnapshot() ?? current) : current;
+  const board = ownSnapshot() ?? current;
   void octalAddress(board, linkDeps).then((info) => {
     if (request !== addressRequest || view !== current) return;
 
-    if (current.isOwn) {
-      ownReceiveAddress = info;
-      ownReceiveAddressOwner = current.ownerId;
-      renderSimpleActions();
-    }
+    ownReceiveAddress = info;
+    ownReceiveAddressOwner = current.ownerId;
+    renderSimpleActions();
 
     if (info.address === null) {
       const problem: AddressProblem = info.problem ?? "unreadable";
@@ -1502,24 +1401,13 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
   parentValueNote.title = note;
   parentValueNote.hidden = note === "";
 
-  // Advanced's adjustments block is painted by renderAdvancedAdjustments for
-  // the board on screen. Painting it here too would let the own board's log
-  // overwrite a remote board under the same request guard.
-}
-
-function snapshotForView(board: ViewedBoard): BoardSnapshot {
-  return {
-    ownerId: board.ownerId,
-    state: board.state,
-    contacts: board.contacts,
-    codeHash: board.codeHash,
-    legacy: board.legacy,
-  };
+  // Advanced's adjustments block is painted by renderAdvancedAdjustments; the
+  // request guard keeps a late read from overwriting a newer board.
 }
 
 /**
- * The advanced Adjustments block always describes the board on screen. On the
- * default surface the record card above is enough; the log stays in Advanced.
+ * The advanced Adjustments block describes the own board. On the default
+ * surface the record card above is enough; the log stays in Advanced.
  */
 function renderAdvancedAdjustments(board: BoardSnapshot, request: number): void {
   const parentId = board.state.parent.userId;
@@ -1565,11 +1453,7 @@ function renderParentValue(): void {
     paintSimpleCard(own, info);
   });
 
-  const current = view;
-  renderAdvancedAdjustments(
-    current === null || current.isOwn ? own : snapshotForView(current),
-    request,
-  );
+  renderAdvancedAdjustments(own, request);
 }
 
 function renderParentRow(): void {
@@ -1582,7 +1466,6 @@ function renderParentRow(): void {
     parentName.classList.remove("is-root");
     parentStatus.hidden = true;
     parentNote.hidden = true;
-    parentOpen.hidden = true;
     parentEdit.hidden = true;
     parentClear.hidden = true;
     simpleParentName.textContent = "—";
@@ -1590,14 +1473,13 @@ function renderParentRow(): void {
     return;
   }
 
-  const isOwn = current.isOwn;
   const parentId = current.state.parent.userId;
-  parentEdit.hidden = !isOwn;
+  parentEdit.hidden = false;
   parentEdit.disabled = busy;
   // Until the link is checked, "Set parent…" is the honest label: it never
   // claims a mutual parent that the asynchronous check has not confirmed.
   parentEdit.textContent = "Set parent…";
-  parentClear.hidden = !isOwn || parentId === null;
+  parentClear.hidden = parentId === null;
   parentClear.disabled = busy;
 
   if (parentId === null) {
@@ -1610,7 +1492,6 @@ function renderParentRow(): void {
     parentNote.title =
       "Set a parent to record a liability above this board and to receive payments through it.";
     parentNote.hidden = false;
-    parentOpen.hidden = true;
     simpleParentName.textContent = "Root";
     simpleParentName.title = "This board has no parent.";
     return;
@@ -1624,12 +1505,11 @@ function renderParentRow(): void {
   parentStatus.textContent = "Checking…";
   parentStatus.title = "Checking the parent board.";
   parentNote.hidden = true;
-  parentOpen.hidden = true;
   simpleParentName.textContent = parentName.textContent;
   simpleParentName.title = parentId;
 
   const initialLabel = parentName.textContent;
-  const board = isOwn ? (ownSnapshot() ?? current) : current;
+  const board = ownSnapshot() ?? current;
 
   void parentLink(board, linkDeps).then((info) => {
     if (request !== parentStatusRequest || view !== current) return;
@@ -1649,113 +1529,14 @@ function renderParentRow(): void {
     parentNote.hidden = !legacyParent;
     parentNote.title = LEGACY_PARENT_TITLE;
     if (legacyParent) parentNote.textContent = LEGACY_PARENT_NOTE;
-    // Own boards may visit a pending parent to see its side. Another owner's
-    // parent is only followed when the edge is mutual. A legacy parent can
-    // still be a mutual parent because its slots are signed and readable.
-    const canOpen =
-      info.state === "linked" || (isOwn && info.state === "pending");
-    parentOpen.hidden = !canOpen;
-    parentOpen.disabled = !canOpen;
   });
-}
-
-function legacyTrailBadge(step: TrailStep): HTMLElement | null {
-  // A pending parent can be legacy too, but "Pending" already explains the
-  // missing side; only mark steps that actually make up the mutual path.
-  if (!step.legacy || (step.kind !== "current" && step.kind !== "ancestor")) {
-    return null;
-  }
-  const badge = createElement("span", "state-badge breadcrumb-badge");
-  badge.dataset.state = "legacy";
-  badge.textContent = "Previous version";
-  badge.title =
-    step.kind === "current"
-      ? LEGACY_BOARD_TITLE
-      : "This board is on the previous version. Its slots can still be the parent side of a link.";
-  return badge;
-}
-
-function renderTrailItem(step: TrailStep): HTMLLIElement {
-  const li = document.createElement("li");
-  li.className = "breadcrumb-item";
-  // A step reads under the name its parent gave it; otherwise its own signed
-  // name; otherwise a shortened id. Private contacts never name another board.
-  const label =
-    step.parentName ?? step.selfName ?? unknownLabel(step.ownerId);
-  const legacy = legacyTrailBadge(step);
-
-  if (step.kind === "current") {
-    li.classList.add("is-current");
-    li.setAttribute("aria-current", "page");
-    const span = createElement("span", "breadcrumb-current", label);
-    span.title = step.ownerId;
-    li.append(span);
-    if (legacy) li.append(legacy);
-    return li;
-  }
-
-  if (step.kind === "ancestor") {
-    const button = createElement("button", "breadcrumb-link", label);
-    button.type = "button";
-    button.title = step.ownerId;
-    button.addEventListener("click", () => {
-      void openBoard(step.ownerId);
-    });
-    li.append(button);
-    if (legacy) li.append(legacy);
-    return li;
-  }
-
-  li.classList.add("is-pending");
-  const span = createElement("span", "breadcrumb-pending", label);
-  span.title = step.ownerId;
-  const badge = createElement("span", "state-badge breadcrumb-badge");
-  if (step.kind === "pending") {
-    badge.dataset.state = "pending";
-    badge.textContent = "Pending";
-    badge.title = "This board points at a parent that has not added it yet.";
-  } else if (step.kind === "not-created") {
-    badge.dataset.state = "not-created";
-    badge.textContent = "Not created yet";
-    badge.title = "No board exists for this owner yet.";
-  } else {
-    badge.dataset.state = "error";
-    badge.textContent = "Unavailable";
-    badge.title = "This board could not be read.";
-  }
-  span.append(" ", badge);
-  if (legacy) span.append(" ", legacy);
-  li.append(span);
-  return li;
-}
-
-async function renderTrail(): Promise<void> {
-  const request = ++trailRequest;
-  const current = view;
-
-  if (!current) {
-    breadcrumbs.hidden = true;
-    breadcrumbList.replaceChildren();
-    breadcrumbWarning.hidden = true;
-    return;
-  }
-
-  breadcrumbs.hidden = false;
-  const trail = await buildTrail(current, linkDeps);
-  if (request !== trailRequest || view !== current) return;
-
-  breadcrumbList.replaceChildren(
-    ...trail.steps.map((step) => renderTrailItem(step)),
-  );
-  breadcrumbWarning.textContent = trail.warning ?? "";
-  breadcrumbWarning.hidden = trail.warning === null;
 }
 
 function renderContactCount(): void {
   const count = ownContacts().length;
   contactsCount.textContent = String(count);
   contactsOpen.disabled =
-    ownState === null || view === null || !view.isOwn || busy || navigating;
+    ownState === null || view === null || busy;
   contactsOpen.setAttribute(
     "aria-label",
     `Address book, ${count} ${count === 1 ? "contact" : "contacts"}`,
@@ -1769,10 +1550,8 @@ function renderControls(): void {
     boardStatus === "identity";
   reconnectButton.hidden = isOffline;
   reconnectButton.disabled = isOffline || busy || settling;
-  boardHome.disabled = busy || navigating;
-  boardNameEdit.disabled =
-    busy || navigating || !view?.isOwn || ownSelfName() === null;
-  parentEdit.disabled = busy || !view?.isOwn;
+  boardNameEdit.disabled = busy || ownSelfName() === null;
+  parentEdit.disabled = busy;
   parentClear.disabled = busy;
 }
 
@@ -1787,18 +1566,24 @@ function setActionReason(element: HTMLElement, reason: string | null): void {
  * screen reader hears it with the control.
  */
 function renderSimpleActions(): void {
-  const ownBoard = view?.isOwn === true && ownState !== null;
+  const ownBoard = view !== null && ownState !== null;
   const ready = boardStatus === "ready" || boardStatus === "offline";
-  const isRoot = ownState !== null && ownState.parent.userId === null;
+  const hasParent = ownState !== null && ownState.parent.userId !== null;
+  // A slot naming a child is a link: the root can pay down and receive from
+  // that child. Only a board with no links at all (and so no slot anywhere)
+  // cannot move value.
+  const hasChildLink =
+    ownState !== null && ownState.slots.some((slot) => slot.entry !== null);
+  const hasAnyLink = hasParent || hasChildLink;
 
   let payReason: string | null = null;
   if (!ownBoard || !ready) payReason = "Waiting for your board.";
-  else if (isRoot) {
+  else if (!hasAnyLink) {
     payReason =
-      "A board with no parent has nothing to pay from. Set a parent first.";
+      "A board with no links cannot pay yet. Add a child or set a parent first.";
   } else if (ownParentLinkState === null) {
     payReason = "Checking your parent link…";
-  } else if (ownParentLinkState !== "linked") {
+  } else if (ownParentLinkState !== "linked" && !hasChildLink) {
     payReason =
       "A board on the path has not confirmed its parent yet. Check your parent link.";
   } else if (paymentBlockedReason !== null) {
@@ -1814,18 +1599,16 @@ function renderSimpleActions(): void {
   let linkReason: string | null = null;
   if (!ownBoard) linkReason = "Waiting for your board.";
   else if (ownIdentity === null) linkReason = "Waiting for your identity.";
-  else if (isRoot) {
+  else if (!hasAnyLink) {
     linkReason =
-      "A board with no parent cannot receive a payment yet. Set a parent first.";
+      "A board with no links cannot receive yet. Add a child or set a parent first.";
   } else if (
     ownReceiveAddress === null ||
     ownReceiveAddressOwner !== ownIdentity.pubkey
   ) {
     linkReason = "Checking your address…";
-  } else if (
-    ownReceiveAddress.address === null ||
-    ownReceiveAddress.address === ""
-  ) {
+  } else if (ownReceiveAddress.address === null) {
+    // The empty string is the root's own address and is a valid receive link.
     linkReason =
       "Your address is not settled yet, so a link would not route a payment.";
   }
@@ -1878,11 +1661,6 @@ function setViewMode(
     return;
   }
 
-  if (mode === "simple" && view !== null && !view.isOwn) {
-    goHome(false, false);
-    announce("Back on your board. The simple view always shows your own board.");
-  }
-
   viewMode = mode;
   paintViewMode();
 
@@ -1930,7 +1708,6 @@ function renderAll(): void {
   renderParentRow();
   renderClearedSlots();
   renderSimpleActions();
-  void renderTrail();
   void refreshSlotExistence();
   // Async and request-guarded: a stale read never paints over a newer board.
   void renderPayments();
@@ -1988,8 +1765,19 @@ function paintPaymentStatus(display: PaymentEntry): void {
     `${formatCents(display.amount)} along ${paymentAddresses(display)}`;
 
   const route = planRoute(display.srcAddr, display.dstAddr);
+  // The issue/burn is the *meaning* of the single slot write: derive it from
+  // the route. Nothing writes an `adjustments` entry for it.
+  const implicit =
+    "error" in route
+      ? []
+      : [
+          ...(route.debitHops === 0 ? ["implicit issue"] : []),
+          ...(route.creditHops === 0 ? ["implicit burn"] : []),
+        ];
   const routeText =
-    "error" in route ? paymentAddresses(display) : describeRoute(route);
+    "error" in route
+      ? paymentAddresses(display)
+      : `${describeRoute(route)}${implicit.length === 0 ? "" : ` · ${implicit.join(" · ")}`}`;
   paymentStatusRoute.textContent = routeText;
   paymentStatusRoute.title = routeText;
 
@@ -2021,6 +1809,17 @@ function paintPaymentStatus(display: PaymentEntry): void {
   }
   if (display.next !== ZERO_PAYMENT_OWNER) {
     detail += ` Waiting for ${paymentOwnerLabel(display.next)}.`;
+  }
+  if (
+    !("error" in route) &&
+    route.debitHops === 0 &&
+    display.phase === "forward" &&
+    (display.status === "offered" || display.status === "acted")
+  ) {
+    // Known accepted risk: a downward-only payment issues before the payee
+    // consents. Make the stalled state visible instead of leaving it implicit.
+    detail +=
+      " Issued, not delivered: the credit stays in your slot until you withdraw it or the next board signs.";
   }
   paymentStatusDetail.textContent = detail;
   paymentStatus.hidden = false;
@@ -2139,7 +1938,7 @@ async function renderPayments(): Promise<void> {
   const current = view;
   const ready = boardStatus === "ready" || boardStatus === "offline";
 
-  if (!current || !current.isOwn || !ready) {
+  if (!current || !ready) {
     paymentsSection.hidden = true;
     paymentStatus.hidden = true;
     paymentInbox.hidden = true;
@@ -2173,20 +1972,31 @@ async function renderPayments(): Promise<void> {
   // new one, even though the source's own copy may still be the offered record.
   const active = display !== null && display.phase !== "terminal";
   const stuck = isStuckForeignRecord(entry, display, own.ownerId);
+  const route = entry === null ? null : planRoute(entry.srcAddr, entry.dstAddr);
+  // A `dS = 0` source acts at cursor 1, so withdrawal must still be offered
+  // while nothing downstream has advanced past that step.
   const canWithdraw =
     entry !== null &&
     entry.src === own.ownerId &&
     display !== null &&
-    display.status === "offered" &&
-    display.cursor === 0;
+    display.phase !== "terminal" &&
+    (display.cursor === 0 ||
+      (route !== null &&
+        !("error" in route) &&
+        route.debitHops === 0 &&
+        display.cursor === 1));
   paymentWithdraw.hidden = !canWithdraw;
-  paymentWithdraw.disabled = busy || navigating;
+  paymentWithdraw.disabled = busy;
+  // Clearing is only for a foreign record stuck behind a settled network copy.
+  // The source's own record is closed by withdrawing it (which restores a
+  // `dS = 0` issue instead of stranding the credit).
   const canClear =
     entry !== null &&
     entry.phase !== "terminal" &&
+    entry.src !== own.ownerId &&
     typeof backend.clearStuckPayment === "function";
   paymentClear.hidden = !canClear;
-  paymentClear.disabled = busy || navigating;
+  paymentClear.disabled = busy;
   paymentClear.title = stuck
     ? "Clear this board's stuck payment record; the network copy is already settled."
     : "Clear this board's payment record.";
@@ -2196,7 +2006,7 @@ async function renderPayments(): Promise<void> {
       : null;
   renderSimpleActions();
   // Refreshing the inbox is read-only; never lock it behind an in-flight
-  // write or navigation. Clicking it clears the cache and repaints.
+  // write. Clicking it clears the cache and repaints.
   paymentCheck.disabled = false;
   paymentCheck.title = "Refresh the payment status and inbox.";
 
@@ -2809,9 +2619,6 @@ function paymentProblemMessage(failure: PaymentFailure): string {
       return "The user id does not own the board at that address.";
     case "busy":
       return "This board already has a payment in progress.";
-    case "source-at-lca":
-    case "destination-at-lca":
-      return "A payment needs a board above each side. Neither end can be the shared top board or the root itself.";
     case "no-destination":
       return "There is no board at that address.";
     case "pending":
@@ -2843,7 +2650,11 @@ function updatePaymentRecipient(): void {
     line =
       ownIdentity !== null && contact.userId === ownIdentity.pubkey
         ? "That is your own board. Choose someone else."
-        : recipientAddressLine(contact.address);
+        : contact.address === null
+          ? recipientAddressLine(null)
+          : contact.address === ""
+            ? "Root address"
+            : recipientAddressLine(contact.address);
   }
   paymentRecipientStatus.textContent = line;
   paymentRecipientStatus.hidden = line === "";
@@ -2863,13 +2674,20 @@ function refreshPaymentSubmit(): void {
     if (ownIdentity !== null && contact.userId === ownIdentity.pubkey) {
       blocked = true;
       title = "Choose a contact other than this board.";
-    } else if (contact.address === null || contact.address === "") {
+    } else if (contact.address === null) {
       blocked = true;
       title = "That contact has no address yet. Ask them for a receive link.";
     }
-  } else if (paymentAddress.value.trim() === "" || paymentUser.value.trim() === "") {
-    blocked = true;
-    title = "Choose someone with an address, or pay an address directly.";
+  } else {
+    const address = paymentAddress.value.trim();
+    const user = paymentUser.value.trim();
+    if (!/^[0-9a-f]{64}$/i.test(user)) {
+      blocked = true;
+      title = "Enter the recipient's 64-character user id.";
+    } else if (address !== "" && !isOctalAddress(address)) {
+      blocked = true;
+      title = "Use digits 0–7 only for the octal address (empty is the root).";
+    }
   }
   paymentSubmit.disabled = blocked;
   paymentSubmit.title = title;
@@ -2923,7 +2741,7 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
       showPaymentWarning("That is your own board. Choose someone else.");
       return;
     }
-    if (contact.address === null || contact.address === "") {
+    if (contact.address === null) {
       showPaymentWarning(
         "That contact has no address yet. Ask them for a receive link.",
       );
@@ -2932,10 +2750,11 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
     address = contact.address;
     user = contact.userId;
   } else {
+    // The empty address is the root; it is a valid destination and source.
     address = paymentAddress.value.trim();
-    if (!isOctalAddress(address) || address === "") {
+    if (address !== "" && !isOctalAddress(address)) {
       showPaymentWarning(
-        "Use only digits 0–7 for the octal address.",
+        "Use only digits 0–7 for the octal address (empty is the root).",
         paymentAddress,
       );
       return;
@@ -2990,19 +2809,24 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
       ownIdentity?.paymentsNextSeq ?? 1,
     );
     const intent = createPaymentIntent(plan, sourceSeq);
-    await backend.savePayment(intent, []);
+    // A `dS = 0` source publishes the intent already carrying its single leg
+    // (the implicit issue) in the same delta.
+    await backend.savePayment(intent, plan.sourceStep?.slots ?? []);
+    const terminal = intent.phase === "terminal";
 
-    // The just-signed intent lives on this board; drop remote reads so the
-    // next status/inbox pass sees the new record.
+    // The just-signed intent lives on this board; drop cached neighbour reads
+    // so the next status/inbox pass sees the new record.
     boardCache.clear();
     closePaymentDialog();
     hideErrorNotice();
     showNotice(
       "info",
-      "Payment offered",
-      "Each owner on the path must open their board to sign their leg.",
+      terminal ? "Payment sent" : "Payment offered",
+      terminal
+        ? "The destination was credited in the same step."
+        : "Each owner on the path must open their board to sign their leg.",
     );
-    announce("Payment offered.");
+    announce(terminal ? "Payment sent." : "Payment offered.");
     renderAll();
   } catch (error) {
     showPaymentError(errorMessage(error));
@@ -3185,7 +3009,6 @@ function setEditorBusy(value: boolean): void {
   noteInput.disabled = value;
   cancelButton.disabled = value;
   editorClose.disabled = value;
-  childOpen.disabled = value || !childLinkOpenable;
   clearButton.disabled =
     value || !ownState || ownState.slots[currentSlot].entry === null;
   saveButton.textContent = value ? "Saving…" : "Save details";
@@ -3299,15 +3122,11 @@ function updateContactState(): void {
 
 function setChildLink(contactId: string | null): void {
   editorRequest += 1;
-  childLinkOpenable = false;
-  currentChildId = contactId;
 
   if (contactId === null) {
     childLinkBox.hidden = true;
     childLinkDetail.hidden = true;
     childLinkDetail.textContent = "";
-    childOpen.hidden = true;
-    childOpen.disabled = true;
     return;
   }
 
@@ -3318,9 +3137,6 @@ function setChildLink(contactId: string | null): void {
   childLinkStatus.title = "Checking the child board.";
   childLinkDetail.textContent = "";
   childLinkDetail.hidden = true;
-  childOpen.hidden = false;
-  childOpen.disabled = true;
-  childOpen.title = "Checking the child board.";
   void refreshChildLink(contactId, editorRequest);
 }
 
@@ -3360,11 +3176,6 @@ async function refreshChildLink(
 
   childLinkDetail.textContent = detail;
   childLinkDetail.hidden = detail === "";
-  childLinkOpenable = info.state !== "not-created";
-  childOpen.disabled = busy || !childLinkOpenable;
-  childOpen.title = childLinkOpenable
-    ? `Open the child board for ${label}.`
-    : `${label} has not created a board yet.`;
 }
 
 type AdjustDirection = "issue" | "burn";
@@ -3416,8 +3227,6 @@ function planAdjustment(): AdjustState {
     unavailable =
       "Choose a contact and save the slot first. Issue and burn change a " +
       "liability that is already recorded for a child.";
-  } else if (!view?.isOwn) {
-    unavailable = "Only the owner can adjust this board.";
   }
 
   const raw = adjustAmount.value.trim();
@@ -3578,7 +3387,7 @@ function renderAdjust(): void {
 }
 
 async function handleAdjust(): Promise<void> {
-  if (busy || !view?.isOwn || !ownState) return;
+  if (busy || !view || !ownState) return;
   const sign = adjustmentBackend();
   if (sign === null) return;
 
@@ -3620,7 +3429,7 @@ async function handleAdjust(): Promise<void> {
 }
 
 function openEditor(index: number): void {
-  if (!ownState || !ownIdentity || busy || !view?.isOwn) return;
+  if (!ownState || !ownIdentity || busy || !view) return;
 
   currentSlot = index;
   const slot = ownState.slots[index];
@@ -3663,7 +3472,7 @@ function showEditorError(message: string, focus: HTMLElement | null): void {
 
 async function handleSave(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  if (busy || !ownState || !view?.isOwn) return;
+  if (busy || !ownState || !view) return;
 
   const contact = contactSelect.value;
   if (contact === "") {
@@ -3712,7 +3521,7 @@ async function handleSave(event: SubmitEvent): Promise<void> {
 }
 
 async function handleClear(): Promise<void> {
-  if (busy || !ownState || !view?.isOwn) return;
+  if (busy || !ownState || !view) return;
   const slot = ownState.slots[currentSlot];
   if (slot.entry === null) return;
 
@@ -3910,9 +3719,10 @@ async function copyReceivePaymentLink(): Promise<void> {
   let link = "";
   try {
     const info = await octalAddress(own, linkDeps);
-    if (info.address === null || info.address === "") {
-      // A root or an unsettled address cannot receive a payment. Never copy a
-      // link that would send the recipient into "ask them for a link".
+    if (info.address === null) {
+      // An unsettled address cannot receive a payment. Never copy a link that
+      // would send the recipient into "ask them for a link". The empty string
+      // is the root's own address and is a valid link.
       renderSimpleActions();
       return;
     }
@@ -3959,66 +3769,8 @@ async function reconnect(): Promise<void> {
   }
 }
 
-function goHome(focus = true, announceHome = true): void {
-  if (!view || view.isOwn) return;
-  const snapshot = ownSnapshot();
-  if (snapshot === null) return;
-
-  view = toView(snapshot);
-  hideErrorNotice();
-  renderAll();
-  maybePromptForBoardName();
-  if (announceHome) announce("Back on your board.");
-  if (focus) focusSurface();
-}
-
-async function openBoard(ownerId: string): Promise<void> {
-  if (!ownIdentity || navigating) return;
-  if (ownerId === ownIdentity.pubkey) {
-    goHome();
-    return;
-  }
-  if (view !== null && !view.isOwn && view.ownerId === ownerId) return;
-
-  navigating = true;
-  renderBoardHeader();
-  renderBoard();
-  renderControls();
-  renderContactCount();
-
-  try {
-    const snapshot = await readBoardForView(ownerId);
-    if (snapshot === null) {
-      const label = cachedSelfName(ownerId) ?? unknownLabel(ownerId);
-      showNotice(
-        "info",
-        "Board not created yet",
-        `${label} has not opened ${APP_NAME} yet, so there is no board to show.`,
-      );
-      announce("That board has not been created yet.");
-      return;
-    }
-
-    view = toView(snapshot);
-    hideErrorNotice();
-    renderAll();
-    const label = boardNameOf(ownerId, view.state);
-    announce(`Viewing ${label}.`);
-    focusSurface();
-  } catch (error) {
-    showNotice("error", "Could not open that board", humanError(error));
-    announce("Could not open that board.");
-  } finally {
-    navigating = false;
-    renderBoardHeader();
-    renderBoard();
-    renderControls();
-    renderContactCount();
-  }
-}
-
 async function clearParent(): Promise<void> {
-  if (busy || !view?.isOwn || !ownState?.parent.userId) return;
+  if (busy || !view || !ownState?.parent.userId) return;
 
   busy = true;
   renderBoard();
@@ -4089,7 +3841,7 @@ const callbacks: BoardCallbacks = {
   onStatus: (status, detail) => setStatus(status, detail),
   onState: (state) => {
     ownState = state;
-    if (ownIdentity && (view === null || view.isOwn)) {
+    if (ownIdentity) {
       const snapshot = ownSnapshot();
       if (snapshot) view = toView(snapshot);
     }
@@ -4111,10 +3863,8 @@ const callbacks: BoardCallbacks = {
   },
   onIdentity: (next) => {
     ownIdentity = next;
-    if (view === null || view.isOwn) {
-      const snapshot = ownSnapshot();
-      if (snapshot) view = toView(snapshot);
-    }
+    const snapshot = ownSnapshot();
+    if (snapshot) view = toView(snapshot);
     renderAll();
     maybePromptForBoardName();
     tryOpenReceiveLink();
@@ -4162,8 +3912,7 @@ const boardNameDialog = createBoardNameDialog({
   onSaved: (name) => {
     hideErrorNotice();
     announce(`Board name saved as ${name}.`);
-    if (view?.isOwn) boardNameEdit.focus({ preventScroll: true });
-    else boardTitle.focus({ preventScroll: true });
+    boardNameEdit.focus({ preventScroll: true });
   },
 });
 
@@ -4222,8 +3971,8 @@ parentDialog = createParentDialog({
   getParent: () => ownState?.parent.userId ?? null,
   readBoard: readBoardForView,
   saveParent: async (userId) => {
-    if (!view?.isOwn) {
-      throw new Error("Open your own board before changing its parent.");
+    if (!view) {
+      throw new Error("Your board is not loaded yet.");
     }
     busy = true;
     renderBoard();
@@ -4392,7 +4141,7 @@ simplePaymentReview.addEventListener("click", () => {
   paymentInbox.focus({ preventScroll: true });
 });
 addChildSlot.addEventListener("click", () => {
-  if (!view?.isOwn || ownState === null) return;
+  if (view === null || ownState === null) return;
   const index = ownState.slots.findIndex((slot) => slot.entry === null);
   if (index !== -1) openEditor(index);
 });
@@ -4447,15 +4196,43 @@ paymentWithdraw.addEventListener("click", () => {
   void (async () => {
     const own = ownSnapshot();
     if (own === null || own.state.payments.entry === null) return;
+    const entry = own.state.payments.entry;
     paymentWithdraw.disabled = true;
     try {
-      await backend.savePayment(null, []);
+      const saved = await withdrawPayment(own, entry, paymentDeps);
       boardCache.clear();
-      showNotice("info", "Offer withdrawn", "The source record was cleared before any leg was signed.");
-      announce("Payment offer withdrawn.");
+      if (saved === null) {
+        showNotice(
+          "info",
+          "Offer withdrawn",
+          "The source record was cleared before any leg was signed.",
+        );
+        announce("Payment offer withdrawn.");
+      } else if (saved.status === "blocked") {
+        showNotice(
+          "warning",
+          "Payment could not be withdrawn",
+          "The issued credit could not be restored, so the record is terminal but the slot is unchanged. Check the slot value.",
+        );
+        announce("Payment withdrawal was blocked.");
+      } else if (saved.status === "superseded") {
+        showNotice(
+          "warning",
+          "Payment already superseded",
+          "A later signed write replaced the issued credit, so nothing was overwritten.",
+        );
+        announce("Payment was already superseded.");
+      } else {
+        showNotice(
+          "info",
+          "Payment withdrawn",
+          "The issued credit was restored and the payment is terminal.",
+        );
+        announce("Payment withdrawn.");
+      }
       renderAll();
     } catch (error) {
-      showNotice("error", "Could not withdraw the offer", errorMessage(error));
+      showNotice("error", "Could not withdraw the payment", errorMessage(error));
       paymentWithdraw.disabled = false;
     }
   })();
@@ -4506,36 +4283,17 @@ editor.addEventListener("click", (event) => {
   if (event.target === editor && !busy) closeEditor();
 });
 
-childOpen.addEventListener("click", () => {
-  const id = currentChildId;
-  if (!id || busy) return;
-  closeEditor();
-  void openBoard(id);
-});
-
-boardHome.addEventListener("click", () => {
-  goHome();
-});
 boardNameEdit.addEventListener("click", () => {
-  if (!view?.isOwn) return;
+  if (view === null) return;
   const name = ownSelfName();
   if (name !== null) boardNameDialog.openEdit(name);
   else boardNameDialog.requireName();
 });
-boardCopy.addEventListener("click", () => {
-  if (view) {
-    void copyToClipboard(view.ownerId, "Board owner", boardCopy);
-  }
-});
 parentEdit.addEventListener("click", () => {
-  if (view?.isOwn) parentDialog?.open();
+  parentDialog?.open();
 });
 parentClear.addEventListener("click", () => {
   void clearParent();
-});
-parentOpen.addEventListener("click", () => {
-  const id = view?.state.parent.userId ?? null;
-  if (id !== null) void openBoard(id);
 });
 
 identityCopy.addEventListener("click", () => {

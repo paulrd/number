@@ -78,40 +78,47 @@ export interface ContactsDialog {
 /** Bound on an octal address, matching the delegate and payment code. */
 export const MAX_CONTACT_ADDRESS = 32;
 
-/** The address shown in a row: the digits, or `not set`. */
+/** The address shown in a row: the digits, `root`, or `not set`. */
 export function contactAddressLabel(address: string | null | undefined): string {
-  return address === null || address === undefined || address === ""
-    ? "not set"
-    : address;
+  if (address === null || address === undefined) return "not set";
+  return address === "" ? "root" : address;
 }
 
 /**
  * Validate the optional address field. An empty field means "no address yet";
- * a non-empty value must be 1–32 octal digits. The root (the empty string) is
- * not a receive address, so it is represented as null, never stored as "".
+ * otherwise the value must be `root` or 1–32 octal digits. A root address is a
+ * real, payable address since a board at the top of a tree can receive from its
+ * descendants, and it is stored as the empty string.
  */
 export function contactAddressProblem(raw: string): string | null {
   if (raw === "") return null;
-  if (!/^[0-7]+$/.test(raw)) {
-    return "Use digits 0–7 only for the octal address.";
+  const value = raw.trim();
+  if (/^root$/i.test(value)) return null;
+  if (!/^[0-7]+$/.test(value)) {
+    return "Use digits 0–7 only (or root) for the octal address.";
   }
-  if (raw.length > MAX_CONTACT_ADDRESS) {
+  if (value.length > MAX_CONTACT_ADDRESS) {
     return `Keep the address to ${MAX_CONTACT_ADDRESS} digits or fewer.`;
   }
   return null;
 }
 
-/** Trim and normalise the address field; empty becomes null, not "". */
+/**
+ * Trim and normalise the address field; empty becomes null (no address yet),
+ * while the literal `root` becomes the empty string (a real root address).
+ */
 export function contactAddressValue(raw: string): string | null {
   const address = raw.trim();
-  return address === "" ? null : address;
+  if (address === "") return null;
+  return /^root$/i.test(address) ? "" : address;
 }
 
 /** The line shown under the payment recipient picker. */
 export function recipientAddressLine(address: string | null | undefined): string {
-  return address === null || address === undefined || address === ""
-    ? "No address yet. Ask them for a receive link."
-    : `Address ${address}`;
+  if (address === null || address === undefined) {
+    return "No address yet. Ask them for a receive link.";
+  }
+  return address === "" ? "Root of their tree" : `Address ${address}`;
 }
 
 /**
@@ -149,8 +156,8 @@ export function parseReceiveInvite(search: string): ReceiveLinkParse {
   if (!/^[0-9a-f]{64}$/.test(pay)) return { kind: "incomplete" };
 
   const trimmedName = name?.trim() ?? "";
-  const address =
-    addr !== null && /^[0-7]{1,32}$/.test(addr) ? addr : null;
+  // The empty value is the root address, which can receive from its subtree.
+  const address = addr !== null && /^[0-7]{0,32}$/.test(addr) ? addr : null;
   return {
     kind: "link",
     invite: {

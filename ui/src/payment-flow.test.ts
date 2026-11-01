@@ -8,6 +8,7 @@ import {
   findIncoming,
   paymentProgress,
   planPayment,
+  withdrawPayment,
   type PaymentDeps,
   type PaymentEntry,
   type PaymentPlan,
@@ -774,5 +775,376 @@ describe("address book and receive-link helpers", () => {
       kind: "invite",
       invite: { userId: contact.userId, name: null, address: null },
     });
+  });
+});
+
+/**
+ * A fixture tree with a root that has both a child and a grandchild, and a
+ * removable upward link:
+ *
+ *   root  --1--> a (value 1000)
+ *         --3--> c (value 500) --1--> d (value 400)
+ */
+function wideTree(): Map<string, BoardSnapshot> {
+  const root = board("r", null, [
+    null,
+    { child: "a", value: 1000n },
+    null,
+    { child: "c", value: 500n },
+  ]);
+  const a = board("a", "r");
+  const c = board("c", "r", [null, { child: "d", value: 400n }]);
+  const d = board("d", "c");
+  return new Map<string, BoardSnapshot>(
+    [root, a, c, d].map((item) => [item.ownerId, item]),
+  );
+}
+
+function zeroOwner(): string {
+  return "0".repeat(64);
+}
+
+describe("LCA-endpoint routes", () => {
+  it("root to child is one terminal credit (implicit issue)", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const child = boards.get(owner("c"))!;
+
+    const plan = expectPlan(
+      await planPayment(root, "3", owner("c"), 100n, depsFor(boards, root)),
+    );
+    expect(plan.route).toMatchObject({
+      srcAddr: "",
+      dstAddr: "3",
+      lcaAddr: "",
+      debitHops: 0,
+      creditHops: 1,
+      hops: 1,
+    });
+    expect(plan.actors).toEqual([]);
+    expect(plan.sourceStep).not.toBeNull();
+    expect(plan.sourceStep!.step).toMatchObject({
+      role: "source",
+      ownAddress: "",
+      slots: [{ slot: 3, direction: "credit" }],
+      nextCursor: 1,
+      nextAddress: null,
+    });
+
+    const intent = createPaymentIntent(plan, 1);
+    expect(intent.cursor).toBe(1);
+    expect(intent.phase).toBe("terminal");
+    expect(intent.status).toBe("complete");
+    expect(intent.next).toBe(zeroOwner());
+    const saved = await depsFor(boards, root).savePayment(
+      intent,
+      plan.sourceStep!.slots,
+    );
+    expect(saved?.legs).toHaveLength(1);
+    expect(root.state.slots[3].entry?.value).toBe(600n);
+    expect(root.state.payments.entry?.status).toBe("complete");
+    expect(child.state.parent.userId).toBe(root.ownerId);
+  });
+
+  it("root to grandchild carries the leg on the source record, then the child terminates", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const c = boards.get(owner("c"))!;
+
+    const plan = expectPlan(
+      await planPayment(root, "31", owner("d"), 100n, depsFor(boards, root)),
+    );
+    expect(plan.route).toMatchObject({
+      debitHops: 0,
+      creditHops: 2,
+      hops: 2,
+    });
+    expect(plan.actors.map((actor) => actor.ownerId)).toEqual([owner("c")]);
+
+    const intent = createPaymentIntent(plan, 1);
+    expect(intent.cursor).toBe(1);
+    expect(intent.status).toBe("acted");
+    expect(intent.next).toBe(owner("c"));
+    const saved = await depsFor(boards, root).savePayment(
+      intent,
+      plan.sourceStep!.slots,
+    );
+    expect(saved?.legs).toHaveLength(1);
+    expect(root.state.payments.entry?.cursor).toBe(1);
+    expect(root.state.payments.entry?.legs).toHaveLength(1);
+
+    const incoming = await findIncoming(c, depsFor(boards, c));
+    expect(incoming).toHaveLength(1);
+    expect(incoming[0].entry.id).toBe(intent.id);
+
+    const terminal = await advancePayment(
+      c,
+      root,
+      incoming[0].entry,
+      depsFor(boards, c),
+    );
+    expect(terminal.phase).toBe("terminal");
+    expect(terminal.status).toBe("complete");
+    expect(terminal.cursor).toBe(2);
+    expect(terminal.next).toBe(zeroOwner());
+    expect(root.state.slots[3].entry?.value).toBe(600n);
+    expect(c.state.slots[1].entry?.value).toBe(500n);
+  });
+
+  it("child to parent is one terminal debit at the LCA (implicit burn)", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const a = boards.get(owner("a"))!;
+
+    const plan = expectPlan(
+      await planPayment(a, "", owner("r"), 100n, depsFor(boards, a)),
+    );
+    expect(plan.route).toMatchObject({
+      srcAddr: "1",
+      dstAddr: "",
+      lcaAddr: "",
+      debitHops: 1,
+      creditHops: 0,
+      hops: 1,
+    });
+    expect(plan.sourceStep).toBeNull();
+    expect(plan.actors.map((actor) => actor.ownerId)).toEqual([owner("r")]);
+    expect(plan.actors[0].step).toMatchObject({
+      role: "lca",
+      slots: [{ slot: 1, direction: "debit" }],
+      nextCursor: 1,
+      nextAddress: null,
+    });
+
+    const intent = createPaymentIntent(plan, 1);
+    expect(intent.cursor).toBe(0);
+    expect(intent.status).toBe("offered");
+    expect(intent.next).toBe(owner("r"));
+    await depsFor(boards, a).savePayment(intent, []);
+
+    const terminal = await advancePayment(
+      root,
+      a,
+      intent,
+      depsFor(boards, root),
+    );
+    expect(terminal.phase).toBe("terminal");
+    expect(terminal.status).toBe("complete");
+    expect(terminal.next).toBe(zeroOwner());
+    expect(root.state.slots[1].entry?.value).toBe(900n);
+    expect(a.state.parent.userId).toBe(root.ownerId);
+  });
+
+  it("grandchild to grandparent debits twice and terminates at the LCA", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const c = boards.get(owner("c"))!;
+    const d = boards.get(owner("d"))!;
+
+    const plan = expectPlan(
+      await planPayment(d, "", owner("r"), 100n, depsFor(boards, d)),
+    );
+    expect(plan.route).toMatchObject({
+      srcAddr: "31",
+      dstAddr: "",
+      debitHops: 2,
+      creditHops: 0,
+      hops: 2,
+    });
+    expect(plan.actors.map((actor) => actor.ownerId)).toEqual([
+      owner("c"),
+      owner("r"),
+    ]);
+
+    const intent = createPaymentIntent(plan, 1);
+    await depsFor(boards, d).savePayment(intent, []);
+    const afterC = await advancePayment(c, d, intent, depsFor(boards, c));
+    expect(afterC.cursor).toBe(1);
+    expect(afterC.status).toBe("acted");
+    expect(afterC.next).toBe(owner("r"));
+    expect(c.state.slots[1].entry?.value).toBe(300n);
+
+    const terminal = await advancePayment(
+      root,
+      c,
+      afterC,
+      depsFor(boards, root),
+    );
+    expect(terminal.phase).toBe("terminal");
+    expect(terminal.status).toBe("complete");
+    expect(terminal.cursor).toBe(2);
+    expect(root.state.slots[3].entry?.value).toBe(400n);
+  });
+
+  it("a dD = 0 route with insufficient value fails as negative before signing", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const a = boards.get(owner("a"))!;
+    const result = await planPayment(a, "", owner("r"), 1001n, depsFor(boards, a));
+    expect(result).toMatchObject({ ok: false, problem: "negative" });
+    expect(root.state.slots[1].entry?.value).toBe(1000n);
+  });
+
+  it("a dS = 0 child abort lets the source reverse and terminate with the slot restored", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const c = boards.get(owner("c"))!;
+
+    const plan = expectPlan(
+      await planPayment(root, "31", owner("d"), 100n, depsFor(boards, root)),
+    );
+    const intent = createPaymentIntent(plan, 1);
+    const sourceEntry = await depsFor(boards, root).savePayment(
+      intent,
+      plan.sourceStep!.slots,
+    );
+    expect(root.state.slots[3].entry?.value).toBe(600n);
+
+    // The first destination child points its final slot somewhere else.
+    c.state.slots[1].entry = { ...c.state.slots[1].entry!, contact: owner("other") };
+    const aborted = await advancePayment(c, root, sourceEntry!, depsFor(boards, c));
+    expect(aborted.phase).toBe("reverse");
+    expect(aborted.status).toBe("aborted");
+    expect(aborted.cursor).toBe(1);
+    expect(aborted.next).toBe(owner("r"));
+
+    const terminal = await advancePayment(
+      root,
+      c,
+      aborted,
+      depsFor(boards, root),
+    );
+    expect(terminal.phase).toBe("terminal");
+    expect(terminal.status).toBe("reversed");
+    expect(terminal.next).toBe(zeroOwner());
+    expect(root.state.slots[3].entry?.value).toBe(500n);
+    expect(root.state.payments.entry?.status).toBe("reversed");
+  });
+
+  it("a payer slot rewrite reports superseded, not blocked", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const c = boards.get(owner("c"))!;
+
+    const plan = expectPlan(
+      await planPayment(root, "31", owner("d"), 100n, depsFor(boards, root)),
+    );
+    const intent = createPaymentIntent(plan, 1);
+    const sourceEntry = await depsFor(boards, root).savePayment(
+      intent,
+      plan.sourceStep!.slots,
+    );
+
+    c.state.slots[1].entry = { ...c.state.slots[1].entry!, contact: owner("other") };
+    const aborted = await advancePayment(c, root, sourceEntry!, depsFor(boards, c));
+
+    // The payer rewrote its own slot after issuing.
+    root.state.slots[3] = {
+      seq: root.state.slots[3].seq + 1,
+      entry: { ...root.state.slots[3].entry!, value: 777n },
+      sig: fakeSig("later-write"),
+    };
+    const terminal = await advancePayment(
+      root,
+      c,
+      aborted,
+      depsFor(boards, root),
+    );
+    expect(terminal.phase).toBe("terminal");
+    expect(terminal.status).toBe("superseded");
+    expect(terminal.fail).toBe("superseded");
+    expect(root.state.slots[3].entry?.value).toBe(777n);
+  });
+
+  it("a stalled dS = 0 source can withdraw, restoring the issued credit", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+
+    const plan = expectPlan(
+      await planPayment(root, "31", owner("d"), 100n, depsFor(boards, root)),
+    );
+    const intent = createPaymentIntent(plan, 1);
+    const sourceEntry = await depsFor(boards, root).savePayment(
+      intent,
+      plan.sourceStep!.slots,
+    );
+    expect(root.state.slots[3].entry?.value).toBe(600n);
+
+    const terminal = await withdrawPayment(
+      root,
+      sourceEntry!,
+      depsFor(boards, root),
+    );
+    expect(terminal?.phase).toBe("terminal");
+    expect(terminal?.status).toBe("reversed");
+    expect(root.state.slots[3].entry?.value).toBe(500n);
+    expect(root.state.payments.entry?.status).toBe("reversed");
+  });
+
+  it("rejects a reverse at a completed dD = 0 LCA without touching the slot", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const a = boards.get(owner("a"))!;
+
+    const plan = expectPlan(
+      await planPayment(a, "", owner("r"), 100n, depsFor(boards, a)),
+    );
+    const intent = createPaymentIntent(plan, 1);
+    await depsFor(boards, a).savePayment(intent, []);
+    const terminal = await advancePayment(root, a, intent, depsFor(boards, root));
+    expect(terminal.status).toBe("complete");
+    expect(root.state.slots[1].entry?.value).toBe(900n);
+
+    const reverseRequest: PaymentEntry = {
+      ...terminal,
+      phase: "reverse",
+      status: "reversing",
+      cursor: 1,
+      next: root.ownerId,
+      fail: null,
+    };
+    await expect(
+      advancePayment(root, a, reverseRequest, depsFor(boards, root)),
+    ).rejects.toThrow();
+    expect(root.state.slots[1].entry?.value).toBe(900n);
+    expect(root.state.payments.entry?.status).toBe("complete");
+  });
+
+  it("rejects an address that only exists under another root", async () => {
+    // Both chains are resolved from the source's root, so an address in
+    // another tree has no slot path and cannot be routed. The `different-roots`
+    // check remains as defence for a diverged prefix.
+    const rootR = board("r", null, [null, { child: "s", value: 1000n }]);
+    const source = board("s", "r");
+    const rootQ = board("q", null, [
+      null,
+      null,
+      null,
+      { child: "d", value: 500n },
+    ]);
+    const destination = board("d", "q");
+    const boards = new Map<string, BoardSnapshot>(
+      [rootR, source, rootQ, destination].map((item) => [item.ownerId, item]),
+    );
+
+    const result = await planPayment(
+      source,
+      "3",
+      destination.ownerId,
+      100n,
+      depsFor(boards, rootR),
+    );
+    expect(result).toMatchObject({ ok: false, problem: "no-destination" });
+  });
+
+  it("plans an empty (root) LCA address", async () => {
+    const boards = wideTree();
+    const root = boards.get(owner("r"))!;
+    const plan = expectPlan(
+      await planPayment(root, "3", owner("c"), 100n, depsFor(boards, root)),
+    );
+    expect(plan.route.lcaAddr).toBe("");
+    expect(plan.sourceStep!.step.ownAddress).toBe("");
+    expect(plan.destination.ownerId).toBe(owner("c"));
   });
 });

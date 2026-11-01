@@ -106,22 +106,18 @@ export function isStuckForeignRecord(
   );
 }
 
-export type RouteError =
-  | "invalid-address"
-  | "same-address"
-  | "source-at-lca"
-  | "destination-at-lca";
+export type RouteError = "invalid-address" | "same-address";
 
 export interface PaymentRoute {
   srcAddr: string;
   dstAddr: string;
   /** Length of the longest common prefix. */
   lcaLength: number;
-  /** Upward hops (debits), at least 1. */
+  /** Upward hops (debits); 0 when the source is the LCA. */
   debitHops: number;
-  /** Downward hops (credits), at least 1. */
+  /** Downward hops (credits); 0 when the destination is the LCA. */
   creditHops: number;
-  /** Total hops. */
+  /** Total hops, at least 1. */
   hops: number;
   lcaAddr: string;
 }
@@ -168,8 +164,11 @@ export function commonPrefixLength(a: string, b: string): number {
 }
 
 /**
- * Plan the path between two addresses. A payment needs at least one debit and
- * one credit, so neither endpoint may be the LCA (including the root).
+ * Plan the path between two addresses. Either endpoint may be the LCA: a
+ * downward-only route (`dS = 0`) issues from the first credit, and an
+ * upward-only route (`dD = 0`) burns with the last debit. Only the same
+ * address is structurally impossible (both sides would be the LCA, creating
+ * value with no route).
  */
 export function planRoute(
   srcAddr: string,
@@ -183,8 +182,6 @@ export function planRoute(
   const lcaLength = commonPrefixLength(srcAddr, dstAddr);
   const debitHops = srcAddr.length - lcaLength;
   const creditHops = dstAddr.length - lcaLength;
-  if (debitHops === 0) return { error: "source-at-lca" };
-  if (creditHops === 0) return { error: "destination-at-lca" };
 
   return {
     srcAddr,
@@ -220,13 +217,35 @@ export function actorStep(
     return step;
   }
 
-  if (cursor === route.debitHops) {
+  if (route.debitHops >= 1 && cursor === route.debitHops) {
     // The LCA's second logical hop is part of its single paired delta. A cursor
     // at this position would otherwise look like a downward act at the root.
+    // With `dS = 0` cursor 0 is the collapsed source step below, not a phantom.
     return { error: "invalid-cursor" };
   }
 
-  if (cursor === 0 && ownAddress === route.srcAddr) {
+  if (route.debitHops === 0 && cursor === 0) {
+    // The source is the LCA. One delta writes the intent already carrying its
+    // single leg: the credit to the first destination-side child. That credit
+    // is the implicit issue, and the next owner is read from this own slot.
+    // This branch must come first: with `dS = 0` the source address *is* the
+    // LCA address, so the plain source branch would otherwise capture it.
+    step = {
+      role: "source",
+      ownAddress: route.lcaAddr,
+      slots: [
+        {
+          slot: Number(route.dstAddr[route.lcaLength]),
+          direction: "credit",
+        },
+      ],
+      nextCursor: route.creditHops === 1 ? route.hops : 1,
+      nextAddress:
+        route.creditHops === 1
+          ? null
+          : route.dstAddr.slice(0, route.lcaLength + 1),
+    };
+  } else if (cursor === 0 && ownAddress === route.srcAddr) {
     // The source owns the intent but has no edge of its own to sign: its
     // incoming value lives in its parent's slot. It points at its parent.
     step = {
@@ -236,7 +255,7 @@ export function actorStep(
       nextCursor: 0,
       nextAddress: route.srcAddr.slice(0, -1),
     };
-  } else if (cursor < route.debitHops - 1) {
+  } else if (route.debitHops >= 1 && cursor < route.debitHops - 1) {
     // Upward leg in an ancestor: the slot points at the child below.
     const depth = route.srcAddr.length - 1 - cursor;
     step = {
@@ -251,24 +270,30 @@ export function actorStep(
       nextCursor: cursor + 1,
       nextAddress: route.srcAddr.slice(0, depth - 1),
     };
-  } else if (cursor === route.debitHops - 1) {
-    // The LCA debits the source side and credits the destination side.
+  } else if (route.debitHops >= 1 && cursor === route.debitHops - 1) {
+    // The LCA debits the source side and credits the destination side only
+    // when there is one. With `dD = 0` the debit is the implicit burn and the
+    // hop is terminal, so `dst[lcaLength]` must not be read.
+    const slots: StepSlot[] = [
+      {
+        slot: Number(route.srcAddr[route.lcaLength]),
+        direction: "debit",
+      },
+    ];
+    if (route.creditHops >= 1) {
+      slots.push({
+        slot: Number(route.dstAddr[route.lcaLength]),
+        direction: "credit",
+      });
+    }
     step = {
       role: "lca",
       ownAddress: route.lcaAddr,
-      slots: [
-        {
-          slot: Number(route.srcAddr[route.lcaLength]),
-          direction: "debit",
-        },
-        {
-          slot: Number(route.dstAddr[route.lcaLength]),
-          direction: "credit",
-        },
-      ],
-      nextCursor: route.debitHops + 1,
+      slots,
+      nextCursor:
+        route.creditHops === 0 ? route.hops : route.debitHops + 1,
       nextAddress:
-        route.creditHops === 1
+        route.creditHops <= 1
           ? null
           : route.dstAddr.slice(0, route.lcaLength + 1),
     };
@@ -391,6 +416,16 @@ export interface PlanActor {
   step: ActorStep;
 }
 
+/**
+ * The source's own leg when it is the LCA (`dS = 0`). The source is not in
+ * `actors`: it publishes the intent already carrying this one leg, at cursor 1,
+ * in a single delta. `slots` is that delta's slot write.
+ */
+export interface PaymentSourceStep {
+  step: ActorStep;
+  slots: PaymentSlotWrite[];
+}
+
 export interface PaymentPlan {
   source: BoardSnapshot;
   destination: BoardSnapshot;
@@ -400,6 +435,11 @@ export interface PaymentPlan {
   srcChain: BoardSnapshot[];
   /** Root -> destination. */
   dstPath: BoardSnapshot[];
+  /**
+   * Present only when the source is the LCA. The source signs the intent and
+   * this leg together, so it is not part of `actors`.
+   */
+  sourceStep: PaymentSourceStep | null;
   /** Boards that will sign a leg, in route order. The source is not here. */
   actors: PlanActor[];
 }
@@ -428,13 +468,22 @@ function isFailure(value: unknown): value is PaymentFailure {
 }
 
 function actorAddressAt(route: PaymentRoute, hop: number): string | null {
+  if (route.debitHops === 0) {
+    // Cursor 0 is the collapsed source/LCA step; later hops walk down the
+    // destination side.
+    if (hop === 0) return route.lcaAddr;
+    if (hop < 0) return null;
+    const depth = route.lcaLength + hop;
+    return depth > route.dstAddr.length ? null : route.dstAddr.slice(0, depth);
+  }
   if (hop < route.debitHops - 1) {
     return route.srcAddr.slice(0, route.srcAddr.length - 1 - hop);
   }
   if (hop === route.debitHops - 1) return route.lcaAddr;
   if (hop === route.debitHops) return null;
   if (hop >= route.debitHops + 1) {
-    return route.dstAddr.slice(0, route.lcaLength + (hop - route.debitHops));
+    const depth = route.lcaLength + (hop - route.debitHops);
+    return depth > route.dstAddr.length ? null : route.dstAddr.slice(0, depth);
   }
   return null;
 }
@@ -541,6 +590,10 @@ function actorOwnerAt(plan: {
   route: PaymentRoute;
 }, hop: number): BoardSnapshot | null {
   const { route } = plan;
+  if (route.debitHops === 0) {
+    if (hop === 0) return plan.srcChain[plan.srcChain.length - 1] ?? null;
+    return plan.dstPath[route.lcaLength + hop] ?? null;
+  }
   if (hop < route.debitHops - 1) {
     return plan.srcChain[route.srcAddr.length - 1 - hop] ?? null;
   }
@@ -608,11 +661,60 @@ export async function planPayment(
     return failure("different-roots", "The two addresses do not share one root.");
   }
 
+  // The source's own step. With `dS = 0` it collapses into the LCA step and
+  // signs one credit; with `dS >= 1` it signs nothing and points at its parent.
+  let sourceStep: PaymentSourceStep | null = null;
+  const sourceActorStep = actorStep(route, 0, srcAddr);
+  if ("error" in sourceActorStep) {
+    return failure("invalid-intent", "The source is not the first route actor.", 0);
+  }
+  if (route.debitHops === 0) {
+    const slots: PaymentSlotWrite[] = [];
+    for (const leg of sourceActorStep.slots) {
+      const slot = source.state.slots[leg.slot];
+      if (slot?.entry === null || slot?.entry === undefined) {
+        return failure("missing-slot", `The source slot ${leg.slot} is empty.`, 0);
+      }
+      if (leg.direction === "credit") {
+        if (slot.entry.value > I64_MAX - amount) {
+          return failure("overflow", `The source slot ${leg.slot} cannot hold the credit.`, 0);
+        }
+        slots.push({
+          index: leg.slot,
+          entry: { ...slot.entry, value: slot.entry.value + amount },
+        });
+      }
+    }
+    if (sourceActorStep.nextAddress === null) {
+      // The source's single credit is the final hop: it must be the named
+      // destination, and that board must name the source as its parent.
+      const credit = sourceActorStep.slots.find((slot) => slot.direction === "credit");
+      if (
+        credit === undefined ||
+        slotContact(source, credit.slot) !== dstId ||
+        destination.ownerId !== dstId ||
+        destination.state.parent.userId !== source.ownerId
+      ) {
+        return failure(
+          "address-mismatch",
+          "The destination slot does not name the supplied user id.",
+        );
+      }
+    }
+    sourceStep = { step: sourceActorStep, slots };
+  }
+
   const actorHops: number[] = [];
-  for (let hop = 0; hop < route.debitHops - 1; hop += 1) actorHops.push(hop);
-  actorHops.push(route.debitHops - 1); // the LCA's paired turn
-  for (let hop = route.debitHops + 1; hop < route.hops; hop += 1) {
-    actorHops.push(hop);
+  if (route.debitHops === 0) {
+    // Cursor 0 is the collapsed source step above; every later hop walks down
+    // the destination side.
+    for (let hop = 1; hop < route.hops; hop += 1) actorHops.push(hop);
+  } else {
+    for (let hop = 0; hop < route.debitHops - 1; hop += 1) actorHops.push(hop);
+    actorHops.push(route.debitHops - 1); // the LCA's paired turn
+    for (let hop = route.debitHops + 1; hop < route.hops; hop += 1) {
+      actorHops.push(hop);
+    }
   }
 
   const actors: PlanActor[] = [];
@@ -676,19 +778,50 @@ export async function planPayment(
     amount,
     srcChain: chain,
     dstPath,
+    sourceStep,
     actors,
   };
 }
 
-/** Build the source-board intent at the source's payment record seq. */
+/**
+ * Build the source-board intent at the source's payment record seq.
+ *
+ * With `dS = 0` the source is the LCA: the intent is already at cursor 1 and
+ * `plan.sourceStep` is the single leg to sign in the same delta. With
+ * `dS >= 1` the source offers at cursor 0 and points at the first actor.
+ */
 export function createPaymentIntent(
   plan: PaymentPlan,
   sourceSeq: number,
 ): PaymentEntry {
+  const id = paymentId(
+    plan.source.ownerId,
+    sourceSeq,
+    plan.destination.ownerId,
+    plan.amount,
+  );
+  if (plan.sourceStep !== null) {
+    const { step } = plan.sourceStep;
+    const terminal = step.nextAddress === null;
+    return {
+      id,
+      src: plan.source.ownerId,
+      dst: plan.destination.ownerId,
+      amount: plan.amount,
+      srcAddr: plan.route.srcAddr,
+      dstAddr: plan.route.dstAddr,
+      cursor: step.nextCursor,
+      phase: terminal ? "terminal" : "forward",
+      status: terminal ? "complete" : "acted",
+      next: nextOwnerForStep(plan.source, step),
+      fail: null,
+      legs: [],
+    };
+  }
   const first = plan.actors[0];
   if (first === undefined) throw new Error("A payment route must have an actor.");
   return {
-    id: paymentId(plan.source.ownerId, sourceSeq, plan.destination.ownerId, plan.amount),
+    id,
     src: plan.source.ownerId,
     dst: plan.destination.ownerId,
     amount: plan.amount,
@@ -857,23 +990,37 @@ async function writeReverseAbort(
   return saved;
 }
 
-async function destinationStillValid(
+/**
+ * Check the last hop. A credit must be the destination credited by its parent.
+ * A `dD = 0` LCA hop is debit-only: its single debit is the implicit burn, so
+ * the acting board itself must be the destination named by the intent.
+ */
+async function finalHopProblem(
   board: BoardSnapshot,
   entry: PaymentEntry,
+  route: PaymentRoute,
   step: ActorStep,
   deps: Pick<PaymentDeps, "readBoard">,
 ): Promise<PaymentProblem | null> {
   const credit = step.slots.find((slot) => slot.direction === "credit");
-  if (credit === undefined) return "invalid-intent";
-  const contact = slotContact(board, credit.slot);
-  if (contact !== entry.dst) return "address-mismatch";
-  const destination = await readNeighbour(deps, entry.dst);
-  if (destination === null || isFailure(destination)) {
-    return "no-destination";
+  if (credit !== undefined) {
+    const contact = slotContact(board, credit.slot);
+    if (contact !== entry.dst) return "address-mismatch";
+    const destination = await readNeighbour(deps, entry.dst);
+    if (destination === null || isFailure(destination)) {
+      return "no-destination";
+    }
+    if (destination.ownerId !== entry.dst) return "address-mismatch";
+    if (destination.state.parent.userId !== board.ownerId) {
+      return "address-mismatch";
+    }
+    return null;
   }
-  if (destination.ownerId !== entry.dst) return "address-mismatch";
-  if (destination.state.parent.userId !== board.ownerId) return "address-mismatch";
-  return null;
+  if (step.role === "lca" && route.creditHops === 0) {
+    // The burn must accrue to the payee: this board is the named destination.
+    return board.ownerId === entry.dst ? null : "address-mismatch";
+  }
+  return "invalid-intent";
 }
 
 async function reversePayment(
@@ -900,6 +1047,95 @@ async function reversePayment(
     throw new Error("The reverse request does not match this board's signed record.");
   }
 
+  if (route.debitHops === 0 && ownAddress === own.srcAddr) {
+    // The source is the LCA and acted at cursor 1. Undo its single credit and
+    // write the terminal record in one delta: the generic `hop + 2` check and
+    // the "previous owner of hop 0" rule do not describe this step.
+    if (!Number.isInteger(entry.cursor) || entry.cursor !== 1) {
+      throw new Error("The reverse cursor is not valid.");
+    }
+    if (own.phase !== "forward" || own.status !== "acted" || own.cursor !== 1) {
+      throw new Error("This board's signed leg is not the one being reversed.");
+    }
+    const step = actorStep(route, 0, ownAddress);
+    if ("error" in step) throw new Error("The reverse actor does not match the route.");
+    const directions = new Map(
+      step.slots.map((slot) => [slot.slot, slot.direction] as const),
+    );
+
+    let blocked: PaymentProblem | null = null;
+    let superseded = false;
+    const writes: PaymentSlotWrite[] = [];
+    for (const leg of own.legs) {
+      const slot = board.state.slots[leg.slot];
+      if (
+        slot === undefined ||
+        slot.entry === null ||
+        slot.seq !== leg.seq ||
+        slot.sig !== leg.sig
+      ) {
+        // The payer rewrote the slot after issuing: never overwrite it.
+        superseded = true;
+        continue;
+      }
+      const direction = directions.get(leg.slot);
+      if (direction === undefined) {
+        superseded = true;
+        continue;
+      }
+      if (direction === "credit") {
+        // Undoing the issue means debiting the credit back.
+        if (slot.entry.value < own.amount) {
+          blocked = "negative";
+          break;
+        }
+        writes.push({
+          index: leg.slot,
+          entry: { ...slot.entry, value: slot.entry.value - own.amount },
+        });
+      } else {
+        if (slot.entry.value > I64_MAX - own.amount) {
+          blocked = "overflow";
+          break;
+        }
+        writes.push({
+          index: leg.slot,
+          entry: { ...slot.entry, value: slot.entry.value + own.amount },
+        });
+      }
+    }
+
+    const inheritedBlocked = entry.status === "blocked";
+    const terminal: PaymentEntry = {
+      ...own,
+      phase: "terminal",
+      status:
+        blocked !== null || inheritedBlocked
+          ? "blocked"
+          : superseded
+            ? "superseded"
+            : "reversed",
+      next: ZERO_OWNER,
+      fail:
+        blocked !== null
+          ? failFor(blocked)
+          : superseded
+            ? "superseded"
+            : inheritedBlocked
+              ? entry.fail
+              : null,
+      legs: own.legs,
+    };
+    // A blocked or superseded restore signs no slot; either way the status is
+    // terminal and visible, never a silent stuck record.
+    const saved = await deps.savePayment(
+      terminal,
+      blocked !== null || superseded ? [] : writes,
+    );
+    if (saved === null) throw new Error("The payment record was not signed.");
+    return saved;
+  }
+
   if (entry.cursor === 0 && ownAddress === own.srcAddr) {
     // The source has no leg; it closes the reverse walk. The own-record check
     // above prevents a neighbour from clobbering a newer offer.
@@ -917,6 +1153,15 @@ async function reversePayment(
 
   if (!Number.isInteger(entry.cursor) || entry.cursor <= 0) {
     throw new Error("The reverse cursor is not valid.");
+  }
+
+  if (route.creditHops === 0 && ownAddress === route.lcaAddr) {
+    // With `dD = 0` the LCA's debit is the last hop and the payment is already
+    // terminal. There is no forward path left to rewind; fail closed rather
+    // than half-running a reversal.
+    throw new Error(
+      "A payment that ends at the shared ancestor has no forward path to reverse.",
+    );
   }
 
   const isLca =
@@ -1004,6 +1249,45 @@ async function reversePayment(
   const saved = await deps.savePayment(reverse, writes);
   if (saved === null) throw new Error("The payment record was not signed.");
   return saved;
+}
+
+/**
+ * Withdraw or close a payment only this board sourced.
+ *
+ * A `dS >= 1` source has no leg and can clear its offer. A `dS = 0` source is
+ * the LCA and acts at cursor 1: clearing its record alone would leave the
+ * issued credit in its slot, so it reverses that leg and writes a terminal
+ * record instead. A payment another board has already advanced past the source
+ * cannot be withdrawn here.
+ */
+export async function withdrawPayment(
+  board: BoardSnapshot,
+  entry: PaymentEntry,
+  deps: PaymentDeps,
+): Promise<PaymentEntry | null> {
+  const own = board.state.payments.entry;
+  if (
+    own === null ||
+    own.id !== entry.id ||
+    own.src !== board.ownerId ||
+    entry.src !== board.ownerId
+  ) {
+    throw new Error("Only the source can withdraw this payment.");
+  }
+  const route = planRoute(entry.srcAddr, entry.dstAddr);
+  if ("error" in route) throw new Error("The payment route is malformed.");
+
+  if (route.debitHops === 0) {
+    if (own.phase !== "forward" || own.cursor !== 1) {
+      throw new Error("This payment has already left the source.");
+    }
+    return reversePayment(board, own, route, deps);
+  }
+
+  if (own.phase !== "forward" || own.cursor !== 0) {
+    throw new Error("This payment has already left the source.");
+  }
+  return deps.savePayment(null, []);
 }
 
 /**
@@ -1159,7 +1443,7 @@ export async function advancePayment(
   }
 
   if (step.nextAddress === null) {
-    const problem = await destinationStillValid(board, entry, step, deps);
+    const problem = await finalHopProblem(board, entry, route, step, deps);
     if (problem !== null) {
       return writeReverseAbort(board, entry, route, problem, deps);
     }

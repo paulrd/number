@@ -1359,14 +1359,18 @@ export class OnlineBoard implements BoardBackend {
             };
 
       // A source intent's id is derived from the payments sequence that is
-      // actually signed, not the caller's possibly stale estimate.
-      if (
+      // actually signed, not the caller's possibly stale estimate. The
+      // collapsed `dS = 0` source record is at cursor 1 and already carries its
+      // leg (and may already be complete), so this covers every
+      // source-originated forward/complete record, not just cursor 0.
+      const sourceOrigin =
         signedEntry !== null &&
         signedEntry.src === this.identity.pubkey &&
-        signedEntry.cursor === 0 &&
-        signedEntry.phase === "forward" &&
-        signedEntry.status === "offered"
-      ) {
+        ((signedEntry.phase === "forward" &&
+          (signedEntry.cursor === 0 || signedEntry.cursor === 1)) ||
+          (signedEntry.phase === "terminal" &&
+            signedEntry.status === "complete"));
+      if (sourceOrigin && signedEntry !== null) {
         signedEntry = {
           ...signedEntry,
           id: paymentId(

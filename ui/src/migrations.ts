@@ -37,6 +37,15 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v9: private address book (contacts with octal addresses) and
+    // selfName/childNames signing. Superseded by v10, which also allows a
+    // payment route whose endpoint is the LCA. Its seed, counters and address
+    // book carry forward; the address book is v9's own secret store.
+    key: "9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA",
+    codeHash: "Cnfyn2fWBRSgyrmdxhUcZf2FrijvnHvoRMpznM85Lx5S",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v8 as deployed before v9. v9 moves the address book into the delegate
     // and signs selfName/childNames instead of contacts, so the predecessor is
     // the only path left to a v8 owner's seed and counters.

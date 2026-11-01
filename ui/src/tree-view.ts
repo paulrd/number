@@ -1,5 +1,5 @@
 /**
- * Board-tree navigation helpers.
+ * Board-tree helpers.
  *
  * A tree edge exists only when both signed sides agree: the parent board has a
  * slot whose contact is the child owner, and the child board's `parent.userId`
@@ -11,9 +11,9 @@
  * Everything here is read-only; the caller decides when a board may be edited
  * (`BoardSnapshot` from the own delegate).
  *
- * Reads are cached for the session because breadcrumbs, the parent row and the
- * child status all ask about the same neighbours. The caller clears the cache on
- * reconnect; local writes do not change the remote snapshots it holds.
+ * Reads are cached for the session because the parent row and the child status
+ * ask about the same neighbours. The caller clears the cache on reconnect;
+ * local writes do not change the neighbour snapshots it holds.
  */
 import type { BoardSnapshot } from "./board";
 import type { Entry, StateV3 } from "./state";
@@ -36,37 +36,6 @@ export interface LinkDeps {
   readBoard(ownerId: string): Promise<BoardSnapshot | null>;
 }
 
-export type TrailKind =
-  | "current"
-  | "ancestor"
-  | "pending"
-  | "not-created"
-  | "unreadable";
-
-export interface TrailStep {
-  ownerId: string;
-  kind: TrailKind;
-  /**
-   * The name the board's parent gives it, from the parent's signed
-   * `childNames` record. Null when the parent has not named it (or the record
-   * no longer describes the slot).
-   */
-  parentName: string | null;
-  /** The board's own signed name, from its `selfName` record. */
-  selfName: string | null;
-  /**
-   * True when this board was read from a previous (v2) contract generation.
-   * Its slots still count as the parent side of an edge; only its missing
-   * parent record prevents it from being a child. Informational, never a block.
-   */
-  legacy: boolean;
-}
-
-export interface Trail {
-  steps: TrailStep[];
-  warning: string | null;
-}
-
 export interface ChainWalk {
   /** The owner id that matched the target, or null when the target was absent. */
   hitOwnerId: string | null;
@@ -82,7 +51,6 @@ export interface ChainWalk {
  * Follow signed `parent.userId` records from `startOwnerId` toward
  * `targetOwnerId`. This is deliberately independent of the mutual-edge rule:
  * a one-sided (pending) parent is still a possible cycle and must be visited.
- * Breadcrumbs are the only place that follows mutual edges.
  */
 export async function walkParentChain(
   startOwnerId: string,
@@ -304,8 +272,8 @@ export interface AddressInfo {
  *
  * A one-sided (pending) link has no slot digit, so the address is not settled;
  * a missing, unreadable, or looping ancestor has the same effect. The walk is
- * independent of `buildTrail` so callers can show the address even when the
- * breadcrumb path is truncated or broken.
+ * independent of any parent path display so callers can show the address even
+ * when the chain is truncated or broken.
  */
 export async function octalAddress(
   board: BoardSnapshot,
@@ -390,99 +358,6 @@ export async function childLink(
     snapshot: result.snapshot,
     error: null,
   };
-}
-
-/**
- * Walk the current board's parent links upward, following mutual edges only.
- * The result is ordered root → current. When the next signed parent is not a
- * mutual edge, it is returned as one non-link step at the top and the walk
- * stops there. Loops and the depth cap produce a warning instead of a hang.
- */
-export async function buildTrail(
-  current: BoardSnapshot,
-  deps: LinkDeps,
-): Promise<Trail> {
-  // The mutual chain, child first. Steps are labelled afterwards so a parent's
-  // `childNames` record is available when the child's name is resolved.
-  const chain: BoardSnapshot[] = [current];
-  const seen = new Set<string>([current.ownerId]);
-  let pending: {
-    ownerId: string;
-    kind: TrailKind;
-    selfName: string | null;
-    legacy: boolean;
-  } | null = null;
-  let warning: string | null = null;
-  let node = current;
-
-  for (let depth = 0; ; depth += 1) {
-    const parentId = node.state.parent.userId;
-    if (parentId === null) break;
-
-    if (seen.has(parentId)) {
-      warning =
-        "These boards point at each other in a loop. The path stops at the repeat.";
-      break;
-    }
-    if (depth >= MAX_TREE_DEPTH) {
-      warning = `This path is more than ${MAX_TREE_DEPTH} boards deep. The path stops here.`;
-      break;
-    }
-
-    const result = await read(deps, parentId);
-    if (result.error !== null) {
-      pending = {
-        ownerId: parentId,
-        kind: "unreadable",
-        selfName: null,
-        legacy: false,
-      };
-      warning = "Could not read part of this path. The path may be incomplete.";
-      break;
-    }
-    if (result.snapshot === null) {
-      pending = {
-        ownerId: parentId,
-        kind: "not-created",
-        selfName: null,
-        legacy: false,
-      };
-      break;
-    }
-    if (!hasChildSlot(result.snapshot.state, node.ownerId)) {
-      pending = {
-        ownerId: parentId,
-        kind: "pending",
-        selfName: result.snapshot.state.selfName.name,
-        legacy: result.snapshot.legacy,
-      };
-      break;
-    }
-
-    seen.add(parentId);
-    chain.push(result.snapshot);
-    node = result.snapshot;
-  }
-
-  const steps: TrailStep[] = [];
-  if (pending !== null) {
-    steps.push({ ...pending, parentName: null });
-  }
-  // chain[0] is the current board, chain[1] its parent, and so on. Emit root
-  // first so the list reads root → current.
-  for (let index = chain.length - 1; index >= 0; index -= 1) {
-    const board = chain[index];
-    const parent = index + 1 < chain.length ? chain[index + 1] : null;
-    steps.push({
-      ownerId: board.ownerId,
-      kind: index === 0 ? "current" : "ancestor",
-      parentName:
-        parent === null ? null : parentGivenName(parent, board.ownerId),
-      selfName: board.state.selfName.name,
-      legacy: board.legacy,
-    });
-  }
-  return { steps, warning };
 }
 
 /**

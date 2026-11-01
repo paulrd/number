@@ -16,9 +16,18 @@ so renaming a contact does not rewrite it.
 A parent/child edge is a tree edge only when **both sides agree**: the parent
 board has a slot for the child, and the child board's parent points back to the
 parent. A slot counts as a child slot only then; a one-sided link is shown
-separately as unconfirmed, and while viewing another owner's board only mutual
-links are listed. Other owners' boards are readable in the UI but only the
-owner can sign them.
+separately as unconfirmed. The UI shows your own board only — there is no
+navigation to other owners' boards — although the protocol reads neighbours'
+signed state to resolve names, values, links and payment routes.
+
+Payments route between two addresses through their least common ancestor, and
+**either endpoint may be that ancestor**: a board with any link (parent or
+child) can pay and be paid. A route with only downward links means the payer
+credits the first child on the path — an *implicit issue* against that child's
+liability — and a route with only upward links means the payee debits the child
+on the source path — an *implicit burn*. Neither writes a separate adjustment
+record; the slot write is the issue or burn. See
+[DESIGN-payments-lca.md](./DESIGN-payments-lca.md).
 
 - **Contract** (`contract/`) — shared, replicated state. One instance per owner,
   parameterised by the owner's Ed25519 verifying key. Signed slot, parent,
@@ -42,7 +51,7 @@ owner can sign them.
 Values are i64 **counts of hundredths** in the contract (the wire type did not
 change; the UI divides by 100 and shows exactly two decimals).
 
-Design and exact wire formats: [DESIGN.md](./DESIGN.md) (v4/v5) and
+Design and exact wire formats: [DESIGN.md](./DESIGN.md) (v4/v5), [DESIGN-payments-lca.md](./DESIGN-payments-lca.md) for LCA-endpoint payments, and
 [DESIGN-v6.md](./DESIGN-v6.md) (private address book, signed names). UI
 information architecture: [DESIGN-views.md](./DESIGN-views.md).
 Current deployment state, done work, and the remaining backlog:

@@ -279,7 +279,11 @@ fn common_prefix_length(a: &str, b: &str) -> usize {
         .count()
 }
 
-/// Port of `planRoute`. A payment needs at least one debit and one credit.
+/// Port of `planRoute`. Either endpoint may be the LCA; the only structural
+/// rejection is the same address (which would make both sides the LCA and
+/// create value with no route). Addresses are rooted at the shared `""`, so a
+/// different tree needs the caller's topology check: no string route exists
+/// across roots.
 pub fn plan_route(src_addr: &str, dst_addr: &str) -> Result<Route, AdvanceError> {
     if !is_octal_address(src_addr) || !is_octal_address(dst_addr) {
         return Err(AdvanceError::Route);
@@ -290,9 +294,6 @@ pub fn plan_route(src_addr: &str, dst_addr: &str) -> Result<Route, AdvanceError>
     let lca_length = common_prefix_length(src_addr, dst_addr);
     let debit_hops = src_addr.len() - lca_length;
     let credit_hops = dst_addr.len() - lca_length;
-    if debit_hops == 0 || credit_hops == 0 {
-        return Err(AdvanceError::Route);
-    }
     Ok(Route {
         src_addr: src_addr.to_owned(),
         dst_addr: dst_addr.to_owned(),
@@ -323,12 +324,40 @@ pub fn actor_step(
             next_address: None,
         });
     }
-    // The LCA's second logical hop is part of one paired delta.
-    if cursor == route.debit_hops {
+    // The LCA's second logical hop is part of one paired delta. It exists only
+    // when there is a source side: with `dS = 0` cursor 0 is the collapsed
+    // source step, not a phantom post-LCA cursor.
+    if route.debit_hops >= 1 && cursor == route.debit_hops {
         return Err(AdvanceError::Cursor);
     }
 
-    let step = if cursor == 0 && own_address == Some(route.src_addr.as_str()) {
+    let step = if route.debit_hops == 0 && cursor == 0 {
+        // The source is the LCA. One delta writes the intent already carrying
+        // its single leg: the credit to the first destination-side child. That
+        // credit is the implicit issue, and `next` is that child (read from the
+        // source's own slot by the caller).
+        ActorStep {
+            role: StepRole::Source,
+            own_address: route.lca_addr.clone(),
+            slots: vec![StepSlot {
+                slot: route.dst_addr.as_bytes()[route.lca_length] - b'0',
+                direction: Direction::Credit,
+            }],
+            next_cursor: if route.credit_hops == 1 {
+                route.hops as u8
+            } else {
+                1
+            },
+            next_address: if route.credit_hops == 1 {
+                None
+            } else {
+                Some(route.dst_addr[..route.lca_length + 1].to_owned())
+            },
+        }
+    } else if cursor == 0 && own_address == Some(route.src_addr.as_str()) {
+        // Plain source step (`dS >= 1`): the source has no edge of its own to
+        // sign and points at its parent. With `dS = 0` the branch above wins,
+        // because the source address is the LCA address.
         ActorStep {
             role: StepRole::Source,
             own_address: route.src_addr.clone(),
@@ -336,7 +365,8 @@ pub fn actor_step(
             next_cursor: 0,
             next_address: Some(route.src_addr[..route.src_addr.len() - 1].to_owned()),
         }
-    } else if cursor < route.debit_hops - 1 {
+    } else if route.debit_hops >= 1 && cursor < route.debit_hops - 1 {
+        // Upward leg in an ancestor: the slot points at the child below.
         let depth = route.src_addr.len() - 1 - cursor;
         ActorStep {
             role: StepRole::Debit,
@@ -348,28 +378,38 @@ pub fn actor_step(
             next_cursor: (cursor + 1) as u8,
             next_address: Some(route.src_addr[..depth - 1].to_owned()),
         }
-    } else if cursor == route.debit_hops - 1 {
+    } else if route.debit_hops >= 1 && cursor == route.debit_hops - 1 {
+        // The LCA debits the source side and credits the destination side only
+        // when there is one. With `dD = 0` the debit is the implicit burn and
+        // the hop is terminal.
+        let mut slots = vec![StepSlot {
+            slot: route.src_addr.as_bytes()[route.lca_length] - b'0',
+            direction: Direction::Debit,
+        }];
+        if route.credit_hops >= 1 {
+            slots.push(StepSlot {
+                slot: route.dst_addr.as_bytes()[route.lca_length] - b'0',
+                direction: Direction::Credit,
+            });
+        }
         ActorStep {
             role: StepRole::Lca,
             own_address: route.lca_addr.clone(),
-            slots: vec![
-                StepSlot {
-                    slot: route.src_addr.as_bytes()[route.lca_length] - b'0',
-                    direction: Direction::Debit,
-                },
-                StepSlot {
-                    slot: route.dst_addr.as_bytes()[route.lca_length] - b'0',
-                    direction: Direction::Credit,
-                },
-            ],
-            next_cursor: (route.debit_hops + 1) as u8,
-            next_address: if route.credit_hops == 1 {
+            slots,
+            next_cursor: if route.credit_hops == 0 {
+                route.hops as u8
+            } else {
+                (route.debit_hops + 1) as u8
+            },
+            next_address: if route.credit_hops <= 1 {
                 None
             } else {
                 Some(route.dst_addr[..route.lca_length + 1].to_owned())
             },
         }
     } else {
+        // Destination-side credit, including every `dS = 0` hop after the
+        // collapsed source step.
         let depth = route.lca_length + (cursor - route.debit_hops);
         ActorStep {
             role: StepRole::Credit,
@@ -396,6 +436,17 @@ pub fn actor_step(
 }
 
 fn actor_address_at(route: &Route, hop: usize) -> Option<String> {
+    if route.debit_hops == 0 {
+        // Cursor 0 is the collapsed source/LCA step; later hops walk down the
+        // destination side.
+        if hop == 0 {
+            return Some(route.lca_addr.clone());
+        }
+        return route
+            .dst_addr
+            .get(..route.lca_length + hop)
+            .map(str::to_owned);
+    }
     if hop < route.debit_hops - 1 {
         return Some(route.src_addr[..route.src_addr.len() - 1 - hop].to_owned());
     }
@@ -405,7 +456,10 @@ fn actor_address_at(route: &Route, hop: usize) -> Option<String> {
     if hop <= route.debit_hops {
         return None;
     }
-    Some(route.dst_addr[..route.lca_length + (hop - route.debit_hops)].to_owned())
+    route
+        .dst_addr
+        .get(..route.lca_length + (hop - route.debit_hops))
+        .map(str::to_owned)
 }
 
 /// The owner that should have carried the intent into this board.
@@ -413,6 +467,12 @@ fn expected_previous_owner(board: &BoardState, route: &Route, intent: &Payment) 
     let cursor = usize::from(intent.cursor);
     if cursor == 0 {
         return intent.src.clone();
+    }
+    if route.debit_hops == 0 {
+        // Every destination-side hop from cursor 1 onward is entered through
+        // this board's parent: the first child's parent is the source (the
+        // LCA), and deeper boards' parents are the previous credit actors.
+        return board.parent.clone().unwrap_or_else(|| intent.src.clone());
     }
     if cursor < route.debit_hops - 1 {
         let digit = route.src_addr.as_bytes()[route.src_addr.len() - 1 - cursor] - b'0';
@@ -591,7 +651,8 @@ pub fn plan_leg(
         }
         // The LCA's pair advances the cursor by two, so the actor immediately
         // before the first destination-side credit is the LCA, not `cursor - 1`.
-        let previous_hop = if cursor == route.debit_hops + 1 {
+        // Only a real (non-empty) source side has that extra LCA hop.
+        let previous_hop = if route.debit_hops >= 1 && cursor == route.debit_hops + 1 {
             route.debit_hops - 1
         } else {
             cursor - 1
@@ -704,21 +765,30 @@ pub fn plan_leg(
 
     let terminal = step.next_address.is_none();
 
-    // (g) Final leg: the credited slot names the destination, and that board's
-    // parent link names this board's owner.
+    // (g) Final leg. A credit must name the destination and that board's
+    // parent link must name this board's owner. A `dD = 0` LCA hop has no
+    // credit: its single debit is the implicit burn, so this board itself must
+    // be the destination.
     if terminal {
-        let credit = step
+        if let Some(credit) = step
             .slots
             .iter()
             .find(|slot| slot.direction == Direction::Credit)
-            .ok_or(AdvanceError::FinalDestination)?;
-        if own.state.slot_contact(credit.slot) != Some(intent.dst.as_str()) {
-            return Err(AdvanceError::FinalDestination);
-        }
-        let destination = own.destination.ok_or(AdvanceError::FinalDestination)?;
-        if destination.owner != intent.dst
-            || destination.parent.as_deref() != Some(own.state.owner.as_str())
         {
+            if own.state.slot_contact(credit.slot) != Some(intent.dst.as_str()) {
+                return Err(AdvanceError::FinalDestination);
+            }
+            let destination = own.destination.ok_or(AdvanceError::FinalDestination)?;
+            if destination.owner != intent.dst
+                || destination.parent.as_deref() != Some(own.state.owner.as_str())
+            {
+                return Err(AdvanceError::FinalDestination);
+            }
+        } else if step.role == StepRole::Lca && route.credit_hops == 0 {
+            if own.state.owner != intent.dst {
+                return Err(AdvanceError::FinalDestination);
+            }
+        } else {
             return Err(AdvanceError::FinalDestination);
         }
     }
@@ -1361,5 +1431,469 @@ mod tests {
             plan_leg(&own, &intent, &from, &owner, 0),
             Err(AdvanceError::MixedVersion)
         );
+    }
+
+    /// A source record whose own delta already carries its single leg. This is
+    /// the shape the collapsed `dS = 0` source step produces.
+    #[allow(clippy::too_many_arguments)]
+    fn source_with_leg(
+        version: u8,
+        key: &SigningKey,
+        owner: &str,
+        parent: Option<&str>,
+        intent: &Payment,
+        slot: u8,
+        slot_seq: u64,
+        slot_value: i64,
+        contact: &str,
+    ) -> BoardState {
+        let mut state = board(version, owner, parent);
+        let sig = intent.legs[0].sig.clone();
+        state.slots[usize::from(slot)] = SlotState {
+            seq: slot_seq,
+            entry: Some(entry(slot_value, contact)),
+            sig: Some(sig),
+        };
+        state.payments = Payments {
+            seq: 2,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(key, &mut state);
+        state
+    }
+
+    #[test]
+    fn route_accepts_an_lca_endpoint_and_rejects_same_address() {
+        let root_to_child = plan_route("", "3").expect("the root may pay a child");
+        assert_eq!(root_to_child.lca_length, 0);
+        assert_eq!(root_to_child.debit_hops, 0);
+        assert_eq!(root_to_child.credit_hops, 1);
+        assert_eq!(root_to_child.hops, 1);
+        assert_eq!(root_to_child.lca_addr, "");
+
+        let child_to_root = plan_route("3", "").expect("a child may pay the root");
+        assert_eq!(child_to_root.lca_length, 0);
+        assert_eq!(child_to_root.debit_hops, 1);
+        assert_eq!(child_to_root.credit_hops, 0);
+        assert_eq!(child_to_root.hops, 1);
+
+        let root_to_grandchild = plan_route("", "31").expect("downward only");
+        assert_eq!(root_to_grandchild.debit_hops, 0);
+        assert_eq!(root_to_grandchild.credit_hops, 2);
+        let grandchild_to_root = plan_route("31", "").expect("upward only");
+        assert_eq!(grandchild_to_root.debit_hops, 2);
+        assert_eq!(grandchild_to_root.credit_hops, 0);
+
+        assert_eq!(plan_route("", ""), Err(AdvanceError::Route));
+        assert_eq!(plan_route("3", "3"), Err(AdvanceError::Route));
+        assert_eq!(plan_route("8", "3"), Err(AdvanceError::Route));
+    }
+
+    #[test]
+    fn collapsed_source_step_is_the_implicit_issue() {
+        // Root -> child: one delta, one credit, complete.
+        let route = plan_route("", "3").expect("valid route");
+        let step = actor_step(&route, 0, Some("")).expect("source step");
+        assert_eq!(step.role, StepRole::Source);
+        assert_eq!(step.own_address, "");
+        assert_eq!(
+            step.slots,
+            vec![StepSlot {
+                slot: 3,
+                direction: Direction::Credit,
+            }]
+        );
+        assert_eq!(step.next_cursor, 1);
+        assert_eq!(step.next_cursor as usize, route.hops);
+        assert_eq!(step.next_address, None);
+
+        // Root -> grandchild: the same single credit, but the next actor is
+        // the first destination-side child.
+        let route = plan_route("", "31").expect("valid route");
+        let step = actor_step(&route, 0, Some("")).expect("source step");
+        assert_eq!(step.role, StepRole::Source);
+        assert_eq!(
+            step.slots,
+            vec![StepSlot {
+                slot: 3,
+                direction: Direction::Credit,
+            }]
+        );
+        assert_eq!(step.next_cursor, 1);
+        assert_eq!(step.next_address.as_deref(), Some("3"));
+
+        // The same collapse with a non-root LCA: "3" pays its child "31".
+        let route = plan_route("3", "31").expect("valid route");
+        let step = actor_step(&route, 0, Some("3")).expect("source step");
+        assert_eq!(step.role, StepRole::Source);
+        assert_eq!(step.own_address, "3");
+        assert_eq!(
+            step.slots,
+            vec![StepSlot {
+                slot: 1,
+                direction: Direction::Credit,
+            }]
+        );
+        assert_eq!(step.next_cursor as usize, route.hops);
+        assert_eq!(step.next_address, None);
+
+        // With a real source side the plain source step and the phantom
+        // post-LCA cursor guard still apply.
+        let route = plan_route("3", "4").expect("valid route");
+        let step = actor_step(&route, 0, Some("3")).expect("source step");
+        assert_eq!(step.role, StepRole::Source);
+        assert!(step.slots.is_empty());
+        assert_eq!(step.next_address.as_deref(), Some(""));
+        assert_eq!(
+            actor_step(&route, route.debit_hops as u8, None),
+            Err(AdvanceError::Cursor)
+        );
+    }
+
+    #[test]
+    fn collapsed_source_next_owner_comes_from_the_source_slot() {
+        let (_src_key, src) = owner(1);
+        let (_child_key, child) = owner(2);
+
+        let route = plan_route("", "31").expect("valid route");
+        let step = actor_step(&route, 0, Some("")).expect("source step");
+        let mut source_state = board(4, &src, None);
+        source_state.slots[3] = slot(1, 500, &child);
+        assert_eq!(
+            next_owner(&source_state, &step),
+            child,
+            "the source reads the first destination child from its own slot"
+        );
+
+        let route = plan_route("", "3").expect("valid route");
+        let step = actor_step(&route, 0, Some("")).expect("source step");
+        assert_eq!(
+            next_owner(&source_state, &step),
+            ZERO_OWNER,
+            "a one-link downward payment is terminal in the source's delta"
+        );
+    }
+
+    #[test]
+    fn dd_zero_child_pays_parent_is_one_terminal_lca_debit() {
+        let (src_key, src) = owner(1);
+        let (_own_key, own) = owner(2);
+
+        let mut own_state = board(4, &own, None);
+        own_state.slots[3] = slot(4, 500, &src);
+
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &own,
+            100,
+            "3",
+            "",
+            0,
+            "offered",
+            &own,
+            vec![],
+        );
+        let mut from = board(4, &src, Some(&own));
+        from.payments = Payments {
+            seq: 1,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(&src_key, &mut from);
+
+        let own_board = OwnBoard {
+            state: &own_state,
+            address: "",
+            destination: None,
+        };
+        let plan = plan_leg(&own_board, &intent, &from, &src, 0).expect("LCA burn plans");
+
+        assert_eq!(plan.role, Role::Lca);
+        assert!(plan.terminal);
+        assert_eq!(plan.cursor, 1);
+        assert_eq!(plan.slots.len(), 1);
+        assert_eq!(plan.slots[0].index, 3);
+        assert_eq!(plan.slots[0].direction, Direction::Debit);
+        assert_eq!(plan.slots[0].entry.value, 400);
+        assert_eq!(plan.payment.phase, "terminal");
+        assert_eq!(plan.payment.status, "complete");
+        assert_eq!(plan.payment.next, ZERO_OWNER);
+    }
+
+    #[test]
+    fn dd_zero_final_hop_must_be_the_named_destination() {
+        let (src_key, src) = owner(1);
+        let (_own_key, own) = owner(2);
+        let (_other_key, other) = owner(5);
+
+        let mut own_state = board(4, &own, None);
+        own_state.slots[3] = slot(4, 500, &src);
+
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &other,
+            100,
+            "3",
+            "",
+            0,
+            "offered",
+            &own,
+            vec![],
+        );
+        let mut from = board(4, &src, Some(&own));
+        from.payments = Payments {
+            seq: 1,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(&src_key, &mut from);
+
+        let own_board = OwnBoard {
+            state: &own_state,
+            address: "",
+            destination: None,
+        };
+        assert_eq!(
+            plan_leg(&own_board, &intent, &from, &src, 0),
+            Err(AdvanceError::FinalDestination),
+            "the burn must accrue to the board named by dst"
+        );
+    }
+
+    #[test]
+    fn dd_zero_grandchild_pays_root_debits_then_terminal_lca() {
+        let (src_key, src) = owner(1);
+        let (mid_key, mid) = owner(2);
+        let (_root_key, root) = owner(3);
+
+        // Hop 0: the parent at "3" debits the slot naming "31".
+        let mut mid_state = board(4, &mid, Some(&root));
+        mid_state.slots[1] = slot(4, 1000, &src);
+
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &root,
+            100,
+            "31",
+            "",
+            0,
+            "offered",
+            &mid,
+            vec![],
+        );
+        let mut from_src = board(4, &src, Some(&mid));
+        from_src.payments = Payments {
+            seq: 1,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(&src_key, &mut from_src);
+
+        let mid_board = OwnBoard {
+            state: &mid_state,
+            address: "3",
+            destination: None,
+        };
+        let first = plan_leg(&mid_board, &intent, &from_src, &src, 0).expect("debit plans");
+        assert_eq!(first.role, Role::Debit);
+        assert_eq!(first.cursor, 1);
+        assert_eq!(first.slots[0].index, 1);
+        assert_eq!(first.slots[0].entry.value, 900);
+        assert_eq!(first.payment.next, root);
+        assert!(!first.terminal);
+
+        // Hop 1: the root is the LCA and the destination; its debit is the burn.
+        let leg = PaymentLeg {
+            slot: 1,
+            seq: 5,
+            post_value: 900,
+            sig: "aa".repeat(64),
+        };
+        let mut root_state = board(4, &root, None);
+        root_state.slots[3] = slot(7, 1000, &mid);
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &root,
+            100,
+            "31",
+            "",
+            1,
+            "acted",
+            &root,
+            vec![leg.clone()],
+        );
+        let mut from_mid = board(4, &mid, Some(&root));
+        from_mid.slots[1] = SlotState {
+            seq: 5,
+            entry: Some(entry(900, &src)),
+            sig: Some(leg.sig.clone()),
+        };
+        from_mid.payments = Payments {
+            seq: 6,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(&mid_key, &mut from_mid);
+
+        let root_board = OwnBoard {
+            state: &root_state,
+            address: "",
+            destination: None,
+        };
+        let second = plan_leg(&root_board, &intent, &from_mid, &mid, 0).expect("LCA burn plans");
+        assert_eq!(second.role, Role::Lca);
+        assert!(second.terminal);
+        assert_eq!(second.cursor, 2);
+        assert_eq!(second.slots.len(), 1);
+        assert_eq!(second.slots[0].index, 3);
+        assert_eq!(second.slots[0].entry.value, 900);
+        assert_eq!(second.payment.phase, "terminal");
+        assert_eq!(second.payment.next, ZERO_OWNER);
+    }
+
+    #[test]
+    fn ds_zero_source_leg_is_the_from_record_for_the_first_destination_child() {
+        let (src_key, src) = owner(1);
+        let (_own_key, own) = owner(2);
+        let (_dst_key, dst) = owner(4);
+
+        // The root/source publishes the intent already carrying its one leg at
+        // cursor 1. This is the record the first destination child reads.
+        let leg = PaymentLeg {
+            slot: 3,
+            seq: 7,
+            post_value: 600,
+            sig: "aa".repeat(64),
+        };
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &dst,
+            100,
+            "",
+            "31",
+            1,
+            "acted",
+            &own,
+            vec![leg.clone()],
+        );
+        let source = source_with_leg(4, &src_key, &src, None, &intent, 3, 7, 600, &own);
+
+        // The first destination-side child is "3"; it credits its own slot for
+        // its child at "31" and completes the route.
+        let mut own_state = board(4, &own, Some(&src));
+        own_state.slots[1] = slot(3, 500, &dst);
+        let destination = board(4, &dst, Some(&own));
+
+        let own_board = OwnBoard {
+            state: &own_state,
+            address: "3",
+            destination: Some(&destination),
+        };
+        let plan = plan_leg(&own_board, &intent, &source, &src, 0)
+            .expect("the source's acted+leg record backs the first credit");
+
+        assert_eq!(plan.role, Role::Credit);
+        assert!(plan.terminal);
+        assert_eq!(plan.cursor, 2);
+        assert_eq!(plan.slots.len(), 1);
+        assert_eq!(plan.slots[0].index, 1);
+        assert_eq!(plan.slots[0].entry.value, 600);
+        assert_eq!(plan.payment.next, ZERO_OWNER);
+    }
+
+    #[test]
+    fn dd_zero_insufficient_source_slot_aborts_negative() {
+        let (src_key, src) = owner(1);
+        let (_own_key, own) = owner(2);
+
+        let mut own_state = board(4, &own, None);
+        own_state.slots[3] = slot(4, 50, &src);
+
+        let intent = payment(
+            PAYMENT_ID,
+            &src,
+            &own,
+            100,
+            "3",
+            "",
+            0,
+            "offered",
+            &own,
+            vec![],
+        );
+        let mut from = board(4, &src, Some(&own));
+        from.payments = Payments {
+            seq: 1,
+            settled: vec![],
+            entry: Some(intent.clone()),
+            sig: None,
+        };
+        sign_from(&src_key, &mut from);
+
+        let own_board = OwnBoard {
+            state: &own_state,
+            address: "",
+            destination: None,
+        };
+        assert_eq!(
+            plan_leg(&own_board, &intent, &from, &src, 0),
+            Err(AdvanceError::Negative)
+        );
+    }
+
+    #[test]
+    fn reverse_phase_is_never_planned_forward() {
+        let (src_key, src) = owner(1);
+        let (_own_key, own) = owner(2);
+
+        for (src_addr, dst_addr) in [("3", ""), ("", "3")] {
+            let mut own_state = board(4, &own, None);
+            own_state.slots[3] = slot(4, 500, &src);
+
+            let mut intent = payment(
+                PAYMENT_ID,
+                &src,
+                &own,
+                100,
+                src_addr,
+                dst_addr,
+                0,
+                "offered",
+                &own,
+                vec![],
+            );
+            intent.phase = "reverse".to_owned();
+            intent.status = "reversing".to_owned();
+            let mut from = board(4, &src, Some(&own));
+            from.payments = Payments {
+                seq: 1,
+                settled: vec![],
+                entry: Some(intent.clone()),
+                sig: None,
+            };
+            sign_from(&src_key, &mut from);
+
+            let own_board = OwnBoard {
+                state: &own_state,
+                address: "",
+                destination: None,
+            };
+            assert_eq!(
+                plan_leg(&own_board, &intent, &from, &src, 0),
+                Err(AdvanceError::InvalidIntent),
+                "reverse entries are handled by the client, not forward planning"
+            );
+        }
     }
 }

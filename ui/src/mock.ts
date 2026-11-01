@@ -529,13 +529,14 @@ export class OfflineBoard implements BoardBackend {
                   : validatedEntry.legs.map((leg) => ({ ...leg })),
             };
 
-      if (
+      const sourceOrigin =
         signedEntry !== null &&
         signedEntry.src === this.identity.pubkey &&
-        signedEntry.cursor === 0 &&
-        signedEntry.phase === "forward" &&
-        signedEntry.status === "offered"
-      ) {
+        ((signedEntry.phase === "forward" &&
+          (signedEntry.cursor === 0 || signedEntry.cursor === 1)) ||
+          (signedEntry.phase === "terminal" &&
+            signedEntry.status === "complete"));
+      if (sourceOrigin && signedEntry !== null) {
         signedEntry = {
           ...signedEntry,
           id: paymentId(

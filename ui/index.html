@@ -218,32 +218,6 @@
                 </div>
               </dd>
             </div>
-            <div id="board-meta" class="meta-row meta-row--group-start" hidden>
-              <dt id="board-meta-label">Viewing</dt>
-              <dd>
-                <div class="meta-value">
-                  <div class="meta-line">
-                    <button id="board-copy" class="copy-button" type="button" disabled>
-                      <code id="board-owner">Loading…</code>
-                    </button>
-                    <span id="read-only-badge" class="state-badge state-badge--readonly" hidden>
-                      Read-only
-                    </span>
-                    <span
-                      id="legacy-badge"
-                      class="state-badge"
-                      data-state="legacy"
-                      hidden
-                    >
-                      Previous version
-                    </span>
-                  </div>
-                  <button id="board-home" class="meta-action" type="button" hidden>
-                    Home
-                  </button>
-                </div>
-              </dd>
-            </div>
             <div id="board-name-row" class="meta-row meta-row--group-start" hidden>
               <dt>Board name</dt>
               <dd>
@@ -269,11 +243,6 @@
                   <div class="meta-line">
                     <code id="parent-name" class="parent-name">Root</code>
                     <span id="parent-status" class="state-badge" role="status" hidden></span>
-                  </div>
-                  <div class="meta-actions">
-                    <button id="parent-open" class="meta-action" type="button" hidden>
-                      Open parent
-                    </button>
                   </div>
                   <p id="parent-note" class="meta-note" hidden>
                     Parent board is on the previous version.
@@ -478,10 +447,6 @@
             <h3 id="advanced-location-title" class="advanced-block-title">
               Where this board sits
             </h3>
-            <nav id="breadcrumbs" class="breadcrumbs" aria-label="Board path">
-              <ol id="breadcrumb-list" class="breadcrumb-list"></ol>
-              <p id="breadcrumb-warning" class="breadcrumb-warning" role="status" hidden></p>
-            </nav>
             <div class="board-head">
               <div class="board-head-main">
                 <div
@@ -675,7 +640,7 @@
                 <label class="field"><span>Destination octal address</span>
                   <input id="payment-address" name="payment-address" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 13" aria-describedby="payment-address-hint" />
                 </label>
-                <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>). The root itself is the empty address and cannot receive.</p>
+                <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>), or <code>root</code>. A root board can receive from boards below it.</p>
                 <label class="field"><span>Destination user ID</span>
                   <input id="payment-user" name="payment-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64-character public key" aria-describedby="payment-user-hint" />
                 </label>
@@ -861,9 +826,6 @@
                 <span id="child-link-status" class="state-badge" role="status">Checking…</span>
               </div>
               <p id="child-link-detail" class="field-hint" hidden></p>
-              <button id="child-open" class="button button--small" type="button">
-                Open child board
-              </button>
             </section>
 
             <label class="field">
