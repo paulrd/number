@@ -11,7 +11,7 @@
     -->
     <meta
       name="description"
-      content="A personal Freenet board with eight signed slots and a shared address book."
+      content="A personal board where one owner signs every change, with payments through the board tree."
     />
     <meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#11120f" media="(prefers-color-scheme: dark)" />
@@ -25,14 +25,130 @@
           <p class="eyebrow">Personal Freenet board</p>
           <div class="wordmark-row">
             <h1 class="wordmark">Tally</h1>
-            <p class="wordmark-tag" aria-hidden="true">
-              <span class="wordmark-count">08</span>
-              <span class="wordmark-word">slots</span>
-            </p>
           </div>
-          <p class="tagline">Eight slots. One owner. Two halves, both signed.</p>
+          <p class="tagline">One owner. One board. Every change signed.</p>
         </div>
 
+        <div class="header-actions">
+          <button
+            id="view-toggle"
+            class="button button--quiet"
+            type="button"
+            aria-controls="advanced-view"
+            aria-expanded="false"
+          >
+            Advanced
+          </button>
+        </div>
+
+      </header>
+
+      <div id="notice" class="notice" role="alert" aria-atomic="true" hidden>
+        <div class="notice-body">
+          <strong id="notice-title"></strong>
+          <p id="notice-text"></p>
+        </div>
+        <div class="notice-actions">
+          <button id="notice-action" class="button button--small" type="button" hidden>Retry</button>
+          <button id="notice-dismiss" class="icon-button" type="button" aria-label="Dismiss message">×</button>
+        </div>
+      </div>
+
+      <div id="warnings" class="warnings" role="status" hidden>
+        <strong>Heads up</strong>
+        <ul id="warning-list"></ul>
+      </div>
+
+      <main class="board-section">
+        <section
+          id="simple-view"
+          class="simple-view"
+          aria-labelledby="board-title"
+        >
+          <article id="parent-value" class="record-card">
+            <p id="parent-value-title" class="record-eyebrow">Held by your parent</p>
+            <h2 id="board-title" class="record-title" tabindex="-1">Your board</h2>
+            <p id="parent-value-figure" class="record-figure" hidden>
+              <span class="sr-only">Value: </span>
+              <span id="parent-value-amount" class="record-amount">—</span>
+              <span id="parent-value-unit" class="record-unit" hidden></span>
+            </p>
+            <p id="parent-value-recorded" class="record-recorded" hidden></p>
+            <p id="parent-value-note" class="record-note" hidden></p>
+            <p id="parent-value-empty" class="record-empty" hidden></p>
+            <span id="parent-value-board" class="sr-only"></span>
+            <span id="parent-value-state" class="sr-only" hidden></span>
+          </article>
+
+          <p id="simple-payment-waiting" class="simple-payment-waiting" hidden>
+            A payment is waiting for your signature.
+            <button id="simple-payment-review" class="link-button" type="button">
+              Review in Advanced
+            </button>
+          </p>
+
+          <div class="simple-actions">
+            <div class="simple-action-group">
+              <button
+                id="simple-pay"
+                class="button button--primary simple-action"
+                type="button"
+                aria-haspopup="dialog"
+                aria-controls="payment-dialog"
+                aria-describedby="simple-pay-reason"
+                disabled
+              >
+                Send payment
+              </button>
+              <p id="simple-pay-reason" class="action-reason" hidden></p>
+            </div>
+
+            <div class="simple-action-group">
+              <button
+                id="simple-contacts"
+                class="button simple-action"
+                type="button"
+                aria-haspopup="dialog"
+                aria-controls="contacts-dialog"
+                aria-describedby="simple-contacts-reason"
+                disabled
+              >
+                Address book
+              </button>
+              <p id="simple-contacts-reason" class="action-reason" hidden></p>
+            </div>
+
+            <div class="simple-action-group">
+              <button
+                id="simple-receive-link"
+                class="button simple-action"
+                type="button"
+                aria-describedby="simple-receive-reason"
+                disabled
+              >
+                Copy receive-payment link
+              </button>
+              <p id="simple-receive-reason" class="action-reason" hidden></p>
+              <p
+                id="simple-receive-status"
+                class="action-status"
+                role="status"
+                aria-live="polite"
+              ></p>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="advanced-view"
+          class="advanced-view"
+          aria-labelledby="advanced-title"
+          hidden
+        >
+          <h2 id="advanced-title" class="advanced-title" tabindex="-1">Advanced</h2>
+
+          <section class="advanced-block" aria-labelledby="advanced-board-title">
+            <h3 id="advanced-board-title" class="advanced-block-title">Your board</h3>
         <div class="connection-block">
           <div class="status-row">
             <span id="status-pill" class="status-pill" data-status="starting" role="status" aria-live="polite">
@@ -163,10 +279,14 @@
               </dd>
             </div>
           </dl>
+            </div>
+          </section>
 
+          <section class="advanced-block" aria-labelledby="advanced-details-title">
+            <h3 id="advanced-details-title" class="advanced-block-title">Details</h3>
           <details id="details" class="meta-details">
             <summary id="details-summary">
-              Details
+              Contract and background payments
               <span
                 id="details-attention"
                 class="details-attention"
@@ -185,6 +305,8 @@
               </div>
             </dl>
 
+            <p id="cleared-slots" class="advanced-fact">No cleared slots.</p>
+
             <section
               id="auto-advance"
               class="auto-advance"
@@ -192,9 +314,9 @@
               aria-describedby="auto-advance-copy"
             >
               <div class="auto-advance-head">
-                <h2 id="auto-advance-title" class="auto-advance-title">
+                <h4 id="auto-advance-title" class="auto-advance-title">
                   Background payments
-                </h2>
+                </h4>
                 <span
                   id="auto-advance-badge"
                   class="state-badge"
@@ -330,155 +452,163 @@
               </div>
             </section>
           </details>
-        </div>
-      </header>
+          </section>
 
-      <div id="notice" class="notice" role="alert" aria-atomic="true" hidden>
-        <div class="notice-body">
-          <strong id="notice-title"></strong>
-          <p id="notice-text"></p>
-        </div>
-        <div class="notice-actions">
-          <button id="notice-action" class="button button--small" type="button" hidden>Retry</button>
-          <button id="notice-dismiss" class="icon-button" type="button" aria-label="Dismiss message">×</button>
-        </div>
-      </div>
-
-      <div id="warnings" class="warnings" role="status" hidden>
-        <strong>Heads up</strong>
-        <ul id="warning-list"></ul>
-      </div>
-
-      <main class="board-section">
-        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Board path">
-          <ol id="breadcrumb-list" class="breadcrumb-list"></ol>
-          <p id="breadcrumb-warning" class="breadcrumb-warning" role="status" hidden></p>
-        </nav>
-        <div class="board-head">
-          <div class="board-head-main">
-            <h2 id="board-title" class="board-title" tabindex="-1">The board</h2>
-            <div
-              id="board-address"
-              class="board-address"
-              role="group"
-              aria-label="Octal address"
-              hidden
-            >
-              <span class="board-address-label" aria-hidden="true">Octal address</span>
-              <code
-                id="board-address-value"
-                class="board-address-value"
-                aria-hidden="true"
-              ></code>
-              <span
-                id="board-address-note"
-                class="board-address-note"
-                aria-hidden="true"
-                hidden
-              ></span>
+          <section class="advanced-block" aria-labelledby="advanced-location-title">
+            <h3 id="advanced-location-title" class="advanced-block-title">
+              Where this board sits
+            </h3>
+            <nav id="breadcrumbs" class="breadcrumbs" aria-label="Board path">
+              <ol id="breadcrumb-list" class="breadcrumb-list"></ol>
+              <p id="breadcrumb-warning" class="breadcrumb-warning" role="status" hidden></p>
+            </nav>
+            <div class="board-head">
+              <div class="board-head-main">
+                <div
+                  id="board-address"
+                  class="board-address"
+                  role="group"
+                  aria-label="Octal address"
+                  hidden
+                >
+                  <span class="board-address-label" aria-hidden="true">Octal address</span>
+                  <code
+                    id="board-address-value"
+                    class="board-address-value"
+                    aria-hidden="true"
+                  ></code>
+                  <span
+                    id="board-address-note"
+                    class="board-address-note"
+                    aria-hidden="true"
+                    hidden
+                  ></span>
+                </div>
+              </div>
+              <p id="board-mode" class="board-meta">Signed · two decimals</p>
             </div>
-          </div>
-          <p id="board-mode" class="board-meta">Signed · two decimals</p>
-        </div>
-        <section
-          id="parent-value"
-          class="parent-value"
-          aria-labelledby="parent-value-title"
-          hidden
-        >
-          <div class="parent-value-head">
-            <h3 id="parent-value-title" class="parent-value-title">Held by parent</h3>
-            <p class="parent-value-meta">
-              <span id="parent-value-board" class="parent-value-board"></span>
-              <span id="parent-value-slot" class="parent-value-slot"></span>
-              <span id="parent-value-state" class="state-badge" hidden></span>
+          </section>
+
+          <section id="payments" class="payments advanced-block" aria-labelledby="payments-title" hidden>
+            <div class="payments-head">
+              <div class="payments-heading">
+                <p class="eyebrow">Ledger</p>
+                <h3 id="payments-title" class="payments-title">Payments</h3>
+              </div>
+              <div class="payments-actions">
+                <button id="payment-check" class="meta-action" type="button">Check for payments</button>
+                <button id="payment-open-ledger" class="button button--small button--primary" type="button" aria-haspopup="dialog" aria-controls="payment-dialog">Send a payment…</button>
+              </div>
+            </div>
+            <p id="payment-note" class="payment-note">Payments move one board at a time. Each owner opens their board to sign their leg.</p>
+            <div id="payment-status" class="payment-status" hidden>
+              <span id="payment-status-badge" class="state-badge" role="status"></span>
+              <div class="payment-status-copy">
+                <p id="payment-status-title" class="payment-status-title"></p>
+                <p id="payment-status-detail" class="payment-status-detail"></p>
+                <p id="payment-status-route" class="payment-status-route"></p>
+                <button
+                  id="payment-withdraw"
+                  class="meta-action payment-withdraw"
+                  type="button"
+                  hidden
+                >
+                  Withdraw offer
+                </button>
+                <button
+                  id="payment-clear"
+                  class="meta-action payment-withdraw"
+                  type="button"
+                  hidden
+                >
+                  Clear stuck payment
+                </button>
+              </div>
+            </div>
+            <div id="payment-inbox" class="payment-inbox" tabindex="-1" hidden>
+              <h4 class="payment-inbox-title">Waiting for you</h4>
+              <ul id="payment-inbox-list" class="payment-inbox-list"></ul>
+            </div>
+            <p id="payment-empty" class="payment-empty">No payment activity.</p>
+          </section>
+
+          <section class="advanced-block" aria-labelledby="child-slots-title">
+            <h3 id="child-slots-title" class="advanced-block-title">
+              Child slots (0 of 8)
+            </h3>
+            <div
+              id="board"
+              class="slot-grid"
+              role="group"
+              aria-label="Child slots"
+              aria-describedby="child-slots-hint"
+            ></div>
+            <p id="child-slots-empty" class="advanced-empty">No child slots yet.</p>
+            <button id="add-child-slot" class="button button--small advanced-add" type="button">
+              Add a child slot
+            </button>
+            <p id="child-slots-hint" class="advanced-hint">
+              A child slot records a value for one child board. A board holds up
+              to 8. A link counts as a child only when both boards name each
+              other.
             </p>
-          </div>
-          <p id="parent-value-figure" class="parent-value-figure" hidden>
-            <span class="sr-only">Value: </span>
-            <span id="parent-value-amount" class="parent-value-amount">—</span>
-            <span id="parent-value-unit" class="parent-value-unit" hidden></span>
-          </p>
-          <p id="parent-value-change" class="parent-value-change" hidden></p>
-          <p id="parent-value-note" class="parent-value-note" hidden></p>
-          <p id="parent-value-empty" class="parent-value-empty" hidden></p>
-          <div
-            id="parent-adjustments"
-            class="parent-adjustments"
+          </section>
+
+          <section
+            id="unconfirmed-slots"
+            class="advanced-block"
+            aria-labelledby="unconfirmed-title"
+          >
+            <h3 id="unconfirmed-title" class="advanced-block-title">
+              Unconfirmed slots
+            </h3>
+            <ul id="unconfirmed-list" class="unconfirmed-list"></ul>
+            <p id="unconfirmed-empty" class="advanced-empty">
+              No unconfirmed slots.
+            </p>
+          </section>
+
+          <section
+            id="advanced-adjustments"
+            class="advanced-block"
             aria-labelledby="parent-adjustments-title"
             hidden
           >
-            <div class="parent-adjustments-head">
-              <h4 id="parent-adjustments-title" class="parent-adjustments-title">
-                Recent adjustments
-              </h4>
-              <p id="parent-adjustments-meta" class="parent-adjustments-meta"></p>
-            </div>
-            <ol
-              id="parent-adjustments-list"
-              class="adjustment-list"
+            <h3 id="parent-adjustments-title" class="advanced-block-title">
+              Adjustments
+            </h3>
+            <p id="parent-value-change" class="parent-value-change" hidden></p>
+            <span id="parent-value-slot" class="sr-only"></span>
+            <div
+              id="parent-adjustments"
+              class="parent-adjustments"
               aria-labelledby="parent-adjustments-title"
-            ></ol>
-            <p id="parent-adjustments-empty" class="parent-adjustments-empty" hidden></p>
+            >
+              <div class="parent-adjustments-head">
+                <p id="parent-adjustments-meta" class="parent-adjustments-meta"></p>
+              </div>
+              <ol
+                id="parent-adjustments-list"
+                class="adjustment-list"
+                aria-labelledby="parent-adjustments-title"
+              ></ol>
+              <p id="parent-adjustments-empty" class="parent-adjustments-empty" hidden></p>
+            </div>
+          </section>
+
+          <div class="advanced-footnote">
+            <p id="board-hint" class="board-hint">
+              Select a slot to issue or burn the liability it holds for its child, or
+              to change the contact, unit, or note. Amounts show two decimal places,
+              and a burn cannot take a liability below 0.00. A slot stores the child's
+              key, so renaming a contact keeps the link, but the name the child sees
+              is the one signed with the slot: rename the contact and save the slot
+              again to change it. Every change is signed by the owner key and merged
+              by the contract. Clearing a slot records that it was cleared, so an
+              older copy cannot bring it back.
+            </p>
           </div>
         </section>
-        <section id="payments" class="payments" aria-labelledby="payments-title" hidden>
-          <div class="payments-head">
-            <div class="payments-heading">
-              <p class="eyebrow">Ledger</p>
-              <h2 id="payments-title" class="payments-title">Payments</h2>
-            </div>
-            <div class="payments-actions">
-              <button id="payment-check" class="meta-action" type="button">Check for payments</button>
-              <button id="payment-open" class="button button--small button--primary" type="button" aria-haspopup="dialog" aria-controls="payment-dialog">Make a payment…</button>
-            </div>
-          </div>
-          <p id="payment-note" class="payment-note">Payments move one board at a time. Each owner opens their board to sign their leg.</p>
-          <div id="payment-status" class="payment-status" hidden>
-            <span id="payment-status-badge" class="state-badge" role="status"></span>
-            <div class="payment-status-copy">
-              <p id="payment-status-title" class="payment-status-title"></p>
-              <p id="payment-status-detail" class="payment-status-detail"></p>
-              <p id="payment-status-route" class="payment-status-route"></p>
-              <button
-                id="payment-withdraw"
-                class="meta-action payment-withdraw"
-                type="button"
-                hidden
-              >
-                Withdraw offer
-              </button>
-              <button
-                id="payment-clear"
-                class="meta-action payment-withdraw"
-                type="button"
-                hidden
-              >
-                Clear stuck payment
-              </button>
-            </div>
-          </div>
-          <div id="payment-inbox" class="payment-inbox" hidden>
-            <h3 class="payment-inbox-title">Waiting for you</h3>
-            <ul id="payment-inbox-list" class="payment-inbox-list"></ul>
-          </div>
-          <p id="payment-empty" class="payment-empty">No payment activity.</p>
-        </section>
-        <div
-          id="board"
-          class="slot-grid"
-          role="group"
-          aria-label="Number board"
-          aria-describedby="board-hint"
-        ></div>
-        <p id="board-hint" class="board-hint">
-          Select a slot to issue or burn the liability it holds for its child, or
-          to change the contact, unit, or note. Amounts show two decimal places,
-          and a burn cannot take a liability below 0.00. Slots keep the contact's
-          key, so renaming a label keeps the link. Every change is signed by the
-          owner key and merged by the contract. Clearing a slot records that it
-          was cleared, so an older copy cannot bring it back.
-        </p>
       </main>
 
       <footer class="site-footer">
@@ -495,36 +625,50 @@
         </a>
       </footer>
 
-      <dialog id="payment-dialog" class="editor payment-dialog" aria-labelledby="payment-dialog-title" aria-describedby="payment-dialog-desc payment-amount-hint">
+      <dialog id="payment-dialog" class="editor payment-dialog" aria-labelledby="payment-dialog-title" aria-describedby="payment-dialog-desc payment-recipient-status payment-amount-hint">
         <form id="payment-form" class="editor-form" novalidate>
           <header class="editor-header">
             <div>
-              <p class="eyebrow">Cooperative payment</p>
-              <h2 id="payment-dialog-title" tabindex="-1">Make a payment</h2>
-              <p id="payment-dialog-desc" class="identity-intro">The amount moves up to the least common ancestor, then down to the destination. Every board owner signs only their own leg, so each hop waits for that owner.</p>
+              <p class="eyebrow">Payment</p>
+              <h2 id="payment-dialog-title" tabindex="-1">Send a payment</h2>
+              <p id="payment-dialog-desc" class="identity-intro">The amount moves up to the board you share and down to theirs. Each owner signs their own part, so it waits for them.</p>
             </div>
             <button id="payment-close" class="icon-button" type="button" aria-label="Close payment">×</button>
           </header>
           <div class="editor-body">
-            <label class="field"><span>Destination octal address</span>
-              <input id="payment-address" name="payment-address" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 13" aria-describedby="payment-address-hint" />
-            </label>
-            <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>). The root itself is the empty address and cannot receive.</p>
-            <label class="field"><span>Destination user ID</span>
-              <input id="payment-user" name="payment-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64-character public key" aria-describedby="payment-user-hint" />
-            </label>
-            <p id="payment-user-hint" class="field-hint">The owner of the board at that address. The payment is reversed if the id does not match.</p>
+            <div class="payment-recipient">
+              <label class="field" for="payment-recipient"><span>Recipient</span>
+                <select id="payment-recipient" name="payment-recipient" aria-describedby="payment-recipient-status">
+                  <option value="">Choose someone…</option>
+                </select>
+              </label>
+              <button id="payment-address-book" class="button button--small" type="button" aria-haspopup="dialog" aria-controls="contacts-dialog">Address book</button>
+            </div>
+            <p id="payment-recipient-status" class="payment-recipient-status field-hint" role="status" aria-live="polite"></p>
             <label class="field"><span>Amount</span>
               <input id="payment-amount" name="payment-amount" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="e.g. 12.50" aria-describedby="payment-amount-hint" />
             </label>
             <p id="payment-amount-hint" class="field-hint">Positive, up to two decimals. Every debit must stay at or above 0.00 or the payment is reversed.</p>
+            <details id="payment-direct" class="payment-direct">
+              <summary>Pay an address directly</summary>
+              <div class="payment-direct-body">
+                <label class="field"><span>Destination octal address</span>
+                  <input id="payment-address" name="payment-address" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 13" aria-describedby="payment-address-hint" />
+                </label>
+                <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>). The root itself is the empty address and cannot receive.</p>
+                <label class="field"><span>Destination user ID</span>
+                  <input id="payment-user" name="payment-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64-character public key" aria-describedby="payment-user-hint" />
+                </label>
+                <p id="payment-user-hint" class="field-hint">The owner of the board at that address. The payment is reversed if the id does not match.</p>
+              </div>
+            </details>
             <p id="payment-warning" class="field-warning" role="status" hidden></p>
             <p id="payment-error" class="form-error" role="alert" hidden></p>
           </div>
           <footer class="editor-actions">
             <div class="editor-actions-right">
               <button id="payment-cancel" class="button button--quiet" type="button">Cancel</button>
-              <button id="payment-submit" class="button button--primary" type="submit">Offer payment</button>
+              <button id="payment-submit" class="button button--primary" type="submit">Send payment</button>
             </div>
           </footer>
         </form>
@@ -1174,11 +1318,9 @@
               <p class="eyebrow">Address book</p>
               <h2 id="contacts-title" tabindex="-1">Contacts</h2>
               <p id="contacts-desc" class="contacts-intro">
-                A contact is a private label for a public key. Slots store the key, so
-                renaming a label keeps the link. Removing a contact leaves its key on
-                any slot that already uses it, and the name already saved into a slot
-                stays on the signed board. Your board's own name is edited from the
-                header and is not listed here.
+                A contact is a private label for a public key. Renaming one
+                changes only your label, never the signed name a parent already
+                wrote.
               </p>
             </div>
             <button
@@ -1192,6 +1334,27 @@
           </header>
 
           <div class="editor-body">
+            <p id="contacts-status" class="contacts-status" role="status" aria-live="polite"></p>
+
+            <section id="contacts-invite" class="contacts-invite" aria-labelledby="contacts-invite-title" hidden>
+              <p class="eyebrow">From a link</p>
+              <h3 id="contacts-invite-title">Someone shared their board with you.</h3>
+              <dl class="contacts-invite-facts">
+                <div class="contacts-invite-fact">
+                  <dt>Board address</dt>
+                  <dd><code id="contacts-invite-address">not set</code></dd>
+                </div>
+                <div class="contacts-invite-fact">
+                  <dt>Their key</dt>
+                  <dd><code id="contacts-invite-key"></code></dd>
+                </div>
+              </dl>
+              <p class="field-hint">
+                The sender supplied this address; it is checked again when a payment is planned.
+              </p>
+              <p class="field-hint">Nothing is saved until you choose Add contact below.</p>
+            </section>
+
             <section class="contacts-section" aria-labelledby="contacts-list-title">
               <div class="contacts-section-head">
                 <h3 id="contacts-list-title">Saved contacts</h3>
@@ -1224,7 +1387,7 @@
               </div>
 
               <p id="contacts-empty" class="contacts-empty">
-                No contacts yet. Add one below to start saving slots.
+                No contacts yet.
               </p>
             </section>
 
@@ -1263,6 +1426,25 @@
                   saved in lowercase.
                 </p>
                 <p id="contact-userid-warning" class="field-warning" role="status" hidden></p>
+
+                <label class="field">
+                  <span>Octal address (optional)</span>
+                  <input
+                    id="contact-address-input"
+                    name="contact-address"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    placeholder="e.g. 03"
+                    aria-describedby="contact-address-hint contact-address-warning"
+                  />
+                </label>
+                <p id="contact-address-hint" class="field-hint">
+                  Digits 0–7 from the root, e.g. 03. Needed to pay them.
+                </p>
+                <p id="contact-address-warning" class="field-warning" role="status" hidden></p>
                 <p id="contacts-error" class="form-error contacts-error" role="alert" hidden></p>
 
                 <div class="contacts-form-actions">

@@ -26,16 +26,36 @@ function watchConsole(page: Page): string[] {
   return errors;
 }
 
+/** Switch to the advanced surface (the editor, slots and ledger live there). */
+async function openAdvanced(page: Page): Promise<void> {
+  if (await page.locator("#advanced-view").isVisible()) return;
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#advanced-view")).toBeVisible();
+  await expect(page.locator("#simple-view")).toBeHidden();
+}
+
+async function openSimple(page: Page): Promise<void> {
+  if (await page.locator("#simple-view").isVisible()) return;
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#advanced-view")).toBeHidden();
+}
+
 /** Add a contact through the header address book and close it again. */
 async function addContact(
   page: Page,
   label: string,
   rawUserId: string,
+  address?: string,
 ): Promise<void> {
+  await openAdvanced(page);
   await page.locator("#contacts-open").click();
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await page.locator("#contact-label-input").fill(label);
   await page.locator("#contact-userid-input").fill(rawUserId);
+  if (address !== undefined) {
+    await page.locator("#contact-address-input").fill(address);
+  }
   await page.locator("#contact-add-button").click();
   await expect(page.locator("#contacts-list")).toContainText(label);
   // The saved id is normalised to lowercase on the way in.
@@ -54,7 +74,10 @@ async function saveDetails(
   slotIndex: number,
   userId: string,
 ): Promise<void> {
-  await page.locator(".slot").nth(slotIndex).click();
+  await openAdvanced(page);
+  const slot = page.locator(".slot").nth(slotIndex);
+  if (await slot.isVisible()) await slot.click();
+  else await page.locator("#add-child-slot").click();
   await expect(page.locator("#editor")).toBeVisible();
   await page.locator("#contact-select").selectOption(userId);
   await page.locator("#save-button").click();
@@ -69,6 +92,7 @@ async function adjust(
   amount: string,
   note = "",
 ): Promise<void> {
+  await openAdvanced(page);
   await page.locator(".slot").nth(slotIndex).click();
   await expect(page.locator("#editor")).toBeVisible();
   if (direction === "burn") await page.locator("#adjust-burn").check();
@@ -84,11 +108,21 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   page,
 }) => {
   const errors = watchConsole(page);
-  const aliceId = ALICE_ID.toLowerCase();
+  const aliceId = MOCK_CHILD_ID;
 
   await page.goto("/");
 
+  // The default surface is the record card, three actions and nothing else.
   await expect(page.getByRole("heading", { level: 1, name: "Tally" })).toBeVisible();
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#advanced-view")).toBeHidden();
+  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#simple-pay")).toBeDisabled();
+  await expect(page.locator("#simple-pay-reason")).toContainText("no parent");
+  await expect(page.locator("#simple-view")).not.toContainText(/slot/i);
+  await expect(page.locator("#simple-view .button")).toHaveCount(3);
+
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#identity-short")).toBeVisible();
@@ -101,8 +135,11 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#contacts-count")).toHaveText("0");
 
   // The editor starts without contacts: a clear hint and a disabled Save. The
-  // liability block explains that a contact must be saved first.
-  await page.locator(".slot").first().click();
+  // liability block explains that a contact must be saved first. There are no
+  // mutual children yet, so the empty grid offers the add control instead.
+  await expect(page.locator("#child-slots-title")).toHaveText("Child slots (0 of 8)");
+  await expect(page.locator("#child-slots-empty")).toBeVisible();
+  await page.locator("#add-child-slot").click();
   await expect(page.locator("#adjust-panel")).toBeVisible();
   await expect(page.locator("#adjust-empty")).toBeVisible();
   await expect(page.locator("#adjust-empty")).toContainText(
@@ -119,7 +156,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#contacts-title")).toBeFocused();
   await expect(page.locator("#contacts-dialog-count")).toHaveText("0 of 64");
   await page.locator("#contact-label-input").fill("Alice");
-  await page.locator("#contact-userid-input").fill(ALICE_ID);
+  await page.locator("#contact-userid-input").fill(MOCK_CHILD_ID);
   await page.locator("#contact-add-button").click();
   await expect(page.locator("#contacts-dialog")).toBeHidden();
   await expect(page.locator("#contact-select")).toHaveValue(aliceId);
@@ -200,17 +237,18 @@ test("a saved slot starts at 0.00 and more than two decimals is rejected", async
   page,
 }) => {
   const errors = watchConsole(page);
-  const bobId = BOB_ID.toLowerCase();
+  const bobId = MOCK_PAYER_ID;
 
   await page.goto("/");
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
-  await addContact(page, "Alice", ALICE_ID);
-  await addContact(page, "Bob", BOB_ID);
+  await addContact(page, "Alice", MOCK_CHILD_ID);
+  await addContact(page, "Bob", MOCK_PAYER_ID);
   await expect(page.locator("#contacts-count")).toHaveText("2");
 
   // Details-only save: the value stays at zero hundredths, and an empty amount
   // leaves the issue/burn action disabled with no warning.
-  await saveDetails(page, 0, ALICE_ID.toLowerCase());
+  await saveDetails(page, 0, MOCK_CHILD_ID);
   await expect(page.locator(".slot .slot-value").first()).toHaveText("0.00");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Alice");
   await page.locator(".slot").first().click();
@@ -252,11 +290,12 @@ test("issues and reopens the largest amount the editor accepts exactly", async (
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
-  await addContact(page, "Bob", BOB_ID);
-  await addContact(page, "Carol", CAROL_ID);
-  const bobId = BOB_ID.toLowerCase();
-  const carolId = CAROL_ID.toLowerCase();
+  await addContact(page, "Bob", MOCK_CHILD_ID);
+  await addContact(page, "Carol", MOCK_PAYER_ID);
+  const bobId = MOCK_CHILD_ID;
+  const carolId = MOCK_PAYER_ID;
 
   // i64 max is the contract's largest slot value. The editor and the bigint
   // delta path must carry it exactly, without going through a JS float.
@@ -326,6 +365,10 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#parent-value-empty")).toContainText("no parent");
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#board-meta")).toBeHidden();
   await expect(page.locator("#identity-short")).toBeVisible();
@@ -336,7 +379,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#breadcrumb-list .breadcrumb-current")).toHaveText(
     "My board",
   );
-  // A root's octal address is the empty string, and it has no parent value.
+  // A root's octal address is the empty string, and the simple card is hidden.
   await expect(page.locator("#board-address")).toBeVisible();
   await expect(page.locator("#board-address")).toHaveAttribute("data-address", "");
   await expect(page.locator("#board-address-value")).toHaveText("");
@@ -348,7 +391,7 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#contacts-count")).toHaveText("3");
 
   // A child slot is Linked when both signed sides agree.
-  await page.locator(".slot").first().click();
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await expect(page.locator("#child-link-detail")).toContainText(
@@ -401,11 +444,10 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   // The own board is still a root here, and slot 0 holds the child.
   await expect(page.locator("#board-address")).toHaveAttribute("data-address", "0");
   await expect(page.locator("#board-address-value")).toHaveText("0");
-  // The parent (the own board) holds 3.25 for this child; show it prominently.
-  await expect(page.locator("#parent-value")).toBeVisible();
-  await expect(page.locator("#parent-value")).toContainText("3.25");
-  await expect(page.locator("#parent-value")).toContainText("kg");
-  await expect(page.locator("#parent-value")).toContainText("My board");
+  // The parent (the own board) holds 3.25 for this child; Advanced shows the
+  // child-facing adjustment log rather than the simple card.
+  await expect(page.locator("#advanced-adjustments")).toBeVisible();
+  await expect(page.locator("#parent-adjustments")).toContainText("3.25");
   // A later details save moves the slot sequence on without changing the value;
   // the band explains that the log is only a hint.
   await expect(page.locator("#parent-value-change")).toBeVisible();
@@ -431,8 +473,9 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   );
 
   // A one-sided child link is Pending: the parent fixture exists, but its own
-  // parent is empty, so it has not added this board as a parent.
-  await page.locator(".slot").nth(1).click();
+  // parent is empty, so it has not added this board as a parent. It leaves the
+  // grid and is listed as an unconfirmed fact instead.
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Pending");
   await expect(page.locator("#child-link-detail")).toContainText(
@@ -440,11 +483,8 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   );
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
-  await page.locator(".slot").nth(1).click();
-  await page.locator("#adjust-amount").fill("1.00");
-  await page.locator("#adjust-submit").click();
-  await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
-  await page.locator("#cancel-button").click();
+  await expect(page.locator("#unconfirmed-list")).toContainText("Parent");
+  await expect(page.locator("#child-slots-title")).toHaveText("Child slots (1 of 8)");
 
   // Setting this board's parent to the child would close a loop, so it is
   // blocked before anything is signed.
@@ -475,16 +515,23 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   await expect(page.locator("#board-name-row")).toBeVisible();
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  // The own board's address is the parent's empty address plus slot digit 0,
-  // and the parent's value for it is shown prominently.
+  // The own board's address is the parent's empty address plus slot digit 0.
   await expect(page.locator("#board-address")).toHaveAttribute("data-address", "0");
   await expect(page.locator("#board-address-value")).toHaveText("0");
-  await expect(page.locator("#parent-value")).toBeVisible();
+
+  // The default surface shows the value as given by the parent.
+  await openSimple(page);
+  await expect(page.locator("#board-title")).toHaveText("My board");
+  await expect(page.locator("#parent-value-title")).toContainText("Held by Parent board");
   await expect(page.locator("#parent-value")).toContainText("8.50");
   await expect(page.locator("#parent-value")).toContainText("kg");
-  await expect(page.locator("#parent-value")).toContainText("Parent");
+  await expect(page.locator("#parent-value-recorded")).toContainText(
+    "Recorded by Parent board",
+  );
+  await openAdvanced(page);
 
-  // The new address chip and parent-value band must pass with a linked parent.
+  // The new address chip and adjustments block must pass with a linked parent.
+  await page.waitForTimeout(250);
   const parentAccessibility = await new AxeBuilder({ page }).analyze();
   expect(
     parentAccessibility.violations,
@@ -492,22 +539,21 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   ).toEqual([]);
 
   // Duplicate child ids are rejected before saving.
-  await page.locator(".slot").nth(2).click();
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await expect(page.locator("#contact-hint")).toContainText("already in slot 1");
   await expect(page.locator("#save-button")).toBeDisabled();
   await page.locator("#cancel-button").click();
 
-  // A contact with no board is "Not created yet"; the slot still saves.
-  await page.locator(".slot").nth(3).click();
+  // A contact with no board is "Not created yet"; the slot still saves and is
+  // listed as an unconfirmed fact.
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(GHOST_ID);
-  await page.locator("#save-button").click();
-  await expect(page.locator("#editor")).toBeHidden();
-  await expect(page.locator(".slot .slot-label").nth(3)).toHaveText("Ghost");
-  await page.locator(".slot").nth(3).click();
   await expect(page.locator("#child-link-status")).toHaveText("Not created yet");
   await expect(page.locator("#child-open")).toBeDisabled();
-  await page.locator("#cancel-button").click();
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await expect(page.locator("#unconfirmed-list")).toContainText("Ghost");
 
   // Clearing the parent returns this board to a root.
   await page.locator("#parent-clear").click();
@@ -523,10 +569,85 @@ test("navigates boards as a tree, sets a parent, and rejects duplicate children"
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
+test("excludes a remote one-sided slot from the count and navigation", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Sibling", MOCK_SIBLING_ID);
+
+  // Own board -> Sibling is one-sided (Sibling names the Parent). Its pending
+  // row can still be opened, then Sibling's mutual parent opens the Parent.
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_SIBLING_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Pending");
+  await page.locator("#parent-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Sibling board");
+  await page.locator("#parent-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Parent board");
+
+  // Parent's slot 0 points at this board, but this board names Sibling, so the
+  // slot is one-sided. Only slot 1 (Sibling names Parent) is a child here.
+  await page.waitForTimeout(300);
+  await expect(page.locator("#child-slots-title")).toHaveText(
+    "Child slots (1 of 8)",
+  );
+  const oneSided = page.locator(".slot").first();
+  await expect(oneSided).toBeHidden();
+  await expect(oneSided).toBeDisabled();
+  await expect(page.locator(".slot").nth(1)).toBeVisible();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("paints only the board-on-screen parent adjustments", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+
+  // Own board records a liability for Child, and links upward to Parent.
+  await saveDetails(page, 0, MOCK_CHILD_ID);
+  await adjust(page, 0, "issue", "3.25");
+  await page.locator("#cancel-button").click();
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+
+  // Child's parent is this board, so the log on screen must be this board's
+  // adjustment for Child, not the own board's parent ledger.
+  await page.locator(".slot").first().click();
+  await page.locator("#child-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Child board");
+  await page.waitForTimeout(250);
+  await expect(page.locator("#advanced-adjustments")).toBeVisible();
+  await expect(page.locator("#parent-adjustments")).toContainText("+3.25");
+  await expect(page.locator("#parent-adjustments")).not.toContainText(
+    "has not issued or burned",
+  );
+
+  // Parent is a root: the block is cleared rather than keeping the last log.
+  await page.locator("#board-home").click();
+  await page.locator("#parent-open").click();
+  await expect(page.locator("#board-owner")).toContainText("Parent board");
+  await page.waitForTimeout(250);
+  await expect(page.locator("#advanced-adjustments")).toBeHidden();
+  await expect(page.locator("#parent-adjustments")).toBeHidden();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
 test("keeps the contract id in a closed Details section", async ({ page }) => {
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#details")).not.toHaveAttribute("open", "");
   await expect(page.locator("#contract-copy")).toBeHidden();
@@ -538,6 +659,9 @@ test("keeps the contract id in a closed Details section", async ({ page }) => {
   await expect(page.locator("#contract-short")).not.toHaveText("Not derived");
   await expect(page.locator("#contract-copy")).toBeEnabled();
 
+  // Let the connection plate's entrance animation finish before axe reads the
+  // computed colours; mid-animation opacity lowers the status pill's contrast.
+  await page.waitForTimeout(600);
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
     accessibility.violations,
@@ -577,10 +701,13 @@ test("requires a board name on first load and cannot be dismissed", async ({
   await page.locator("#board-name-input").fill("Test board");
   await page.locator("#board-name-save").click();
   await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await openAdvanced(page);
   await expect(page.locator("#board-name-row")).toBeVisible();
   await expect(page.locator("#board-name")).toHaveText("Test board");
   await expect(page.locator("#contacts-count")).toHaveText("0");
 
+  // Let the modal close settle before axe samples the page colours.
+  await page.waitForTimeout(250);
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
     accessibility.violations,
@@ -596,6 +723,7 @@ test("renames the board as a signed name, separate from contact labels", async (
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await openAdvanced(page);
   await expect(page.locator("#board-name")).toHaveText("My board");
 
   await page.locator("#board-name-edit").click();
@@ -659,7 +787,7 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await addContact(page, "Parent", MOCK_PARENT_ID);
 
   // Set up the child slot and a mutual parent link.
-  await page.locator(".slot").first().click();
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
@@ -669,15 +797,13 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
   await page.locator("#cancel-button").click();
 
-  await page.locator(".slot").nth(1).click();
+  // The parent fixture does not point back, so this one-sided slot is listed as
+  // unconfirmed instead of appearing in the child grid.
+  await page.locator("#add-child-slot").click();
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
-  await page.locator(".slot").nth(1).click();
-  await page.locator("#adjust-amount").fill("1.00");
-  await page.locator("#adjust-submit").click();
-  await expect(page.locator(".slot .slot-label").nth(1)).toHaveText("Parent");
-  await page.locator("#cancel-button").click();
+  await expect(page.locator("#unconfirmed-list")).toContainText("Parent");
 
   await page.locator("#parent-edit").click();
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
@@ -741,6 +867,7 @@ test("advances a cooperative payment and offers a source payment", async ({
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await addContact(page, "Payer", MOCK_PAYER_ID);
   await addContact(page, "Child", MOCK_CHILD_ID);
@@ -774,10 +901,11 @@ test("advances a cooperative payment and offers a source payment", async ({
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#parent-save").click();
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  await expect(page.locator("#payment-open")).toBeEnabled();
+  await expect(page.locator("#payment-open-ledger")).toBeEnabled();
 
-  await page.locator("#payment-open").click();
+  await page.locator("#payment-open-ledger").click();
   await expect(page.locator("#payment-dialog")).toBeVisible();
+  await page.locator("#payment-direct > summary").click();
   await page.locator("#payment-address").fill("1");
   await page.locator("#payment-user").fill("0".repeat(64));
   await page.locator("#payment-amount").fill("1.00");
@@ -789,13 +917,389 @@ test("advances a cooperative payment and offers a source payment", async ({
   await expect(page.locator("#payment-dialog")).toBeHidden();
   await expect(page.locator("#payment-status")).toContainText("Offered");
   await expect(page.locator("#payment-status")).toContainText("Parent");
-  await expect(page.locator("#payment-open")).toBeDisabled();
+  await expect(page.locator("#payment-open-ledger")).toBeDisabled();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
     accessibility.violations,
     `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
   ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("defaults to the simple surface and hides slot wording and branding", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#advanced-view")).toBeHidden();
+  await expect(page.locator("#view-toggle")).toHaveText("Advanced");
+  await expect(page.locator("#simple-view .button")).toHaveCount(3);
+  await expect(page.locator("#simple-pay")).toBeDisabled();
+  await expect(page.locator("#simple-pay-reason")).toBeVisible();
+  await expect(page.locator("#simple-contacts")).toBeEnabled();
+  await expect(page.locator("#simple-receive-link")).toBeDisabled();
+  await expect(page.locator("#simple-receive-reason")).toHaveText(
+    "A board with no parent cannot receive a payment yet. Set a parent under Advanced.",
+  );
+
+  // The default surface never says "slot", and the banned branding phrases do
+  // not appear anywhere outside Advanced.
+  await expect(page.locator("#simple-view")).not.toContainText(/slot/i);
+  const visible = await page.locator("body").innerText();
+  expect(visible).not.toMatch(/\bslot/i);
+  expect(visible).not.toMatch(/8 slots|eight slots/i);
+  await expect(page.locator(".wordmark-tag")).toHaveCount(0);
+
+  await openAdvanced(page);
+  await expect(page.locator("#child-slots-title")).toContainText("of 8");
+  await expect(page.locator("#simple-view")).toBeHidden();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("toggles Advanced, mirrors ?view=advanced, and Back leaves Advanced", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page).not.toHaveURL(/view=advanced/);
+
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#advanced-view")).toBeVisible();
+  await expect(page.locator("#simple-view")).toBeHidden();
+  await expect(page.locator("#view-toggle")).toHaveText("Back to the simple view");
+  await expect(page).toHaveURL(/\?view=advanced$/);
+  await expect(page.locator("#advanced-title")).toBeFocused();
+
+  await page.goBack();
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#advanced-view")).toBeHidden();
+  await expect(page).not.toHaveURL(/view=advanced/);
+  await expect(page.locator("#board-title")).toBeFocused();
+
+  // A direct load opens Advanced, and leaving it strips the parameter without
+  // adding a history entry that would bounce Back out of the app.
+  await page.goto("/?view=advanced");
+  await expect(page.locator("#advanced-view")).toBeVisible();
+  await expect(page.locator("#view-toggle")).toHaveText("Back to the simple view");
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page).not.toHaveURL(/view=advanced/);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("copies a receive-payment link with visible feedback", async ({ page }) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+
+  // A root cannot receive, so its link is disabled. Give the board a settled
+  // parent link first; the link then carries the derived address.
+  await expect(page.locator("#simple-receive-link")).toBeDisabled();
+  await openAdvanced(page);
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#simple-view")).toBeVisible();
+
+  await expect(page.locator("#simple-receive-link")).toBeEnabled();
+  await page.locator("#simple-receive-link").click();
+  await expect(page.locator("#simple-receive-status")).toHaveText(
+    "Link copied. Opening it adds your board to their address book.",
+  );
+  await expect(page.locator("#simple-receive-link")).toHaveText("Copied");
+  await expect(page.locator("#simple-receive-link")).toHaveText(
+    "Copy receive-payment link",
+    { timeout: 3_000 },
+  );
+
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboard).toContain("?pay=");
+  expect(clipboard).toContain("name=My+board");
+  expect(clipboard).toContain("addr=0");
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("refuses a receive link from a root or an unsettled board", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  const receive = page.locator("#simple-receive-link");
+  const reason = page.locator("#simple-receive-reason");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await page.evaluate(() => navigator.clipboard.writeText("sentinel"));
+
+  // Root: no parent means no address and no receive path.
+  await expect(receive).toBeDisabled();
+  await expect(reason).toHaveText(
+    "A board with no parent cannot receive a payment yet. Set a parent under Advanced.",
+  );
+  await receive.evaluate((element) => (element as HTMLButtonElement).click());
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    "sentinel",
+  );
+  await expect(page.locator("#simple-receive-status")).toHaveText("");
+
+  // A one-sided parent link also leaves the address unsettled; send and copy
+  // both explain the reason up front instead of failing on the first press.
+  await openAdvanced(page);
+  await addContact(page, "Sibling", MOCK_SIBLING_ID);
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_SIBLING_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Pending");
+  await page.locator("#view-toggle").click();
+  await expect(page.locator("#simple-view")).toBeVisible();
+
+  await expect(receive).toBeDisabled();
+  await expect(reason).toHaveText(
+    "Your address is not settled yet, so a link would not route a payment.",
+  );
+  await expect(page.locator("#simple-pay")).toBeDisabled();
+  await expect(page.locator("#simple-pay-reason")).toHaveText(
+    "A board on the path has not confirmed its parent yet. Open Advanced to finish your parent link.",
+  );
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("chooses a payment recipient from the address book", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "No address", MOCK_CHILD_ID);
+  await addContact(page, "Sibling", MOCK_SIBLING_ID, "1");
+  await addContact(page, "Parent", MOCK_PARENT_ID);
+
+  // A source needs a parent; once linked the ledger's entry point is enabled.
+  await page.locator("#parent-edit").click();
+  await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+  await page.locator("#parent-save").click();
+  await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await expect(page.locator("#payment-open-ledger")).toBeEnabled();
+
+  await page.locator("#payment-open-ledger").click();
+  await expect(page.locator("#payment-dialog")).toBeVisible();
+  await expect(page.locator("#payment-recipient")).toBeFocused();
+  await expect(page.locator("#payment-recipient option").first()).toHaveText(
+    "Choose someone…",
+  );
+  await expect(page.locator("#payment-submit")).toBeDisabled();
+  await expect(page.locator("#payment-direct")).not.toHaveAttribute("open", "");
+
+  // The address comes from the contact record, not from the other board.
+  await page.locator("#payment-recipient").selectOption(MOCK_CHILD_ID);
+  await expect(page.locator("#payment-recipient-status")).toHaveText(
+    "No address yet. Ask them for a receive link.",
+  );
+  await expect(page.locator("#payment-submit")).toBeDisabled();
+
+  // The dialog's own address-book button adds and selects in one step.
+  await page.locator("#payment-address-book").click();
+  await expect(page.locator("#contacts-dialog")).toBeVisible();
+  await page.locator("#contact-label-input").fill("Payer");
+  await page.locator("#contact-userid-input").fill(MOCK_PAYER_ID);
+  await page.locator("#contact-address-input").fill("3");
+  await page.locator("#contact-add-button").click();
+  await expect(page.locator("#contacts-dialog")).toBeHidden();
+  await expect(page.locator("#payment-dialog")).toBeVisible();
+  await expect(page.locator("#payment-recipient")).toHaveValue(MOCK_PAYER_ID);
+  await expect(page.locator("#payment-recipient-status")).toHaveText(
+    "Address 3",
+  );
+  await expect(page.locator("#payment-submit")).toBeEnabled();
+
+  // Send through the picker rather than the typed escape hatch.
+  await page.locator("#payment-recipient").selectOption(MOCK_SIBLING_ID);
+  await expect(page.locator("#payment-recipient-status")).toHaveText(
+    "Address 1",
+  );
+  await page.locator("#payment-amount").fill("1.00");
+  await page.locator("#payment-submit").click();
+  await expect(page.locator("#payment-dialog")).toBeHidden();
+  await expect(page.locator("#payment-status")).toContainText("Offered");
+  await expect(page.locator("#payment-status")).toContainText("1.00 along 0 → 1");
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("edits a contact and keeps the field it did not touch", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Alice", MOCK_CHILD_ID, "03");
+  await page.locator("#contacts-open").click();
+  await expect(page.locator("#contacts-dialog")).toBeVisible();
+
+  const row = page.locator(`.contact-row[data-user-id="${MOCK_CHILD_ID}"]`);
+  await expect(row.locator(".contact-address")).toHaveText("03");
+
+  // Rename only: the stored address must survive the delegate patch.
+  await row.getByRole("button", { name: "Edit Alice" }).click();
+  const nameInput = page.getByLabel("Name for Alice");
+  await expect(nameInput).toHaveValue("Alice");
+  await nameInput.fill("Alicia");
+  await page.locator(".contact-edit-save").click();
+  await expect(row.locator(".contact-label")).toHaveText("Alicia");
+  await expect(row.locator(".contact-address")).toHaveText("03");
+
+  // Change the address only: the label must survive.
+  await row.getByRole("button", { name: "Edit Alicia" }).click();
+  await page.getByLabel("Octal address for Alicia").fill("4");
+  await page.locator(".contact-edit-save").click();
+  await expect(row.locator(".contact-label")).toHaveText("Alicia");
+  await expect(row.locator(".contact-address")).toHaveText("4");
+
+  // The address field is optional; the root (empty) is not a stored address.
+  await page.locator("#contact-label-input").fill("Bob");
+  await page.locator("#contact-userid-input").fill(MOCK_PAYER_ID);
+  await page.locator("#contact-address-input").fill("");
+  await page.locator("#contact-add-button").click();
+  const bob = page.locator(`.contact-row[data-user-id="${MOCK_PAYER_ID}"]`);
+  await expect(bob.locator(".contact-address")).toHaveText("not set");
+
+  await page.locator("#contacts-done").click();
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("prefills and saves a contact from a receive-payment link", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  const id = "ab".repeat(32);
+
+  await page.goto(`/?pay=${id}&name=Alice&addr=03`);
+  await expect(page.locator("#contacts-dialog")).toBeVisible();
+  await expect(page.locator("#contacts-invite")).toBeVisible();
+  await expect(page.locator("#contacts-invite-title")).toHaveText(
+    "Alice shared their board with you.",
+  );
+  await expect(page.locator("#contacts-invite-address")).toHaveText("03");
+  await expect(page.locator("#contacts-invite-key")).toHaveText(id);
+  await expect(page.locator("#contacts-invite")).toContainText(
+    "checked again when a payment is planned",
+  );
+  await expect(page.locator("#contact-label-input")).toHaveValue("Alice");
+  await expect(page.locator("#contact-userid-input")).toHaveValue(id);
+  await expect(page.locator("#contact-address-input")).toHaveValue("03");
+  // Nothing is saved until Add contact, and the link params are gone.
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("0 of 64");
+  await expect(page).not.toHaveURL(/pay=/);
+
+  await page.locator("#contact-add-button").click();
+  await expect(page.locator("#contacts-invite")).toBeHidden();
+  await expect(page.locator("#contacts-list")).toContainText("Alice");
+  await expect(page.locator("#contacts-dialog-count")).toHaveText("1 of 64");
+  await expect(
+    page.locator(`.contact-row[data-user-id="${id}"] .contact-address`),
+  ).toHaveText("03");
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("waits for the board-name prompt before opening a receive link", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  const id = "cd".repeat(32);
+
+  await page.goto(`/?unnamed=1&pay=${id}&name=Alice&addr=03`);
+  await expect(page.locator("#board-name-dialog")).toBeVisible();
+  await expect(page.locator("#contacts-dialog")).toBeHidden();
+
+  await page.locator("#board-name-input").fill("Test board");
+  await page.locator("#board-name-save").click();
+  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await expect(page.locator("#contacts-dialog")).toBeVisible();
+  await expect(page.locator("#contact-label-input")).toHaveValue("Alice");
+  await expect(page.locator("#contact-address-input")).toHaveValue("03");
+  await expect(page).not.toHaveURL(/pay=/);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("rejects incomplete, own and duplicate receive links", async ({ page }) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/?pay=not-a-key&name=Alice");
+  await expect(page.locator("#notice-title")).toHaveText(
+    "That link is incomplete",
+  );
+  await expect(page.locator("#contacts-dialog")).toBeHidden();
+  await expect(page).not.toHaveURL(/pay=/);
+
+  await page.goto("/");
+  await expect(page.locator("#identity-short")).not.toHaveText("Not available");
+  const ownId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownId).toMatch(/^[0-9a-f]{64}$/);
+  await page.goto(`/?pay=${ownId}&name=Self`);
+  await expect(page.locator("#notice-title")).toHaveText(
+    "That link is your own board",
+  );
+  await expect(page.locator("#contacts-dialog")).toBeHidden();
+  await expect(page).not.toHaveURL(/pay=/);
+
+  // Offline contacts live only in memory, so add one then hand the app the
+  // same link without a reload (a real delegate would already have it).
+  await page.goto("/");
+  await addContact(page, "Alice", MOCK_CHILD_ID, "03");
+  await page.evaluate((id) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("pay", id);
+    url.searchParams.set("name", "Alice");
+    url.searchParams.set("addr", "03");
+    history.replaceState(history.state, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, MOCK_CHILD_ID);
+  await expect(page.locator("#contacts-dialog")).toBeVisible();
+  await expect(page.locator("#contacts-status")).toHaveText(
+    "Already in your address book.",
+  );
+  await expect(
+    page.locator(`.contact-row[data-user-id="${MOCK_CHILD_ID}"]`),
+  ).toHaveClass(/is-highlighted/);
+  await expect(page).not.toHaveURL(/pay=/);
+
+  // A repeat link with a corrected address refreshes the saved contact.
+  await page.evaluate((id) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("pay", id);
+    url.searchParams.set("addr", "4");
+    history.replaceState(history.state, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, MOCK_CHILD_ID);
+  await expect(
+    page.locator(`.contact-row[data-user-id="${MOCK_CHILD_ID}"] .contact-address`),
+  ).toHaveText("4");
+  await expect(page.locator("#contacts-status")).toHaveText(
+    "Already in your address book.",
+  );
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });

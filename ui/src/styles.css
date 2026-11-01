@@ -173,11 +173,52 @@ p {
 .app-header {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(19rem, 23.5rem);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  gap: clamp(2rem, 6vw, 5rem);
+  gap: clamp(1rem, 4vw, 2.5rem);
   padding-bottom: clamp(1.5rem, 4vw, 2.25rem);
   border-bottom: 1px solid var(--rule);
+}
+
+.header-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* A quiet surface switch: a wayfinding label, not a fourth action. */
+.header-actions .button {
+  gap: 0.5rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.header-actions .button::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-top: 1.5px solid var(--faint);
+  border-right: 1.5px solid var(--faint);
+  transform: rotate(45deg);
+}
+
+.header-actions .button[aria-expanded="true"]::before {
+  transform: rotate(-135deg);
+}
+
+.header-actions .button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.header-actions .button:focus-visible {
+  border-color: var(--border);
 }
 
 .app-header::before {
@@ -232,34 +273,6 @@ p {
   /* The 5-letter word sets "ll" too close at the old -0.06em. */
   letter-spacing: -0.045em;
   line-height: 0.8;
-}
-
-.wordmark-tag {
-  display: flex;
-  margin: 0 0 0.45rem;
-  padding-left: 0.7rem;
-  flex-direction: column;
-  gap: 0.12rem;
-  border-left: 1px solid var(--border-strong);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  line-height: 1.15;
-  text-transform: uppercase;
-}
-
-.wordmark-count {
-  color: var(--text);
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-variant-numeric: lining-nums;
-  letter-spacing: 0;
-  line-height: 1;
-}
-
-.wordmark-word {
-  font-size: 0.56rem;
-  font-weight: 600;
-  letter-spacing: 0.14em;
 }
 
 .tagline {
@@ -776,11 +789,341 @@ textarea:focus-visible {
   margin-top: 0.2rem;
 }
 
-/* Board ------------------------------------------------------------------- */
+/* Simple and advanced surfaces -------------------------------------------- */
 
 .board-section {
+  display: grid;
+  gap: clamp(1.6rem, 4vw, 2.4rem);
   margin-top: clamp(1.6rem, 4.2vw, 2.6rem);
   flex: 1 0 auto;
+}
+
+.simple-view,
+.advanced-view {
+  display: grid;
+  gap: clamp(1rem, 2.6vw, 1.5rem);
+  min-width: 0;
+}
+
+/* The default surface reads as one receipt from above, so it keeps to a
+   reading column instead of stretching across a wide window. */
+@media (min-width: 561px) {
+  .simple-view {
+    width: min(100%, 38rem);
+  }
+}
+
+.record-card {
+  display: grid;
+  min-width: 0;
+  padding: clamp(1.1rem, 3vw, 1.6rem) clamp(1.1rem, 3vw, 1.7rem)
+    clamp(1.2rem, 3vw, 1.7rem);
+  gap: 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-soft) 70%, var(--surface)) 0%,
+    var(--surface) 62%
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--surface-raised) 70%, transparent),
+    var(--shadow-soft);
+}
+
+.record-eyebrow {
+  margin: 0;
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+/* On the dark page the paper card needs a lighter body, or the record reads as
+   a tint rather than an object. */
+@media (prefers-color-scheme: dark) {
+  .record-card {
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent-soft) 90%, var(--surface)) 0%,
+      color-mix(in srgb, var(--surface-raised) 82%, var(--accent-soft)) 68%
+    );
+  }
+}
+
+.record-title {
+  min-width: 0;
+  margin: 0.1rem 0 0.4rem;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: clamp(1.55rem, 4.4vw, 2.15rem);
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.record-figure {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+}
+
+.record-amount {
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: clamp(2.6rem, 8vw, 4rem);
+  font-variant-numeric: lining-nums tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1;
+  overflow-wrap: anywhere;
+}
+
+.record-amount.is-long {
+  font-size: clamp(1.9rem, 5.4vw, 2.8rem);
+  letter-spacing: -0.04em;
+}
+
+.record-amount.is-xlong {
+  font-size: clamp(1.15rem, 3.4vw, 1.7rem);
+  letter-spacing: -0.03em;
+}
+
+.record-unit {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.record-recorded,
+.record-note,
+.record-empty {
+  max-width: 48rem;
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* The provenance line is the receipt's stamp: separated from the figure so the
+   name and value read as one object above it. */
+.record-recorded {
+  margin-top: 0.85rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 16%, var(--rule));
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.record-note {
+  font-style: italic;
+}
+
+.simple-payment-waiting {
+  display: flex;
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.9rem;
+  flex-wrap: wrap;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.link-button {
+  display: inline-flex;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.65rem;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.link-button:hover {
+  border-color: color-mix(in srgb, currentColor 28%, transparent);
+}
+
+.simple-actions {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.simple-action-group {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.simple-action {
+  width: 100%;
+  min-height: 2.75rem;
+  justify-content: center;
+}
+
+/* An action that cannot run should look switched off, not like a faded
+   version of a working one. */
+.simple-actions .button:disabled {
+  border-color: var(--border);
+  background: var(--surface-muted);
+  color: var(--muted);
+  opacity: 1;
+}
+
+.action-reason {
+  margin: 0;
+  padding-left: 0.15rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.action-status {
+  margin: 0.05rem 0 0;
+  padding-left: 0.15rem;
+  color: var(--accent-strong);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.action-status:empty {
+  display: none;
+}
+
+.advanced-title {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 4vw, 2.1rem);
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+}
+
+.advanced-block {
+  display: grid;
+  min-width: 0;
+  gap: 0.65rem;
+}
+
+.advanced-block + .advanced-block {
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--rule);
+}
+
+.advanced-block-title {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.advanced-add {
+  justify-self: start;
+}
+
+.advanced-empty,
+.advanced-hint,
+.advanced-fact {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.advanced-hint {
+  max-width: 46rem;
+}
+
+.advanced-block .connection-block {
+  width: 100%;
+  max-width: none;
+}
+
+/* The own-board hint is a footnote to the whole surface, not to the block above
+   it (which is sometimes the adjustments log, sometimes unconfirmed slots). */
+.advanced-footnote {
+  margin-top: 0.35rem;
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--rule);
+}
+
+.advanced-footnote .board-hint {
+  margin: 0;
+}
+
+.unconfirmed-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 0.5rem;
+  list-style: none;
+}
+
+.unconfirmed-row {
+  display: flex;
+  padding: 0.65rem 0.8rem;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.unconfirmed-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.unconfirmed-name {
+  color: var(--text);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.unconfirmed-amount {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.unconfirmed-fact {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .board-head {
@@ -856,7 +1199,7 @@ textarea:focus-visible {
 }
 
 .board-address-label {
-  color: var(--faint);
+  color: var(--muted);
   font-size: 0.55rem;
   font-weight: 600;
   letter-spacing: 0.11em;
@@ -902,7 +1245,7 @@ textarea:focus-visible {
 }
 
 .board-address-note {
-  color: var(--faint);
+  color: var(--muted);
   font-size: 0.55rem;
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -1075,10 +1418,7 @@ textarea:focus-visible {
 
 .parent-adjustments {
   display: grid;
-  margin-top: 0.6rem;
-  padding-top: 0.55rem;
   gap: 0.35rem;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
 }
 
 .parent-adjustments-head {
@@ -1212,29 +1552,29 @@ textarea:focus-visible {
 
 .slot-grid {
   display: grid;
-  overflow: hidden;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-lg);
-  background: var(--rule);
-  box-shadow: var(--shadow-soft);
+  gap: 0.75rem;
 }
 
 .slot {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: clamp(9rem, 12vw, 10.25rem);
+  min-height: clamp(8.75rem, 11vw, 10.25rem);
   padding: 0.9rem 1rem 1rem;
+  overflow: hidden;
   flex-direction: column;
-  border: 0;
-  border-radius: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   background: var(--surface);
+  box-shadow: inset 0 1px 0
+    color-mix(in srgb, var(--surface-raised) 62%, transparent);
   color: var(--text);
   cursor: pointer;
   text-align: left;
-  transition: background-color 150ms var(--ease);
+  transition:
+    background-color 150ms var(--ease),
+    border-color 150ms var(--ease);
 }
 
 .slot::before {
@@ -1250,6 +1590,7 @@ textarea:focus-visible {
 
 .slot:hover:not(:disabled),
 .slot:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   background-color: var(--surface-raised);
 }
 
@@ -2664,7 +3005,7 @@ body:has(#delegate-install[open]) {
 
 .meta-action {
   display: inline-flex;
-  min-height: 2rem;
+  min-height: 2.75rem;
   margin-left: -0.35rem;
   padding: 0.2rem 0.4rem;
   align-items: center;
@@ -2781,7 +3122,7 @@ body:has(#delegate-install[open]) {
   min-width: 0;
   padding: 0.2rem 0.35rem;
   overflow: hidden;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   color: var(--text);
   font-size: 0.82rem;
   font-weight: 650;
@@ -2804,7 +3145,7 @@ body:has(#delegate-install[open]) {
 
 .meta-details > summary {
   display: flex;
-  min-height: 2rem;
+  min-height: 2.75rem;
   margin-left: -0.35rem;
   padding: 0.2rem 0.35rem;
   align-items: center;
@@ -3612,6 +3953,7 @@ body:has(#contacts-dialog[open]) {
   min-width: 0;
   align-items: baseline;
   gap: 0.3rem 0.55rem;
+  flex: 1 1 7rem;
   flex-wrap: wrap;
 }
 
@@ -3638,10 +3980,10 @@ body:has(#contacts-dialog[open]) {
 .contact-usage {
   color: var(--faint);
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 0.6rem;
   font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
   white-space: nowrap;
 }
 
@@ -3658,6 +4000,169 @@ body:has(#contacts-dialog[open]) {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.contacts-status {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
+.contacts-status:empty {
+  display: none;
+}
+
+.contacts-invite {
+  display: grid;
+  margin: 0 0 0.25rem;
+  padding: 0.85rem 0.95rem 0.9rem;
+  gap: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent-soft) 78%, var(--surface)) 0%,
+    var(--accent-soft) 100%
+  );
+}
+
+.contacts-invite .eyebrow {
+  margin: 0;
+}
+
+.contacts-invite h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.contacts-invite-facts {
+  display: grid;
+  margin: 0;
+  gap: 0.3rem;
+}
+
+.contacts-invite-fact {
+  display: grid;
+  grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.contacts-invite-fact dt {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.contacts-invite-fact dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.contacts-invite-fact code {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contacts-invite .field-hint {
+  margin: 0;
+}
+
+.contact-address {
+  padding: 0.05rem 0.34rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+}
+
+.contact-address[data-address=""] {
+  color: var(--faint);
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  letter-spacing: normal;
+}
+
+.contact-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.contact-row.is-highlighted {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.contact-row.is-highlighted:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.contact-row--editing {
+  align-items: stretch;
+}
+
+.contact-edit-form {
+  display: grid;
+  width: 100%;
+  gap: 0.5rem;
+}
+
+.contact-edit-fields {
+  display: grid;
+  gap: 0.45rem;
+}
+
+@media (min-width: 561px) {
+  .contact-edit-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.55rem;
+  }
+
+  .contact-edit-fields .field-warning {
+    grid-column: 1 / -1;
+  }
+}
+
+.contact-edit-fields .field {
+  gap: 0.2rem;
+}
+
+.contact-edit-fields .field span {
+  font-size: 0.66rem;
+}
+
+.contact-edit-fields input {
+  min-height: 2.4rem;
+  font-size: 0.82rem;
+}
+
+.contact-edit-actions {
+  justify-content: flex-end;
 }
 
 .contacts-form {
@@ -4160,6 +4665,74 @@ body:has(#payment-dialog[open]) {
   color: var(--muted);
 }
 
+.payment-recipient {
+  display: grid;
+  align-items: end;
+  gap: 0.5rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.payment-recipient .field {
+  min-width: 0;
+}
+
+.payment-recipient .button {
+  min-height: 2.75rem;
+  white-space: nowrap;
+}
+
+.payment-recipient-status {
+  margin: 0.1rem 0 0;
+  min-height: 1.15rem;
+  color: var(--muted);
+}
+
+.payment-recipient-status:empty {
+  display: none;
+}
+
+.payment-direct {
+  padding-top: 0.15rem;
+  border-top: 1px solid var(--rule);
+}
+
+.payment-direct > summary {
+  display: flex;
+  min-height: 2.75rem;
+  padding: 0.55rem 0;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  list-style: none;
+}
+
+.payment-direct > summary::-webkit-details-marker {
+  display: none;
+}
+
+.payment-direct > summary::before {
+  content: "+";
+  width: 1rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.payment-direct[open] > summary::before {
+  content: "−";
+}
+
+.payment-direct-body {
+  display: grid;
+  padding-bottom: 0.15rem;
+  gap: 0.55rem;
+}
+
 /* Footer ------------------------------------------------------------------ */
 
 .site-footer {
@@ -4245,7 +4818,7 @@ body:has(#payment-dialog[open]) {
   }
 
   .slot {
-    min-height: 10rem;
+    min-height: 9.5rem;
   }
 }
 
@@ -4261,15 +4834,6 @@ body:has(#payment-dialog[open]) {
 
   .wordmark {
     font-size: clamp(3.2rem, 17vw, 4.4rem);
-  }
-
-  .wordmark-tag {
-    margin-bottom: 0.3rem;
-    padding-left: 0.55rem;
-  }
-
-  .wordmark-count {
-    font-size: 1rem;
   }
 
   .tagline {
@@ -4331,6 +4895,14 @@ body:has(#payment-dialog[open]) {
 
   .payments {
     padding: 0.8rem 0.85rem 0.9rem;
+  }
+
+  .slot-label {
+    font-size: 0.82rem;
+  }
+
+  .slot-note {
+    font-size: 0.74rem;
   }
 
   .payments-head {
@@ -4414,6 +4986,7 @@ body:has(#payment-dialog[open]) {
 
   .slot-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
   }
 
   .slot {
@@ -4524,6 +5097,46 @@ body:has(#payment-dialog[open]) {
 
   .contact-row {
     flex-wrap: wrap;
+  }
+
+  .contact-label {
+    flex: 1 0 100%;
+  }
+
+  .contact-usage {
+    display: none;
+  }
+
+  .contact-actions {
+    justify-content: flex-end;
+  }
+
+  .contact-edit-actions {
+    width: 100%;
+  }
+
+  .contact-edit-actions .button {
+    flex: 1 1 auto;
+  }
+
+  .payment-recipient {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .payment-recipient .button {
+    width: 100%;
+  }
+
+  .contacts-invite-fact {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.1rem;
+  }
+
+  .contacts-invite-fact code {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .breadcrumbs {

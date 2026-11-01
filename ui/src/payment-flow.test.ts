@@ -15,6 +15,14 @@ import {
 } from "./payments";
 import { emptyPayments, emptyState, type Entry, type StateV3 } from "./state";
 import { bytesToHex } from "./util";
+import {
+  contactAddressLabel,
+  contactAddressProblem,
+  contactUpdatePatch,
+  parseReceiveInvite,
+  recipientAddressLine,
+  resolveReceiveInvite,
+} from "./contacts-dialog";
 
 const encoder = new TextEncoder();
 
@@ -690,3 +698,81 @@ describe("protocol authorization", () => {
       advancePayment(source, root, stale, depsFor(boards, source)),
     ).rejects.toThrow(/does not match this board's signed record/);
   });
+
+describe("address book and receive-link helpers", () => {
+  const contact = {
+    label: "Alice",
+    userId: owner("a"),
+    address: "03",
+  };
+
+  it("shows the stored octal address or its absence", () => {
+    expect(contactAddressLabel("03")).toBe("03");
+    expect(contactAddressLabel(null)).toBe("not set");
+    expect(recipientAddressLine("03")).toBe("Address 03");
+    expect(recipientAddressLine(null)).toBe(
+      "No address yet. Ask them for a receive link.",
+    );
+  });
+
+  it("accepts optional octal addresses and rejects the root/other digits", () => {
+    expect(contactAddressProblem("")).toBeNull();
+    expect(contactAddressProblem("03")).toBeNull();
+    expect(contactAddressProblem("0".repeat(32))).toBeNull();
+    expect(contactAddressProblem("0".repeat(33))).toContain("32");
+    expect(contactAddressProblem("8")).toContain("0–7");
+    expect(contactAddressProblem("12a")).toContain("0–7");
+  });
+
+  it("renames a contact without touching its stored address", () => {
+    expect(contactUpdatePatch(contact, { label: "Alicia", address: "03" }))
+      .toEqual({ label: "Alicia" });
+    expect(contactUpdatePatch(contact, { label: "Alice", address: "4" }))
+      .toEqual({ address: "4" });
+    expect(contactUpdatePatch(contact, { label: "Alice", address: "03" }))
+      .toEqual({});
+  });
+
+  it("parses a valid link and ignores a bad address", () => {
+    const parsed = parseReceiveInvite(
+      `?pay=${owner("a")}&name=Alice&addr=03`,
+    );
+    expect(parsed).toEqual({
+      kind: "link",
+      invite: { userId: owner("a"), name: "Alice", address: "03" },
+    });
+    expect(
+      parseReceiveInvite(`?pay=${owner("a")}&addr=8`),
+    ).toEqual({
+      kind: "link",
+      invite: { userId: owner("a"), name: null, address: null },
+    });
+    expect(parseReceiveInvite("?view=advanced")).toEqual({ kind: "none" });
+  });
+
+  it("rejects missing and invalid pay params as incomplete", () => {
+    expect(parseReceiveInvite("?name=Alice&addr=03")).toEqual({
+      kind: "incomplete",
+    });
+    expect(parseReceiveInvite("?pay=not-a-key&name=Alice")).toEqual({
+      kind: "incomplete",
+    });
+    expect(parseReceiveInvite("?pay=")).toEqual({ kind: "incomplete" });
+  });
+
+  it("separates own-id, existing-contact and fresh invites", () => {
+    const ownLink = `?pay=${owner("a")}`;
+    expect(resolveReceiveInvite(ownLink, owner("a"), [])).toEqual({
+      kind: "own",
+    });
+    expect(
+      resolveReceiveInvite(`?pay=${contact.userId}`, owner("b"), [contact]),
+    ).toEqual({ kind: "existing", contact });
+    expect(
+      resolveReceiveInvite(`?pay=${contact.userId}`, owner("b"), []),
+    ).toEqual({
+      kind: "invite",
+      invite: { userId: contact.userId, name: null, address: null },
+    });
+  });
+});
