@@ -191,6 +191,15 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
 - Receive links take `name=` from the parent-given child name, else omit it.
 - `DESIGN-views.md` Revision 3; `DESIGN*.md` carry a terminology note.
 
+**2026-11-02 — owner id and child ids**
+- Simple view: a quiet `Your id` row after the actions shows the shortened
+  64-hex user id; the full key is the title and the copy control writes it to
+  the clipboard with a visible `Copied.` result.
+- Advanced child slots show the child's shortened user id under the given name
+  (full key in the title); unconfirmed rows and the simple children list do not.
+- UI only; no contract/delegate, state or signing change. `DESIGN-views.md`
+  Revision 4.
+
 **v6 → v10 (2026-11-01, current lineage)**
 - `81bb25d` LCA-endpoint payment routes (implicit issue/burn) in UI and delegate;
   board navigation removed.

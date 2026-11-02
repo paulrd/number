@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
  * reaches a browser.
  */
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf-8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf-8");
 
 function section(source: string, id: string): string {
   const marker = `id="${id}"`;
@@ -44,6 +45,24 @@ describe("default view copy", () => {
   it("keeps the compact child list hidden until a mutual child exists", () => {
     expect(simple).toMatch(/id="simple-children"[\s\S]*?hidden/);
     expect(simple).toContain("simple-children-list");
+  });
+
+  it("shows the owner's id readout with a copy control", () => {
+    expect(simple).toContain('id="simple-owner-id"');
+    expect(simple).toContain('id="simple-owner-copy"');
+    expect(simple).toContain('id="simple-owner-status"');
+    expect(simple).toContain("Your id");
+    expect(simple).toContain("Copy your user id");
+    // The default surface still never uses the word "slot".
+    expect(simple).not.toMatch(/slot/i);
+  });
+});
+
+describe("advanced child slot ids", () => {
+  it("paints a shortened child id with the full key in the title", () => {
+    expect(mainSource).toContain('"slot-id"');
+    expect(mainSource).toContain("shorten(entry.contact)");
+    expect(mainSource).toContain("slotView.id.title = entry ? entry.contact");
   });
 });
 

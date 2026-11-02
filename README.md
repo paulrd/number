@@ -233,11 +233,12 @@ contact is the child zone owner's user id) and it has at most one **parent**.
 A zone has no name of its own. The only names left are the ones a parent signs
 into its child slots (`childNames`), so a parent lists each child under the
 label it gave that slot. On its own view a zone is simply **Your zone**, shown
-with its value, its children and its octal address; there is no name field to
-fill in or rename. The contract id is under **Details**, not in the primary
-header.
+with its value, its children, its octal address and your shortened user id
+(with a copy control); there is no name field to fill in or rename. The
+contract id is under **Details**, not in the primary header.
 
-- **Link a child:** open a slot, choose the child's contact, and save. The
+- **Link a child:** open a slot, choose the child's contact, and save. Advanced
+  shows the child's shortened user id under the label that slot was given. The
   child's owner opens *their* zone, sets its parent to your zone, and adds your
   contact if needed.
 - **Link a parent:** a zone with no usable parent shows **Add a parent** on the

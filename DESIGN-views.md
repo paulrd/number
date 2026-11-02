@@ -252,3 +252,22 @@ Supersedes Revision 2's name, parent and address points.
   `h1` → `h2#board-title` → `h3` (children).
 - **Copy rule:** unchanged. `8 slots` / `Eight slots` appear only inside
   Advanced; the default view does not use the word `slot`.
+
+## Revision 4 (2026-11-02) — owner id and child ids
+
+Supersedes only the two id points below; Revision 3 otherwise stands.
+
+- **Owner id on the simple view:** a quiet `Your id` row sits after the three
+  actions, so it never competes with the heading or the actions. It shows the
+  owner's 64-hex user id (the identity public key, not the octal address),
+  truncated with `shorten()` as `12345678…90abcdef`; the full key is the
+  `title`. `#simple-owner-copy` copies the full key with the existing
+  `copyToClipboard` helper, `#simple-owner-id` holds the shortened text, and
+  `#simple-owner-status` is the visible `role="status"` result (`Copied.`).
+  The row is painted from `ownIdentity`: it starts as `Waiting…` and reads
+  `Not available` when no identity exists.
+- **Child ids in Advanced:** each mutual `.slot` button also shows the child's
+  user id shortened the same way, in `.slot-id` with the full key in its
+  `title`. The name and value stay. Unconfirmed rows and the simple children
+  list show no id.
+- **Copy rule:** unchanged; the simple view still never says `slot`.

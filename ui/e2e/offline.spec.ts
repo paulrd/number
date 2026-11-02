@@ -416,6 +416,11 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   );
   await expect(page.locator(".slot .slot-value").first()).toHaveText("3.25");
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
+  const childSlotId = page.locator(".slot .slot-id").first();
+  await expect(childSlotId).toHaveText(
+    `${MOCK_CHILD_ID.slice(0, 8)}…${MOCK_CHILD_ID.slice(-8)}`,
+  );
+  await expect(childSlotId).toHaveAttribute("title", MOCK_CHILD_ID);
 
   // A details-only save keeps the issued liability (and the signed log) while
   // the unit changes.
@@ -995,6 +1000,35 @@ test("toggles Advanced, mirrors ?view=advanced, and Back leaves Advanced", async
   await page.locator("#view-toggle").click();
   await expect(page.locator("#simple-view")).toBeVisible();
   await expect(page).not.toHaveURL(/view=advanced/);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("shows the owner id on the simple view and copies the full key", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+
+  const id = page.locator("#simple-owner-id");
+  await expect(id).toBeVisible();
+  await expect(id).toHaveText(/^[0-9a-f]{8}…[0-9a-f]{8}$/);
+  const full = await id.getAttribute("title");
+  if (full === null) throw new Error("the owner id has no full title");
+  expect(full).toMatch(/^[0-9a-f]{64}$/);
+
+  // The Advanced identity row shows the same key, also shortened.
+  await openAdvanced(page);
+  await expect(page.locator("#identity-short")).toHaveText(
+    `${full.slice(0, 8)}…${full.slice(-8)}`,
+  );
+
+  await openSimple(page);
+  await expect(page.locator("#simple-owner-copy")).toBeEnabled();
+  await page.locator("#simple-owner-copy").click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(full);
+  await expect(page.locator("#simple-owner-status")).toHaveText("Copied.");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });

@@ -1045,6 +1045,65 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* A quiet owner id at the foot of the simple view: which key signs here, with
+   the full value one press away. It sits after the actions so it never competes
+   with them or the heading. */
+.simple-ident {
+  display: flex;
+  min-width: 0;
+  padding: 0 0.15rem;
+  align-items: center;
+  gap: 0.2rem 0.65rem;
+  flex-wrap: wrap;
+}
+
+.simple-ident-label {
+  color: color-mix(in srgb, var(--faint) 82%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.simple-ident .copy-button {
+  width: auto;
+  max-width: 100%;
+  min-height: 2.75rem;
+  margin: 0;
+  padding: 0.15rem 0.35rem;
+  gap: 0.5rem;
+}
+
+.simple-ident .copy-button code {
+  flex: 0 1 auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The word is always visible here: there is no hover on a phone, and the row
+   should read as a copy control without guessing. It becomes "copied" in the
+   same place after a press. */
+.simple-ident .copy-button::before {
+  opacity: 1;
+}
+
+.simple-ident .copy-button:disabled::before {
+  opacity: 0;
+}
+
+.simple-ident .copy-button:hover:not(:disabled)::before,
+.simple-ident .copy-button:focus-visible::before {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.simple-ident-status {
+  flex: 1 0 100%;
+  padding-left: 0;
+}
+
 /* The record sheet holds two leaves of one document. Without a value card the
    child list becomes the whole sheet and takes the rounded top edge itself. */
 .record-sheet--cardless .simple-children {
@@ -2039,6 +2098,18 @@ body:has(#status-pill[data-status="error"]) .slot:disabled:is(.is-filled, .is-em
   font-weight: 600;
   letter-spacing: 0.11em;
   text-transform: uppercase;
+}
+
+/* The child's own user id under the parent-given name: faint, monospace, and
+   short enough for the narrowest two-column grid. The full key is the title. */
+.slot-id {
+  margin-top: 0.3rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .slot-note {
@@ -5141,6 +5212,10 @@ body:has(#payment-dialog[open]) {
 
   .slot-label {
     font-size: 0.82rem;
+  }
+
+  .slot-id {
+    font-size: 0.56rem;
   }
 
   .slot.is-empty .slot-label.is-placeholder {

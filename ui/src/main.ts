@@ -186,6 +186,9 @@ const simpleRecordSheet = byId<HTMLElement>("simple-record-sheet");
 const simpleAddress = byId<HTMLElement>("simple-address");
 const simpleAddressValue = byId<HTMLElement>("simple-address-value");
 const simpleAddressNote = byId<HTMLElement>("simple-address-note");
+const simpleOwnerCopy = byId<HTMLButtonElement>("simple-owner-copy");
+const simpleOwnerId = byId<HTMLElement>("simple-owner-id");
+const simpleOwnerStatus = byId<HTMLElement>("simple-owner-status");
 const childSlotsTitle = byId<HTMLElement>("child-slots-title");
 const childSlotsEmpty = byId<HTMLElement>("child-slots-empty");
 const addChildSlot = byId<HTMLButtonElement>("add-child-slot");
@@ -271,6 +274,7 @@ interface SlotView {
   value: HTMLSpanElement;
   unit: HTMLSpanElement;
   label: HTMLSpanElement;
+  id: HTMLSpanElement;
   note: HTMLSpanElement;
   seq: HTMLSpanElement;
   action: HTMLSpanElement;
@@ -543,15 +547,17 @@ function buildSlots(): void {
     valueLine.append(value, unit);
 
     const label = createElement("span", "slot-label is-placeholder", "Waiting…");
+    const id = createElement("span", "slot-id");
+    id.hidden = true;
     const note = createElement("span", "slot-note");
     note.hidden = true;
     const action = createElement("span", "sr-only", "Waiting for the zone.");
 
     // Let the button's own visible content name it, with one hidden action hint.
     // This keeps voice-control labels and screen-reader output in sync.
-    button.append(top, valueLine, label, note, action);
+    button.append(top, valueLine, label, id, note, action);
     boardElement.append(button);
-    slotViews.push({ button, value, unit, label, note, seq, action });
+    slotViews.push({ button, value, unit, label, id, note, seq, action });
   }
 }
 
@@ -610,6 +616,9 @@ function renderBoard(): void {
       slotView.label.textContent = "Waiting…";
       slotView.label.classList.remove("is-unknown");
       slotView.label.title = "";
+      slotView.id.textContent = "";
+      slotView.id.title = "";
+      slotView.id.hidden = true;
       slotView.note.hidden = true;
       slotView.seq.textContent = "seq 0";
       slotView.action.textContent = "Waiting for the zone.";
@@ -681,6 +690,12 @@ function renderBoard(): void {
     slotView.label.classList.toggle("is-unknown", unknownSlotLabel);
     // The full key stays available on hover even when the name is local.
     slotView.label.title = entry ? entry.contact : "";
+
+    // Advanced only: the child's own user id, shortened, with the full key in
+    // the tooltip. The simple children list stays name + value.
+    slotView.id.textContent = entry ? shorten(entry.contact) : "";
+    slotView.id.title = entry ? entry.contact : "";
+    slotView.id.hidden = !entry;
 
     slotView.note.textContent = entry?.note ?? "";
     slotView.note.hidden = !entry?.note;
@@ -927,6 +942,10 @@ function renderIdentity(): void {
     identityShort.textContent = "Not available";
     identityCopy.disabled = true;
     identityCopy.removeAttribute("title");
+    simpleOwnerId.textContent = "Not available";
+    simpleOwnerCopy.disabled = true;
+    simpleOwnerCopy.removeAttribute("title");
+    simpleOwnerCopy.setAttribute("aria-label", "Copy your user id");
     return;
   }
   const short = shorten(ownIdentity.pubkey);
@@ -935,6 +954,12 @@ function renderIdentity(): void {
   identityCopy.disabled = false;
   identityCopy.title = ownIdentity.pubkey;
   identityCopy.setAttribute("aria-label", `Copy owner public key ${short}`);
+
+  simpleOwnerId.textContent = short;
+  simpleOwnerId.title = ownIdentity.pubkey;
+  simpleOwnerCopy.disabled = false;
+  simpleOwnerCopy.title = ownIdentity.pubkey;
+  simpleOwnerCopy.setAttribute("aria-label", `Copy your user id ${short}`);
 }
 
 function renderContractKey(): void {
@@ -3478,6 +3503,7 @@ async function copyToClipboard(
   text: string,
   label: string,
   button: HTMLButtonElement,
+  status: HTMLElement | null = null,
 ): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -3487,6 +3513,12 @@ async function copyToClipboard(
     }
     button.classList.add("is-copied");
     window.setTimeout(() => button.classList.remove("is-copied"), 1_300);
+    if (status) {
+      status.textContent = "Copied.";
+      window.setTimeout(() => {
+        if (status.textContent === "Copied.") status.textContent = "";
+      }, 2_000);
+    }
     announce(`${label} copied.`);
     return true;
   } catch (error) {
@@ -4217,6 +4249,16 @@ parentAdvancedClear.addEventListener("click", () => {
 identityCopy.addEventListener("click", () => {
   if (ownIdentity) {
     void copyToClipboard(ownIdentity.pubkey, "Owner public key", identityCopy);
+  }
+});
+simpleOwnerCopy.addEventListener("click", () => {
+  if (ownIdentity) {
+    void copyToClipboard(
+      ownIdentity.pubkey,
+      "Your user id",
+      simpleOwnerCopy,
+      simpleOwnerStatus,
+    );
   }
 });
 identityBackup.addEventListener("click", () => {
