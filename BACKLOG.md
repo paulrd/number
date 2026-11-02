@@ -20,11 +20,11 @@ changes the compiled bytes and re-keys every zone.
 | Delegate | **v10** `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV`, code `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1793623025`, bundle `assets/index-WgQsBRqF.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1793623558`, bundle `assets/index-D2kT7_22.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-02, `3e99567`; no WASM change, contract/delegate generations unchanged |
+| Last UI publish | 2026-11-02, `5048d47`; no WASM change, contract/delegate generations unchanged |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
 eight child slots and a **private** address book in the delegate; a tree of
@@ -191,7 +191,7 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
 - Receive links take `name=` from the parent-given child name, else omit it.
 - `DESIGN-views.md` Revision 3; `DESIGN*.md` carry a terminology note.
 
-**2026-11-02 — owner id and child ids (`3e99567`, site `1793623025`)**
+**2026-11-02 — owner id and child ids (`3e99567`/`5048d47`, site `1793623558`)**
 - Simple view: a quiet `Your id` row after the actions shows the shortened
   64-hex user id; the full key is the title and the copy control writes it to
   the clipboard with a visible `Copied.` result.
