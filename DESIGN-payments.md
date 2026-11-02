@@ -1,5 +1,10 @@
 # Cooperative payments (v4) — implementation spec
 
+> **Terminology (2026-11-02):** the UI now calls a board a **zone**, and a
+> zone has no name of its own (only the parent-signed names in child slots
+> remain). This is the historical spec for the wire format and keeps the
+> old wording; field names, signing domains and crate names are unchanged.
+
 Status: first slice. This is the protocol the code implements; it is deliberately
 asynchronous and manual-advance. It does not promise instant delivery.
 

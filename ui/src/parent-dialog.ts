@@ -114,10 +114,10 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
 
     if (contacts.length === 0) {
       message =
-        "No contacts yet. Add a contact for the parent board, then choose it here.";
+        "No contacts yet. Add a contact for the parent zone, then choose it here.";
     } else if (selected === null) {
       message =
-        "Root boards sit at the top of the tree. Choose a contact to give this board a parent.";
+        "Root zones sit at the top of the tree. Choose a contact to give this zone a parent.";
     } else {
       const known = contacts.some((contact) => contact.userId === selected);
       if (!known) {
@@ -185,7 +185,7 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
     if (walk.hitOwnerId !== null) {
       return {
         block:
-          "That parent already sits below this board, so the two would point at each other in a loop. Choose another board.",
+          "That parent already sits below this zone, so the two would point at each other in a loop. Choose another zone.",
         warn: null,
       };
     }
@@ -193,19 +193,19 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
       return {
         block: null,
         warn:
-          "The parent's own chain already contains a loop. Saving adds this board to it; you can still save.",
+          "The parent's own chain already contains a loop. Saving adds this zone to it; you can still save.",
       };
     }
     if (walk.truncated) {
       return {
         block: null,
-        warn: `The parent's chain is deeper than ${MAX_TREE_DEPTH} boards, so a loop could not be ruled out. You can still save.`,
+        warn: `The parent's chain is deeper than ${MAX_TREE_DEPTH} zones, so a loop could not be ruled out. You can still save.`,
       };
     }
     if (walk.error !== null) {
       return {
         block: null,
-        warn: `Could not check the parent's board for a loop (${walk.error}). You can still save.`,
+        warn: `Could not check the parent's zone for a loop (${walk.error}). You can still save.`,
       };
     }
     return { block: null, warn: null };
@@ -223,11 +223,11 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
 
     if (parentId !== null) {
       if (ownId === null) {
-        setError("Your board is not loaded yet. Try again in a moment.");
+        setError("Your zone is not loaded yet. Try again in a moment.");
         return;
       }
       if (parentId === ownId) {
-        setError("A board cannot be its own parent.");
+        setError("A zone cannot be its own parent.");
         select.focus();
         return;
       }

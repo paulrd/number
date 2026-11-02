@@ -521,9 +521,8 @@ describe("OnlineBoard v5→v6 migration", () => {
     expect(put.state.slots[0].entry?.value).toBe(1250n);
     expect(put.state.slots[1].entry).toBeNull();
 
-    // Names: selfName from the old self-entry, childNames from the labels the
-    // parent already showed (slot 5's contact is not in the old book).
-    expect(put.state.selfName).toEqual({ seq: 1, name: "My board", sig: SIG });
+    // Only childNames migrate now: selfName is dormant and never seeded.
+    expect(put.state.selfName).toEqual({ seq: 0, name: null, sig: null });
     expect(put.state.childNames).toEqual({
       seq: 1,
       entries: [
@@ -532,9 +531,7 @@ describe("OnlineBoard v5→v6 migration", () => {
       ],
       sig: SIG_B,
     });
-    expect(
-      sent.find((payload) => payload.cmd === "signSelfName"),
-    ).toEqual({ cmd: "signSelfName", seq: 1, name: "My board" });
+    expect(sent.some((payload) => payload.cmd === "signSelfName")).toBe(false);
     expect(
       sent.find((payload) => payload.cmd === "signChildNames"),
     ).toEqual({
@@ -547,7 +544,7 @@ describe("OnlineBoard v5→v6 migration", () => {
     });
 
     // The address book moved into the delegate, unsaved (address null). The
-    // owner's own entry became `selfName`, so it is not imported as a contact.
+    // owner's own entry is not imported as a contact.
     expect(book).toEqual([
       { label: "Alice", userId: ALICE, address: null },
       { label: "Bob", userId: BOB, address: null },
@@ -556,8 +553,8 @@ describe("OnlineBoard v5→v6 migration", () => {
     expect(board.contacts).toEqual(book);
     expect(warnings).toEqual([]);
 
-    // The rendered board is the migrated one: names resolve immediately.
-    expect(board.currentState?.selfName.name).toBe("My board");
+    // The rendered zone is the migrated one: child names resolve immediately.
+    expect(board.currentState?.selfName.name).toBeNull();
     expect(board.currentState?.childNames.entries.map((entry) => entry.name)).toEqual([
       "Alice",
       "Bob",
@@ -583,9 +580,9 @@ describe("OnlineBoard v5→v6 migration", () => {
     expect(fake.instances[0].puts).toHaveLength(1);
     expect(sent.some((payload) => payload.cmd === "contacts.add")).toBe(false);
     expect(book).toEqual([existing]);
-    // The name records come from the old board, not from the delegate book.
+    // Child names come from the old zones, not from the delegate book.
     const put = fake.instances[0].puts[0].state;
-    expect(put.selfName.name).toBe("My board");
+    expect(put.selfName.name).toBeNull();
     expect(put.childNames.entries).toHaveLength(2);
     // An existing book's labels win on the display path: the board shows what
     // the delegate holds.
@@ -599,7 +596,7 @@ describe("OnlineBoard v5→v6 migration", () => {
     const { board, book } = await harness({ failOn: "contacts.add", failAt: 2 });
 
     await expect(board.start()).rejects.toThrow(
-      /Could not migrate the previous board/,
+      /Could not migrate the previous zone/,
     );
     // One entry was accepted before the failure; it is undone so the empty-book
     // guard does not strand the remaining entries on the retry.
@@ -613,13 +610,13 @@ describe("OnlineBoard v5→v6 migration", () => {
     board.close();
   });
 
-  it("leaves selfName empty when the old board was never named", async () => {
+  it("leaves selfName empty even when the old zone was named", async () => {
     const { NumberContract } = await import("./freenet");
     const fake = NumberContract as unknown as {
       legacy: Map<string, Uint8Array>;
     };
     const legacy = JSON.parse(legacyV5Json());
-    // No entry whose userId is the owner: the board was never self-named.
+    // No entry whose userId is the owner: the legacy book had no self-entry.
     legacy.contacts.entries = legacy.contacts.entries.filter(
       (entry: { userId: string }) => entry.userId !== OWNER,
     );
@@ -653,7 +650,7 @@ describe("OnlineBoard v5→v6 migration", () => {
       legacy: Map<string, Uint8Array>;
     };
 
-    await expect(board.start()).rejects.toThrow(/Could not migrate the previous board/);
+    await expect(board.start()).rejects.toThrow(/Could not migrate the previous zone/);
 
     expect(fake.instances[0].puts).toHaveLength(0);
     // The only copy of the board is still the v5 instance, readable as before.
@@ -662,7 +659,7 @@ describe("OnlineBoard v5→v6 migration", () => {
     ).toBe(legacyV5Json());
     expect(board.currentState).toBeNull();
     expect(warnings.join(" ")).toMatch(/delegate storage is unavailable/);
-    expect(warnings.join(" ")).toMatch(/old board is untouched/);
+    expect(warnings.join(" ")).toMatch(/old zone is untouched/);
 
     board.close();
   });
@@ -677,7 +674,7 @@ describe("OnlineBoard v5→v6 migration", () => {
     };
 
     await expect(board.start()).rejects.toThrow(
-      /Could not migrate the previous board/,
+      /Could not migrate the previous zone/,
     );
     expect(fake.instances[0].puts).toHaveLength(0);
     expect(warnings.join(" ")).toMatch(/delegate storage is unavailable/);
@@ -816,11 +813,11 @@ describe("OnlineBoard v5→v6 migration", () => {
     expect(healed.parent.seq).toBe(2);
     expect(healed.payments.seq).toBe(4);
     expect(healed.adjustments.seq).toBe(3);
-    // No name is re-signed: the pre-migration label must not overwrite a rename.
+    // selfName stays dormant: the migrated state never seeds it.
     expect(board.currentState?.selfName).toEqual({
-      seq: 1,
-      name: "My board",
-      sig: SIG,
+      seq: 0,
+      name: null,
+      sig: null,
     });
     expect(warnings.join(" ")).toMatch(/slot 0 \(seq 3 to 9\)/);
 
@@ -868,8 +865,8 @@ describe("OnlineBoard v5→v6 migration", () => {
     expect(migrated.parent.seq).toBe(2);
     expect(migrated.payments.seq).toBe(4);
     expect(migrated.adjustments.seq).toBe(3);
-    // An empty board has no names to protect, so the old names are seeded too.
-    expect(migrated.selfName.name).toBe("My board");
+    // An empty zone has no child names to protect, so the old labels are seeded.
+    expect(migrated.selfName.name).toBeNull();
     expect(migrated.childNames.entries).toEqual([
       { slot: 0, userId: ALICE, name: "Alice" },
       { slot: 3, userId: BOB, name: "Bob" },

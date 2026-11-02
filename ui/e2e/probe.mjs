@@ -22,10 +22,6 @@ async function open(port) {
     if (await app.locator("#identity-setup").isVisible().catch(() => false)) {
       await app.locator("#identity-create").click().catch(() => {});
     }
-    if (await app.locator("#board-name-dialog").isVisible().catch(() => false)) {
-      await app.locator("#board-name-input").fill(`probe-${port}`).catch(() => {});
-      await app.locator("#board-name-save").click({ timeout: 60_000 }).catch(() => {});
-    }
     await sleep(500);
   }
   return { context, page, app, errors };

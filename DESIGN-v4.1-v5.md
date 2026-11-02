@@ -1,5 +1,10 @@
 # v4.1 auto-advance + v5 issue/burn — implementation spec (rev 2)
 
+> **Terminology (2026-11-02):** the UI now calls a board a **zone**, and a
+> zone has no name of its own (only the parent-signed names in child slots
+> remain). This is the historical spec for the wire format and keeps the
+> old wording; field names, signing domains and crate names are unchanged.
+
 Status: reviewed (oracle gate, attempt 1). Two shippable passes; no ledger.
 
 - **Pass 1 (v4.1, delegate-only):** the owner's delegate subscribes to the

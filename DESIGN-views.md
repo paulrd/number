@@ -207,3 +207,49 @@ Supersedes the corresponding points above.
 - **Copy rule:** the banned phrases remain `8 slots` / `Eight slots` outside
   Advanced. The word `slot` may appear on the default view now that children
   are listed there; the old "no `slot` in `#simple-view`" assertion is retired.
+
+## Revision 3 (2026-11-02) — zones, no own name, parent only when missing
+
+Supersedes Revision 2's name, parent and address points.
+
+- **Terminology:** user-facing copy says **zone** / **zones** everywhere.
+  Identifiers, CSS ids/classes, signing domains and crate/file names keep the
+  old `board` wording; they are frozen and invisible to users.
+- **No own name:** a zone has no name of its own. `selfName` stays in the v6
+  state schema so older boards still decode and merge, but it is dormant: the
+  UI never reads it, never writes it, and the v5→v6 migration never seeds it.
+  The only remaining names are the parent-signed `childNames` entries for child
+  slots. The Board name row, Rename action and name dialog are gone.
+- **Simple view, top to bottom:**
+  1. an `h2#board-title` reading `Your zone`, with a small, low-contrast
+     `Octal address` reading beside it (`root` for a root). The address uses the
+     existing `octalAddress` walk and updates as the parent chain resolves; it is
+     not the Advanced chip and never competes with the actions;
+  2. the record card, present only when a mutual parent exists: neutral eyebrow
+     `Recorded above`, the parent's value and unit, and the caption
+     `You can't change it here.` It never names the parent;
+  3. the mutual-only children list (slot-given name + value + unit), hidden when
+     empty;
+  4. a payment-waiting line when one exists (unchanged);
+  5. Send payment, Address book, Copy receive-payment link (unchanged).
+- **Parent only when missing:** with a usable mutual parent the simple view does
+  not mention the parent at all — no eyebrow, name, link or clear control.
+  Root, pending, missing and unreadable links show one quiet prompt: the fact,
+  one sentence and a single button opening `parentDialog.open()`. Root reads
+  `Add a parent`; a set-but-broken link reads `Fix parent link…`. Changing and
+  clearing a healthy parent live in Advanced only: its Parent row shows
+  `#parent-name`, `#parent-status` and `#parent-note`, plus `Change parent…`
+  (`#parent-advanced-edit`, opens `parentDialog.open()`) and `Clear parent`
+  (`#parent-advanced-clear`) whenever the zone has a parent. A root shows no
+  Advanced parent controls; the simple view owns `Add a parent`.
+- **Receive links:** `name=` comes from the parent's `childNames` entry for this
+  zone when a mutual parent exists, and is omitted otherwise. `pay=` and `addr=`
+  are unchanged.
+- **Ids:** `#simple-parent` may now be hidden; `#parent-edit` is the prompt's
+  single button and `#parent-clear` remains in the DOM but hidden. `#board-title`
+  is the simple `h2`; `#simple-address`, `#simple-address-value` and
+  `#simple-address-note` are the quiet address. The Advanced parent controls are
+  `#parent-advanced-edit` and `#parent-advanced-clear`. Heading order stays
+  `h1` → `h2#board-title` → `h3` (children).
+- **Copy rule:** unchanged. `8 slots` / `Eight slots` appear only inside
+  Advanced; the default view does not use the word `slot`.

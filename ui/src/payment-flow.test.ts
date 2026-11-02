@@ -632,7 +632,7 @@ describe("protocol authorization", () => {
     const forged = { ...aborted, amount: 1000n };
     await expect(
       advancePayment(b, a, forged, depsFor(boards, b)),
-    ).rejects.toThrow(/does not match this board's signed record/);
+    ).rejects.toThrow(/does not match this zone's signed record/);
   });
 });
 
@@ -697,7 +697,7 @@ describe("protocol authorization", () => {
     source.state.payments = { seq: 3, settled: [], entry: newer, sig: fakeSig("new-offer") };
     await expect(
       advancePayment(source, root, stale, depsFor(boards, source)),
-    ).rejects.toThrow(/does not match this board's signed record/);
+    ).rejects.toThrow(/does not match this zone's signed record/);
   });
 
 describe("address book and receive-link helpers", () => {

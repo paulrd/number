@@ -145,13 +145,6 @@ async function openNode(browser, { port, name, allowCreate }) {
     await waitGone(app, "#identity-setup", 120_000);
   }
 
-  if (await visible(app, "#board-name-dialog")) {
-    console.log(`[${name}] naming the board ${name}`);
-    await app.locator("#board-name-input").fill(name);
-    await app.locator("#board-name-save").click();
-    await waitGone(app, "#board-name-dialog", 60_000);
-  }
-
   await waitFor(app, '#status-pill[data-status="ready"]', 240_000).catch(async (error) => {
     const status = await app.locator("#status-pill").getAttribute("data-status").catch(() => "?");
     const text = await app.locator("#status-detail").textContent().catch(() => "?");

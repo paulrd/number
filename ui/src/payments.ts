@@ -505,7 +505,7 @@ async function readNeighbour(
   try {
     return await deps.readBoard(ownerId);
   } catch {
-    return failure("unreadable", `Could not read board ${ownerId}.`);
+    return failure("unreadable", `Could not read zone ${ownerId}.`);
   }
 }
 
@@ -525,15 +525,15 @@ async function mutualChain(
       return failure("loop", "The parent links form a loop.");
     }
     if (links >= MAX_TREE_DEPTH) {
-      return failure("too-deep", `The path is more than ${MAX_TREE_DEPTH} boards deep.`);
+      return failure("too-deep", `The path is more than ${MAX_TREE_DEPTH} zones deep.`);
     }
     const parent = await readNeighbour(deps, parentId);
     if (isFailure(parent)) return parent;
     if (parent === null) {
-      return failure("not-created", "A parent board has not been created yet.");
+      return failure("not-created", "A parent zone has not been created yet.");
     }
     if (childSlotIndex(parent.state, node.ownerId) === null) {
-      return failure("pending", "A parent board has not added this board yet.");
+      return failure("pending", "A parent zone has not added this zone yet.");
     }
     seen.add(parentId);
     chain.push(parent);
@@ -563,19 +563,19 @@ async function resolveAddress(
     if (child === null) {
       return failure(
         "not-created",
-        `The board at address prefix ${address.slice(0, depth + 1)} does not exist.`,
+        `The zone at address prefix ${address.slice(0, depth + 1)} does not exist.`,
       );
     }
     if (child.legacy) {
       return failure(
         "legacy",
-        `The board at address ${address.slice(0, depth + 1)} is on the previous version.`,
+        `The zone at address ${address.slice(0, depth + 1)} is on the previous version.`,
       );
     }
     if (child.state.parent.userId !== node.ownerId) {
       return failure(
         "pending",
-        `The board at address ${address.slice(0, depth + 1)} has not confirmed its parent.`,
+        `The zone at address ${address.slice(0, depth + 1)} has not confirmed its parent.`,
       );
     }
     path.push(child);
@@ -633,7 +633,7 @@ export async function planPayment(
       return failure("unreadable", "Could not read the existing payment's progress.");
     }
     if (settled.phase !== "terminal") {
-      return failure("busy", "This board already has a payment in progress.");
+      return failure("busy", "This zone already has a payment in progress.");
     }
   }
 
@@ -641,7 +641,7 @@ export async function planPayment(
   if (!Array.isArray(chain)) return chain;
   const srcAddr = addressOfChain(chain);
   if (srcAddr === null) {
-    return failure("pending", "The source board's parent chain is not mutual.");
+    return failure("pending", "The source zone's parent chain is not mutual.");
   }
 
   const route = planRoute(srcAddr, dstAddr);
@@ -654,7 +654,7 @@ export async function planPayment(
   if (destination.ownerId !== dstId) {
     return failure(
       "address-mismatch",
-      "The supplied user id does not own the board at that octal address.",
+      "The supplied user id does not own the zone at that octal address.",
     );
   }
   if (chain[route.lcaLength]?.ownerId !== dstPath[route.lcaLength]?.ownerId) {
@@ -722,7 +722,7 @@ export async function planPayment(
     const actor = actorOwnerAt({ srcChain: chain, dstPath, route }, hop);
     const address = actorAddressAt(route, hop);
     if (actor === null || address === null) {
-      return failure("invalid-intent", `No board at route hop ${hop}.`);
+      return failure("invalid-intent", `No zone at route hop ${hop}.`);
     }
     const step = actorStep(route, hop, address);
     if ("error" in step) {
@@ -740,7 +740,7 @@ export async function planPayment(
     if (actor.legacy) {
       return failure(
         "legacy",
-        `The board at route hop ${hop} is on the previous version.`,
+        `The zone at route hop ${hop} is on the previous version.`,
         hop,
       );
     }
@@ -1030,7 +1030,7 @@ async function reversePayment(
   deps: PaymentDeps,
 ): Promise<PaymentEntry> {
   const ownAddress = await boardAddress(board, deps);
-  if (ownAddress === null) throw new Error("The board's octal address is unknown.");
+  if (ownAddress === null) throw new Error("The zone's octal address is unknown.");
 
   // The reverse copy is attacker-controlled data. Bind every immutable field to
   // this board's own signed record before using its amount, route or direction.
@@ -1044,7 +1044,7 @@ async function reversePayment(
     own.srcAddr !== entry.srcAddr ||
     own.dstAddr !== entry.dstAddr
   ) {
-    throw new Error("The reverse request does not match this board's signed record.");
+    throw new Error("The reverse request does not match this zone's signed record.");
   }
 
   if (route.debitHops === 0 && ownAddress === own.srcAddr) {
@@ -1055,7 +1055,7 @@ async function reversePayment(
       throw new Error("The reverse cursor is not valid.");
     }
     if (own.phase !== "forward" || own.status !== "acted" || own.cursor !== 1) {
-      throw new Error("This board's signed leg is not the one being reversed.");
+      throw new Error("This zone's signed leg is not the one being reversed.");
     }
     const step = actorStep(route, 0, ownAddress);
     if ("error" in step) throw new Error("The reverse actor does not match the route.");
@@ -1170,7 +1170,7 @@ async function reversePayment(
   const hop = isLca ? route.debitHops - 1 : entry.cursor - 1;
   const expectedCursor = hop + (isLca ? 2 : 1);
   if (own.phase !== "forward" || own.status !== "acted" || own.cursor !== expectedCursor) {
-    throw new Error("This board's signed leg is not the one being reversed.");
+    throw new Error("This zone's signed leg is not the one being reversed.");
   }
   const step = actorStep(route, hop, ownAddress);
   if ("error" in step) throw new Error("The reverse actor does not match the route.");
@@ -1355,7 +1355,7 @@ export async function advancePayment(
   deps: PaymentDeps,
 ): Promise<PaymentEntry> {
   if (entry.next !== board.ownerId) {
-    throw new Error("This board is not the next actor for the payment.");
+    throw new Error("This zone is not the next actor for the payment.");
   }
   const route = planRoute(entry.srcAddr, entry.dstAddr);
   if ("error" in route) throw new Error("The payment route is malformed.");
@@ -1395,14 +1395,14 @@ export async function advancePayment(
     // refusing a new one.
     const progressed = await paymentProgress(board, ownEntry, deps);
     if (progressed.phase !== "terminal") {
-      throw new Error("This board already has an active payment.");
+      throw new Error("This zone already has an active payment.");
     }
   }
 
   const ownAddress = await boardAddress(board, deps);
-  if (ownAddress === null) throw new Error("The board's octal address is unknown.");
+  if (ownAddress === null) throw new Error("The zone's octal address is unknown.");
   const step = actorStep(route, entry.cursor, ownAddress);
-  if ("error" in step) throw new Error("This board is not the expected route actor.");
+  if ("error" in step) throw new Error("This zone is not the expected route actor.");
 
   if (step.role === "source") {
     throw new Error("The source has no leg to apply.");

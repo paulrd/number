@@ -1,5 +1,10 @@
 # Payment routes with an endpoint at the LCA (v6.1)
 
+> **Terminology (2026-11-02):** the UI now calls a board a **zone**, and a
+> zone has no name of its own (only the parent-signed names in child slots
+> remain). This is the historical spec for the wire format and keeps the
+> old wording; field names, signing domains and crate names are unchanged.
+
 Status: design for review. Contract unchanged — `Payment::is_valid` is
 structural and never checked `debit_hops`/`credit_hops`; the table lives in
 `ui/src/payments.ts` and `delegate/src/advance.rs`, which must stay identical.

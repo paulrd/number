@@ -573,8 +573,8 @@ export function createContactsDialog(
     pendingRemove = contact;
     confirmText.textContent =
       used === 1
-        ? `“${contact.label}” is linked from this board. The signed slot keeps its saved name until you save the slot with another contact.`
-        : `“${contact.label}” is linked from ${used} places on this board. Each signed slot keeps its saved name until you save it with another contact.`;
+        ? `“${contact.label}” is linked from this zone. The signed slot keeps its saved name until you save the slot with another contact.`
+        : `“${contact.label}” is linked from ${used} places on this zone. Each signed slot keeps its saved name until you save it with another contact.`;
     confirmBox.hidden = false;
     confirmBox.scrollIntoView({ block: "nearest" });
     confirmCancel.focus({ preventScroll: true });
@@ -662,7 +662,7 @@ export function createContactsDialog(
       setFieldWarning(
         userIdInput,
         userIdWarning,
-        "That is your own board's key. It is already saved as the board name.",
+        "That is your own zone's key, so it cannot be a contact.",
       );
       userIdInput.focus();
       return;
@@ -717,7 +717,7 @@ export function createContactsDialog(
   function showInvite(next: ReceiveInvite): void {
     setStatus("");
     const suggested = next.name ?? shortUserId(next.userId);
-    inviteTitle.textContent = `${suggested} shared their board with you.`;
+    inviteTitle.textContent = `${suggested} shared their zone with you.`;
     inviteAddress.textContent = contactAddressLabel(next.address);
     inviteKey.textContent = next.userId;
     inviteBox.hidden = false;

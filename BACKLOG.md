@@ -2,12 +2,12 @@
 
 Durable state for the project. Read this with `README.md`, then the design docs:
 `DESIGN.md` (v4/v5), `DESIGN-v6.md` (private address book, signed names),
-`DESIGN-views.md` (what the two surfaces may contain, + revision 2),
+`DESIGN-views.md` (what the two surfaces may contain, + revision 3),
 `DESIGN-payments-lca.md` (payments whose endpoint is the LCA).
 
 The app's display name is **Tally**; the repository, crate names, WASM
 filenames and `number.*` secret keys stay `number`, because renaming them
-changes the compiled bytes and re-keys every board.
+changes the compiled bytes and re-keys every zone.
 
 ## Current state (2026-11-01)
 
@@ -19,20 +19,23 @@ changes the compiled bytes and re-keys every board.
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
 | Delegate | **v10** `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV`, code `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
-| Live board (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — name `Dad`, root, one mutual child `Tim` |
+| Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
 | Live site | version `1793563931`, bundle `assets/index-EEsm_3TS.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
+| Working tree | zone wording + parent-only-when-missing (2026-11-02); **not yet published** |
 
-What the app does now, in one paragraph: one personal board per owner with eight
-child slots and a **private** address book in the delegate; a tree of boards
-where an edge exists only when both sides name each other; every board's name is
-signed (`selfName`, and `childNames` on the parent); a board with any link can
-pay or be paid, including when an endpoint is the LCA (implicit issue / burn);
-the delegate auto-advances payment legs in the background when the node grants
-Background; the UI shows your own board only, five things on the default surface
-and everything else behind Advanced.
+What the app does now, in one paragraph: one personal **zone** per owner with
+eight child slots and a **private** address book in the delegate; a tree of
+zones where an edge exists only when both sides point at each other; a zone has
+no name of its own — the only names are the labels a parent signs into its child
+slots (`childNames`), while `selfName` stays in v6 state but is dormant; a zone
+with any link can pay or be paid, including when an endpoint is the LCA
+(implicit issue / burn); the delegate auto-advances payment legs in the
+background when the node grants Background; the UI shows your own zone only,
+with the parent left unmentioned on the simple surface unless the link is
+missing, and everything else behind Advanced.
 
 ## Open items
 
@@ -61,7 +64,7 @@ deployment.
 6. **#22 — the node shell does not render the Background grant prompt
    (upstream, blocked).** App side is solved: unregister + reinstall from the app
    triggers the prompt, and `/permission/{nonce}/respond` with `index: 0` grants
-   it without changing owner or board. A headless install can still wait on an
+   it without changing owner or zone. A headless install can still wait on an
    unrendered prompt and leave the component Configured-but-inert. Evidence:
    `reports/upstream-background-grant-prompt.md`; filed as freenet/freenet-core
    #6039.
@@ -83,8 +86,8 @@ deployment.
   not running, `Check for payments` and the manual sentence stay, so a leg can
   still advance. Decision 2026-11-01: keep that fallback and the in-app off
   switch rather than promise something the node can refuse.
-- **No board navigation.** Removed deliberately; protocol reads of neighbouring
-  boards (names, values, links, routes) remain.
+- **No zone navigation.** Removed deliberately; protocol reads of neighbouring
+  zones (values, links, routes) remain.
 - **Mutual-only child slots.** A one-sided slot is treated as absent, listed
   separately as unconfirmed with Clear, and never routed through. Signed state is
   never auto-tombstoned.
@@ -113,6 +116,12 @@ deployment.
   `delegate/src/advance.rs`. Any change to it must land in both, driven by the
   same fixture-tree table, or the app and the unattended signer disagree about
   money.
+- `selfName` is dormant: the v6 field and its signing domain stay for
+  compatibility, but the UI must not write, read or display it. Child-slot
+  names (`childNames`, signed by the parent) are the only live names.
+- User-facing copy says **zone**; code identifiers, CSS ids/classes, signing
+  domains and crate/file names keep `board`/`number` because renaming them
+  changes bytes and re-keys everything.
 
 ## Verify
 
@@ -127,8 +136,8 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 74, UI 226,
-offline e2e 23, `verify-merge` 14 laws / 0 violations.
+Expected at the time of writing: contract 123 tests, delegate 74, UI 227,
+offline e2e 22, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -137,7 +146,7 @@ services running as `paul` from `~/.local/bin/freenet` (0.2.153).
 
 | Node | Unit | Ports | Role / owner |
 |---|---|---|---|
-| D | `freenet.service` | ws 7509, default network port (no flags; default data dir) | root, owner `3f84…` — the live board above |
+| D | `freenet.service` | ws 7509, default network port (no flags; default data dir) | root, owner `3f84…` — the live zone above |
 | A | `freenet-node2` | ws 7511, net 31338 | root, owner `ea14…` |
 | B | `freenet-node3` | ws 7512, net 31339 | child `0` of A, owner `4e7a…` |
 | C | `freenet-node4` | ws 7513, net 31340 | child `03` of B, owner `06e6…` |
@@ -147,7 +156,7 @@ default `~/.local/share/freenet`.
 
 Last full topology check 2026-10-29; re-run `readiness.mjs` before relying on it.
 All four previously held the Background grant and scanned; a delegate re-key
-means each board must be opened once so the seed migrates and the prompt is
+means each zone must be opened once so the seed migrates and the prompt is
 asked again.
 
 ## Publishing (manual)
@@ -166,6 +175,19 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**Unreleased (2026-11-02) — zones**
+- User-facing copy says **zone**; identifiers, ids and signing domains keep
+  `board`. No contract/delegate change, no re-key.
+- A zone has no name of its own: the name row, Rename action and name dialog
+  are gone; `selfName` is dormant (never written, read or seeded), and
+  `childNames` are the only live names.
+- Simple view: `Your zone` plus a quiet octal address; the record card is
+  labelled `Recorded above` and never names the parent; the parent prompt with
+  `Add a parent` appears only when the link is missing/broken. Children stay on
+  the simple view. Changing/clearing a healthy parent lives in Advanced.
+- Receive links take `name=` from the parent-given child name, else omit it.
+- `DESIGN-views.md` Revision 3; `DESIGN*.md` carry a terminology note.
 
 **v6 → v10 (2026-11-01, current lineage)**
 - `81bb25d` LCA-endpoint payment routes (implicit issue/burn) in UI and delegate;
@@ -222,7 +244,7 @@ Newest first. **Never remove an entry**; the record gate and
   auto-advance + stale-cache fix; registered.
 - Older registered generations (v7 and earlier) are in `ui/src/migrations.ts`.
   The very first delegate `8GpT86YK…` predates `export` and is permanently
-  unrecoverable; its board is abandoned, as are the test-only `44uPSHVv…`.
+  unrecoverable; its zone is abandoned, as are the test-only `44uPSHVv…`.
 
 ## Handoff notes
 
@@ -234,4 +256,4 @@ Newest first. **Never remove an entry**; the record gate and
   CI still pins 0.2.151.
 - What a fresh session should do first: run `make check` and
   `make check-artifacts`, then `node ui/e2e/readiness.mjs` against the live
-  nodes; if the delegate was re-keyed, open each board once.
+  nodes; if the delegate was re-keyed, open each zone once.

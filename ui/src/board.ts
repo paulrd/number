@@ -50,7 +50,6 @@ import {
   type Delta,
   type DeltaSlot,
   type Entry,
-  type SelfName,
   type StateV3,
   type StateV5,
 } from "./state";
@@ -280,8 +279,6 @@ export interface BoardBackend {
   ): Promise<ContactRecord[]>;
   /** Remove one address-book entry by userId. */
   removeContact(userId: string): Promise<ContactRecord[]>;
-  /** Sign a `selfName` record (null clears it) and write it in one delta. */
-  saveSelfName(name: string | null): Promise<void>;
   /** Set (or clear with null) this board's signed parent link. */
   saveParent(userId: string | null): Promise<void>;
   /**
@@ -527,30 +524,32 @@ export class OnlineBoard implements BoardBackend {
       return await this.assembleMigratedState(legacy, identity, true);
     } catch (error) {
       const message =
-        `Could not migrate the previous board (${codeHash}): ${errorMessage(error)} ` +
-        "Nothing was written, so the old board is untouched. " +
-        "Fix the cause and retry; the old board stays readable until then.";
+        `Could not migrate the previous zone (${codeHash}): ${errorMessage(error)} ` +
+        "Nothing was written, so the old zone is untouched. " +
+        "Fix the cause and retry; the old zone stays readable until then.";
       this.callbacks.onWarning?.(message);
       throw new Error(message);
     }
   }
 
   /**
-   * The v6 board a legacy v5 state implies: surviving records untouched, and the
-   * name records signed from the old book/slots when `seedNames` is set.
+   * The v6 board a legacy v5 state implies: surviving records untouched, and
+   * `childNames` signed from the old slot labels when `seedNames` is set.
    *
-   * The heal passes `seedNames: false` unless the v6 board has no names at all:
-   * signing again would replay the pre-migration label over a rename the user
-   * made after migrating.
+   * `selfName` has no role any more. It stays in the schema so an older board
+   * still decodes and merges, but migration never writes or seeds it: only a
+   * parent-given child name is shown anywhere now.
+   *
+   * The heal passes `seedNames: false` unless the v6 board has no child names
+   * at all: signing again would replay the pre-migration label over a rename
+   * the user made after migrating.
    */
   private async assembleMigratedState(
     legacy: StateV5,
     identity: DelegateIdentity,
     seedNames: boolean,
   ): Promise<StateV3> {
-    const selfName = seedNames
-      ? await this.seedSelfName(identity, legacy)
-      : emptySelfName();
+    const selfName = emptySelfName();
     const childNames = seedNames
       ? await this.seedChildNames(identity, legacy)
       : emptyChildNames();
@@ -686,26 +685,6 @@ export class OnlineBoard implements BoardBackend {
   }
 
   /**
-   * `selfName` from the old self-entry: the address-book entry whose `userId`
-   * is the owner. No self-entry means the board was never named, so the empty
-   * record is right and there is nothing to sign.
-   */
-  private async seedSelfName(
-    identity: DelegateIdentity,
-    legacy: StateV5,
-  ): Promise<SelfName> {
-    const selfEntry = legacy.contacts.entries.find(
-      (entry) => entry.userId === identity.pubkey,
-    );
-    if (selfEntry === undefined) return emptySelfName();
-
-    const seq = Math.max(1, identity.selfNameNextSeq ?? 1);
-    const sig = await this.delegate.signSelfName(seq, selfEntry.label);
-    this.identity = { ...identity, selfNameNextSeq: seq + 1 };
-    return { seq, name: selfEntry.label, sig };
-  }
-
-  /**
    * `childNames` from what the parent already showed: for each slot holding a
    * contact, the label of that `userId` in the old address book. Slots with no
    * contact, or with a contact the old book no longer labels, are skipped.
@@ -776,9 +755,8 @@ export class OnlineBoard implements BoardBackend {
     if (ahead.length === 0) return;
 
     // An empty v6 instance never received the legacy records (the known gap):
-    // seed its names too. A board that already has names keeps them.
-    const seedNames =
-      current.selfName.seq === 0 && current.childNames.seq === 0;
+    // seed its child names too. A zone that already has child names keeps them.
+    const seedNames = current.childNames.seq === 0;
 
     let merged: StateV3;
     try {
@@ -789,7 +767,7 @@ export class OnlineBoard implements BoardBackend {
     } catch (error) {
       if (!seedNames) {
         this.callbacks.onWarning?.(
-          "Could not reconcile records from the previous board generation: " +
+          "Could not reconcile records from the previous version of this zone: " +
             errorMessage(error),
         );
         return;
@@ -803,7 +781,7 @@ export class OnlineBoard implements BoardBackend {
         );
       } catch (fallbackError) {
         this.callbacks.onWarning?.(
-          "Could not reconcile records from the previous board generation: " +
+          "Could not reconcile records from the previous version of this zone: " +
             errorMessage(fallbackError),
         );
         return;
@@ -815,13 +793,13 @@ export class OnlineBoard implements BoardBackend {
       await contract.publishState(hexToBytes(identity.pubkey), merged);
     } catch (error) {
       this.callbacks.onWarning?.(
-        `Could not recover newer records from the previous board generation: ${errorMessage(error)}`,
+        `Could not recover newer records from the previous version of this zone: ${errorMessage(error)}`,
       );
       return;
     }
 
     this.callbacks.onWarning?.(
-      `Recovered newer records from the previous board generation: ${ahead.join(", ")}.`,
+      `Recovered newer records from the previous version of this zone: ${ahead.join(", ")}.`,
     );
     try {
       const fresh = await contract.getState();
@@ -831,7 +809,7 @@ export class OnlineBoard implements BoardBackend {
       this.currentState = merged;
       this.callbacks.onState(merged);
       this.callbacks.onWarning?.(
-        `Recovered the records, but could not refresh the board: ${errorMessage(error)}`,
+        `Recovered the records, but could not refresh the zone: ${errorMessage(error)}`,
       );
     }
   }
@@ -854,12 +832,12 @@ export class OnlineBoard implements BoardBackend {
       if (await this.importLegacyContacts(legacy, identity, true)) {
         this.repaintAfterContactsChange();
         this.callbacks.onWarning?.(
-          "Recovered the private address book from the previous board generation.",
+          "Recovered the private address book from the previous version of this zone.",
         );
       }
     } catch (error) {
       this.callbacks.onWarning?.(
-        `Could not recover the previous board's address book: ${errorMessage(error)}`,
+        `Could not recover the address book from the previous version of this zone: ${errorMessage(error)}`,
       );
     }
   }
@@ -973,7 +951,7 @@ export class OnlineBoard implements BoardBackend {
         );
       }
 
-      this.callbacks.onStatus("connecting", "loading the board");
+      this.callbacks.onStatus("connecting", "loading the zone");
       const state = await this.contract.ensureState(
         parameters,
         LEGACY_CONTRACT_CODE_HASHES,
@@ -1145,72 +1123,6 @@ export class OnlineBoard implements BoardBackend {
   }
 
   /**
-   * Sign and write the owner's `selfName`. A null name is a legal tombstone
-   * (seq > 0 with a null name). The seq is one past the committed record or the
-   * delegate's counter, whichever is ahead, exactly like a slot write.
-   */
-  async saveSelfName(name: string | null): Promise<void> {
-    if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
-    }
-    if (name !== null) {
-      const trimmed = name.trim();
-      if (trimmed === "") throw new Error("A board name must not be empty.");
-      name = trimmed;
-    }
-    if (this.mutating) throw new Error("Another change is still in progress");
-
-    this.mutating = true;
-    const previous = this.currentState;
-    let updateStarted = false;
-
-    try {
-      const seq = Math.max(
-        previous.selfName.seq + 1,
-        this.identity.selfNameNextSeq ?? 1,
-      );
-      const sig = await this.delegate.signSelfName(seq, name);
-
-      const delta: Delta = {
-        v: 6,
-        selfName: { seq, name, sig },
-        parent: null,
-        childNames: null,
-        payments: null,
-        adjustments: null,
-        slots: [],
-      };
-
-      const optimistic = mergeDelta(previous, delta);
-      this.currentState = optimistic;
-      this.callbacks.onState(optimistic);
-
-      this.identity = { ...this.identity, selfNameNextSeq: seq + 1 };
-      this.callbacks.onIdentity(this.identity);
-
-      updateStarted = true;
-      await this.contract.updateDelta(delta);
-
-      try {
-        const fresh = await this.contract.getState();
-        this.currentState = fresh;
-        this.callbacks.onState(fresh);
-      } catch (error) {
-        this.callbacks.onWarning?.(
-          `Saved the board name, but could not refresh the board: ${errorMessage(error)}`,
-        );
-      }
-    } catch (error) {
-      this.currentState = previous;
-      this.callbacks.onState(previous);
-      if (updateStarted) void this.refresh();
-      throw error;
-    } finally {
-      this.mutating = false;
-    }
-  }
-
-  /**
    * Set (or clear with null) the signed parent link. Same optimistic/rollback
    * shape and single-write guard as `write`. The seq beats both the contract's
    * record and the delegate's parent counter.
@@ -1223,12 +1135,12 @@ export class OnlineBoard implements BoardBackend {
         );
       }
       if (this.identity && userId === this.identity.pubkey) {
-        throw new Error("A board cannot be its own parent.");
+        throw new Error("A zone cannot be its own parent.");
       }
     }
 
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
+      throw new Error("The zone is not connected yet");
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -1269,7 +1181,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Saved the parent link, but could not refresh the board: ${errorMessage(error)}`,
+          `Saved the parent link, but could not refresh the zone: ${errorMessage(error)}`,
         );
       }
 
@@ -1300,7 +1212,7 @@ export class OnlineBoard implements BoardBackend {
     slots: PaymentSlotWrite[],
   ): Promise<PaymentEntry | null> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
+      throw new Error("The zone is not connected yet");
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -1427,7 +1339,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Saved the payment, but could not refresh the board: ${errorMessage(error)}`,
+          `Saved the payment, but could not refresh the zone: ${errorMessage(error)}`,
         );
       }
 
@@ -1450,7 +1362,7 @@ export class OnlineBoard implements BoardBackend {
    */
   async clearStuckPayment(): Promise<void> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
+      throw new Error("The zone is not connected yet");
     }
     const payments = this.currentState.payments;
     if (payments.entry === null) return;
@@ -1484,7 +1396,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Cleared the stuck payment, but could not refresh the board: ${errorMessage(error)}`,
+          `Cleared the stuck payment, but could not refresh the zone: ${errorMessage(error)}`,
         );
       }
     } catch (error) {
@@ -1509,7 +1421,7 @@ export class OnlineBoard implements BoardBackend {
     note: string,
   ): Promise<void> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
+      throw new Error("The zone is not connected yet");
     }
     if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
       throw new Error(`slot must be in 0..7, got ${slotIndex}`);
@@ -1596,7 +1508,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Saved the issue/burn, but could not refresh the board: ${errorMessage(error)}`,
+          `Saved the issue/burn, but could not refresh the zone: ${errorMessage(error)}`,
         );
       }
 
@@ -1631,7 +1543,7 @@ export class OnlineBoard implements BoardBackend {
   async readBoard(ownerId: string): Promise<BoardSnapshot | null> {
     if (!isLowerHex(ownerId, 64)) {
       throw new Error(
-        `The board owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
+        `The zone owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
       );
     }
 
@@ -1783,7 +1695,7 @@ export class OnlineBoard implements BoardBackend {
     enabled: boolean,
     maxAmount?: number,
   ): Promise<void> {
-    if (!this.contract) throw new Error("The board is not connected yet");
+    if (!this.contract) throw new Error("The zone is not connected yet");
     // Preserve the configured cap when the caller only flips the toggle.
     const cap = maxAmount ?? this.delegateStatus?.maxAmount ?? DEFAULT_MAX_AMOUNT;
     await this.delegate.setAutoAdvance(enabled, cap);
@@ -1832,7 +1744,7 @@ export class OnlineBoard implements BoardBackend {
       address = await this.ownOctalAddress();
     } catch (error) {
       this.callbacks.onWarning?.(
-        `Could not determine this board's address for auto-advance: ${errorMessage(error)}`,
+        `Could not determine this zone's address for auto-advance: ${errorMessage(error)}`,
       );
       return;
     }
@@ -1927,7 +1839,7 @@ export class OnlineBoard implements BoardBackend {
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
     if (!this.started || !this.currentState || !this.identity || !this.contract) {
-      throw new Error("The board is not connected yet");
+      throw new Error("The zone is not connected yet");
     }
     if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
       throw new Error(`slot must be in 0..7, got ${slotIndex}`);
@@ -1991,7 +1903,7 @@ export class OnlineBoard implements BoardBackend {
         this.callbacks.onState(fresh);
       } catch (error) {
         this.callbacks.onWarning?.(
-          `Saved, but could not refresh the board: ${errorMessage(error)}`,
+          `Saved, but could not refresh the zone: ${errorMessage(error)}`,
         );
       }
     } catch (error) {
@@ -2012,7 +1924,7 @@ export class OnlineBoard implements BoardBackend {
       this.callbacks.onState(state);
     } catch (error) {
       this.callbacks.onError(
-        new Error(`Could not refresh the board: ${errorMessage(error)}`),
+        new Error(`Could not refresh the zone: ${errorMessage(error)}`),
       );
     }
   }

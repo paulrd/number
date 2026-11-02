@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 
 /**
  * Copy rules for the two-surface shell. The source of truth is the shipped
- * document, so a banned branding phrase in the default view fails here before
- * it reaches a browser.
+ * document, so a banned phrase in the default view fails here before it
+ * reaches a browser.
  */
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf-8");
 
@@ -24,12 +24,20 @@ const advanced = html.slice(advancedStart, advancedEnd);
 const outsideAdvanced = html.slice(0, advancedStart) + html.slice(advancedEnd);
 
 describe("default view copy", () => {
-  it("keeps the three action labels, the record card seams, and the name label", () => {
+  it("keeps the three action labels and the neutral record seams", () => {
     expect(simple).toContain("Send payment");
     expect(simple).toContain("Address book");
     expect(simple).toContain("Copy receive-payment link");
-    expect(simple).toContain("Held by your parent");
-    expect(simple).toContain("Your Board Name:");
+    expect(simple).toContain("Recorded above");
+    expect(simple).toContain(">Your zone</h2>");
+    expect(simple).toContain("simple-address");
+    expect(simple).not.toContain("Your Board Name");
+    expect(simple).not.toContain("Held by your parent");
+  });
+
+  it("mentions a parent only when the link is missing", () => {
+    expect(simple).toMatch(/id="simple-parent"[\s\S]*?hidden/);
+    expect(simple).toContain("Add a parent");
   });
 
   it("keeps the compact child list hidden until a mutual child exists", () => {
@@ -44,6 +52,14 @@ describe("branding copy", () => {
     expect(html).not.toContain("One owner. One board. Every change signed.");
     expect(html).not.toContain("wordmark-tag");
     expect(html).not.toContain("Eight slots");
+  });
+
+  it("calls the product a zone, not a board", () => {
+    expect(html).not.toMatch(/Your board\b/);
+    expect(html).not.toMatch(/board name/i);
+    expect(html).not.toMatch(/Child board|Parent board|A personal board/i);
+    expect(html).not.toMatch(/board tree/i);
+    expect(html).toContain("A personal zone");
   });
 
   it("does not describe the product as eight slots", () => {

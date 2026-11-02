@@ -44,12 +44,6 @@ import type { ContactRecord, DelegateIdentity, DelegateStatus } from "./delegate
 
 const encoder = new TextEncoder();
 
-/** `?unnamed=1` starts without a self-entry so e2e can exercise the prompt. */
-function unnamedRequested(): boolean {
-  if (typeof location === "undefined") return false;
-  return new URLSearchParams(location.search).get("unnamed") === "1";
-}
-
 function digest(label: string): Uint8Array {
   return blake3(encoder.encode(label));
 }
@@ -65,14 +59,6 @@ function mockSignature(slotIndex: number, seq: number, entry: Entry | null): str
   const bytes = new Uint8Array(64);
   bytes.set(digest(`number:offline:sig:0:${body}`), 0);
   bytes.set(digest(`number:offline:sig:1:${body}`), 32);
-  return bytesToHex(bytes);
-}
-
-function mockSelfNameSignature(seq: number, name: string | null): string {
-  const body = JSON.stringify({ seq, name });
-  const bytes = new Uint8Array(64);
-  bytes.set(digest(`number:offline:selfname:0:${body}`), 0);
-  bytes.set(digest(`number:offline:selfname:1:${body}`), 32);
   return bytesToHex(bytes);
 }
 
@@ -271,15 +257,6 @@ export class OfflineBoard implements BoardBackend {
     await delay(120);
 
     this.currentState = emptyState();
-    if (!unnamedRequested()) {
-      // The board name is the signed selfName record (v6).
-      this.currentState.selfName = {
-        seq: 1,
-        name: "My board",
-        sig: mockSelfNameSignature(1, "My board"),
-      };
-      this.identity.selfNameNextSeq = 2;
-    }
     this.started = true;
     this.callbacks.onIdentity(this.snapshotIdentity());
     this.callbacks.onContractKey(this.contractKeyBase58);
@@ -309,51 +286,8 @@ export class OfflineBoard implements BoardBackend {
   }
 
   /**
-   * Sign and write the owner's `selfName` with a deterministic mock signature.
-   * A null name is a legal cleared tombstone at seq > 0.
+   * The delegate-side address book commands the v9 UI calls.
    */
-  async saveSelfName(name: string | null): Promise<void> {
-    if (!this.started || !this.currentState) {
-      throw new Error("Offline board is not ready yet");
-    }
-    if (name !== null) {
-      const trimmed = name.trim();
-      if (trimmed === "") throw new Error("A board name must not be empty.");
-      name = trimmed;
-    }
-    if (this.mutating) throw new Error("Another change is still in progress");
-
-    this.mutating = true;
-    try {
-      await delay(70);
-      const seq = Math.max(
-        this.currentState.selfName.seq + 1,
-        this.identity.selfNameNextSeq ?? 1,
-      );
-      const delta: Delta = {
-        v: 6,
-        selfName: {
-          seq,
-          name,
-          sig: mockSelfNameSignature(seq, name),
-        },
-        parent: null,
-        childNames: null,
-        payments: null,
-        adjustments: null,
-        slots: [],
-      };
-
-      this.currentState = mergeDelta(this.currentState, delta);
-      this.identity.selfNameNextSeq = seq + 1;
-      this.callbacks.onIdentity(this.snapshotIdentity());
-      this.callbacks.onState(this.currentState);
-    } finally {
-      this.mutating = false;
-    }
-  }
-
-  /** The delegate-side address book commands the v9 UI calls. */
   async listContacts(): Promise<ContactRecord[]> {
     return this.addressBook.map((entry) => ({ ...entry }));
   }
@@ -423,12 +357,12 @@ export class OfflineBoard implements BoardBackend {
         );
       }
       if (userId === this.identity.pubkey) {
-        throw new Error("A board cannot be its own parent.");
+        throw new Error("A zone cannot be its own parent.");
       }
     }
 
     if (!this.started || !this.currentState) {
-      throw new Error("Offline board is not ready yet");
+      throw new Error("Offline zone is not ready yet");
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -469,7 +403,7 @@ export class OfflineBoard implements BoardBackend {
     slots: PaymentSlotWrite[],
   ): Promise<PaymentEntry | null> {
     if (!this.started || !this.currentState) {
-      throw new Error("Offline board is not ready yet");
+      throw new Error("Offline zone is not ready yet");
     }
     if (this.mutating) throw new Error("Another change is still in progress");
 
@@ -590,7 +524,7 @@ export class OfflineBoard implements BoardBackend {
     note: string,
   ): Promise<void> {
     if (!this.started || !this.currentState) {
-      throw new Error("Offline board is not ready yet");
+      throw new Error("Offline zone is not ready yet");
     }
     if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
       throw new Error(`slot must be in 0..7, got ${slotIndex}`);
@@ -668,7 +602,7 @@ export class OfflineBoard implements BoardBackend {
   async readBoard(ownerId: string): Promise<BoardSnapshot | null> {
     if (!isLowerHex(ownerId, 64)) {
       throw new Error(
-        `The board owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
+        `The zone owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
       );
     }
 
@@ -734,26 +668,13 @@ export class OfflineBoard implements BoardBackend {
 
     const own = this.identity.pubkey;
     const fixture = emptyState();
-    const name =
-      ownerId === MOCK_CHILD_ID
-        ? "Child board"
-        : ownerId === MOCK_PAYER_ID
-          ? "Payer board"
-          : ownerId === MOCK_SIBLING_ID
-            ? "Sibling board"
-            : "Parent board";
-    fixture.selfName = {
-      seq: 1,
-      name,
-      sig: mockSelfNameSignature(1, name),
-    };
 
     if (ownerId === MOCK_PARENT_ID) {
       const ownEntry: Entry = {
         value: 850n,
         contact: own,
         unit: "kg",
-        note: "Held by the parent board",
+        note: "October allowance",
       };
       fixture.slots[0] = {
         seq: 1,
@@ -773,8 +694,8 @@ export class OfflineBoard implements BoardBackend {
       };
       // A parent names each child by its own slot index (v6).
       const childNames = validateChildNameList([
-        { slot: 0, userId: own, name: "My board" },
-        { slot: 1, userId: MOCK_SIBLING_ID, name: "Sibling board" },
+        { slot: 0, userId: own, name: "My zone" },
+        { slot: 1, userId: MOCK_SIBLING_ID, name: "Sibling zone" },
       ]);
       fixture.childNames = {
         seq: 1,
@@ -826,7 +747,7 @@ export class OfflineBoard implements BoardBackend {
 
   private async write(slotIndex: number, entry: Entry | null): Promise<void> {
     if (!this.started || !this.currentState) {
-      throw new Error("Offline board is not ready yet");
+      throw new Error("Offline zone is not ready yet");
     }
     if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex > 7) {
       throw new Error(`slot must be in 0..7, got ${slotIndex}`);

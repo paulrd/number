@@ -12,10 +12,7 @@ import {
  * in-memory mock backend. No Freenet node or gateway is involved.
  */
 
-const ALICE_ID = "ABCDEF0123456789".repeat(4);
-const BOB_ID = "2222222222222222".repeat(4);
 const GHOST_ID = "3333333333333333".repeat(4);
-const CAROL_ID = "4444444444444444".repeat(4);
 
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
@@ -122,15 +119,19 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
 
   await page.goto("/");
 
-  // The default surface is the record card, three actions and nothing else.
+  // The default surface is the zone header, record card, three actions.
   await expect(page.getByRole("heading", { level: 1, name: "Tally" })).toBeVisible();
   await expect(page.locator("#simple-view")).toBeVisible();
   await expect(page.locator("#advanced-view")).toBeHidden();
-  await expect(page.locator("#board-title-name")).toHaveText("My board");
-  await expect(page.locator("#board-title")).toContainText("Your Board Name:");
+  await expect(page.locator("#board-title")).toHaveText("Your zone");
   await expect(
-    page.getByRole("heading", { level: 2, name: /Your Board Name: My board/ }),
+    page.getByRole("heading", { level: 2, name: "Your zone" }),
   ).toBeVisible();
+  await expect(page.locator("#simple-address")).toBeVisible();
+  await expect(page.locator("#simple-address-value")).toHaveText("root");
+  await expect(page.locator("#simple-parent")).toBeVisible();
+  await expect(page.locator("#simple-parent-name")).toHaveText("No parent yet");
+  await expect(page.locator("#parent-edit")).toHaveText("Add a parent");
   await expect(page.locator("#simple-pay")).toBeDisabled();
   await expect(page.locator("#simple-pay-reason")).toContainText("no links");
   await expect(page.locator("#simple-view")).not.toContainText(/slot/i);
@@ -140,9 +141,8 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#identity-short")).toBeVisible();
   await expect(page.locator("#identity-short")).not.toHaveText("Not available");
-  await expect(page.locator("#board-name-row")).toBeVisible();
-  await expect(page.locator("#board-name")).toHaveText("My board");
-  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await expect(page.locator("#board-name-row")).toHaveCount(0);
+  await expect(page.locator("#board-name-dialog")).toHaveCount(0);
   await expect(page.locator("#contract-short")).not.toHaveText("Not derived");
   await expect(page.locator(".slot")).toHaveCount(8);
   await expect(page.locator("#contacts-count")).toHaveText("0");
@@ -212,7 +212,6 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   await page.locator("#contacts-open").click();
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-list")).toContainText("Alice");
-  await expect(page.locator("#contacts-list")).not.toContainText("My board");
   await expect(page.locator("#contacts-dialog-count")).toHaveText("1 of 64");
 
   const accessibility = await new AxeBuilder({ page }).analyze();
@@ -241,7 +240,6 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   const firstLabel = page.locator(".slot .slot-label").first();
   await expect(firstLabel).toHaveText("Alice");
   await expect(firstLabel).toHaveAttribute("title", aliceId);
-  await expect(page.locator("#board-name")).toHaveText("My board");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -379,13 +377,13 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
 
   await page.goto("/");
   await expect(page.locator("#simple-view")).toBeVisible();
-  await expect(page.locator("#board-title-name")).toHaveText("My board");
-  await expect(page.locator("#parent-value-empty")).toContainText("no parent");
+  await expect(page.locator("#board-title")).toHaveText("Your zone");
+  await expect(page.locator("#simple-parent")).toBeVisible();
+  await expect(page.locator("#simple-parent-name")).toHaveText("No parent yet");
+  await expect(page.locator("#simple-address-value")).toHaveText("root");
   await openAdvanced(page);
   await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
   await expect(page.locator("#identity-short")).toBeVisible();
-  await expect(page.locator("#board-name-row")).toBeVisible();
-  await expect(page.locator("#board-name")).toHaveText("My board");
   await expect(page.locator("#parent-name")).toHaveText("Root");
   // A root's octal address is the empty string, and the simple card is hidden.
   await expect(page.locator("#board-address")).toBeVisible();
@@ -403,7 +401,7 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await expect(page.locator("#child-link-detail")).toContainText(
-    "lists this board as its parent",
+    "lists this zone as its parent",
   );
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
@@ -454,14 +452,14 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Pending");
   await expect(page.locator("#child-link-detail")).toContainText(
-    "has not set this board as its parent",
+    "has not set this zone as its parent",
   );
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
   await expect(page.locator("#unconfirmed-list")).toContainText("Parent");
   await expect(page.locator("#child-slots-title")).toHaveText("Child slots (1 of 8)");
 
-  // Setting this board's parent to the child would close a loop, so it is
+  // Setting this zone's parent to the child would close a loop, so it is
   // blocked before anything is signed.
   await openSimple(page);
   await page.locator("#parent-edit").click();
@@ -478,18 +476,22 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await expect(page.locator("#parent-status")).toHaveText("Linked");
   // There is no control to visit the parent's board.
   await expect(page.locator("#parent-open")).toHaveCount(0);
-  // The own board is now a child: the parent's empty address plus slot digit 0.
+  // This zone is now a child: the parent's empty address plus slot digit 0.
   await expect(page.locator("#board-address")).toHaveAttribute("data-address", "0");
   await expect(page.locator("#board-address-value")).toHaveText("0");
+  await expect(page.locator("#parent-name")).toHaveText("Parent");
 
-  // The default surface shows the value as given by the parent.
+  // The default surface shows the value as given by the parent, and it does
+  // not mention the parent now that the link is usable.
   await openSimple(page);
-  await expect(page.locator("#board-title-name")).toHaveText("My board");
-  await expect(page.locator("#parent-value-title")).toContainText("Held by Parent board");
+  await expect(page.locator("#board-title")).toHaveText("Your zone");
+  await expect(page.locator("#simple-address-value")).toHaveText("0");
+  await expect(page.locator("#simple-parent")).toBeHidden();
+  await expect(page.locator("#parent-value-title")).toContainText("Recorded above");
   await expect(page.locator("#parent-value")).toContainText("8.50");
   await expect(page.locator("#parent-value")).toContainText("kg");
   await expect(page.locator("#parent-value-recorded")).toContainText(
-    "Recorded by Parent board",
+    "You can't change it here.",
   );
   await openAdvanced(page);
 
@@ -517,12 +519,14 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await expect(page.locator("#editor")).toBeHidden();
   await expect(page.locator("#unconfirmed-list")).toContainText("Ghost");
 
-  // Clearing the parent returns this board to a root.
+  // A usable parent stays quiet: no change or clear controls on the simple view.
   await openSimple(page);
-  await page.locator("#parent-clear").click();
-  await expect(page.locator("#parent-name")).toHaveText("Root");
+  await expect(page.locator("#simple-parent")).toBeHidden();
   await expect(page.locator("#parent-clear")).toBeHidden();
-  await expect(page.locator("#parent-edit")).toHaveText("Set parent…");
+  await openAdvanced(page);
+  await expect(page.locator("#parent-name")).toHaveText("Parent");
+  // Let the advanced surface's entrance animation settle before axe reads it.
+  await page.waitForTimeout(600);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -559,15 +563,19 @@ test("shows only mutual children on the default surface", async ({ page }) => {
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("sets and clears a parent from the default surface", async ({ page }) => {
+test("adds a parent from the default surface, then keeps it quiet", async ({
+  page,
+}) => {
   const errors = watchConsole(page);
 
   await page.goto("/");
   await openAdvanced(page);
   await addContact(page, "Parent", MOCK_PARENT_ID);
   await openSimple(page);
+  await expect(page.locator("#simple-parent")).toBeVisible();
+  await expect(page.locator("#simple-parent-name")).toHaveText("No parent yet");
   await expect(page.locator("#simple-parent #parent-edit")).toHaveText(
-    "Set parent…",
+    "Add a parent",
   );
   await expect(page.locator("#simple-parent #parent-clear")).toBeHidden();
 
@@ -576,22 +584,37 @@ test("sets and clears a parent from the default surface", async ({ page }) => {
   await page.locator("#parent-save").click();
   await expect(page.locator("#parent-dialog")).toBeHidden();
 
-  await expect(page.locator("#simple-parent-name")).toHaveText("Parent board");
-  await expect(page.locator("#parent-edit")).toHaveText("Change parent");
-  await expect(page.locator("#parent-clear")).toBeVisible();
+  // A usable parent is not mentioned on the simple view at all.
+  await expect(page.locator("#simple-parent")).toBeHidden();
+  await expect(page.locator("#parent-edit")).toBeHidden();
+  await expect(page.locator("#parent-clear")).toBeHidden();
+  expect(await page.locator("#simple-view").innerText()).not.toContain("Parent");
+  await expect(page.locator("#parent-value-title")).toHaveText("Recorded above");
 
-  // Advanced keeps one read-only summary, not a second set of controls.
+  // Advanced is where a healthy parent is changed or cleared.
   await openAdvanced(page);
-  await expect(page.locator("#parent-name")).toHaveText("Parent board");
+  await expect(page.locator("#parent-name")).toHaveText("Parent");
   await expect(page.locator("#parent-status")).toHaveText("Linked");
+  await expect(page.locator("#parent-advanced-edit")).toBeVisible();
+  await expect(page.locator("#parent-advanced-edit")).toHaveText("Change parent…");
+  await expect(page.locator("#parent-advanced-clear")).toBeVisible();
+  await expect(page.locator("#parent-advanced-clear")).toHaveText("Clear parent");
   await expect(page.locator("#advanced-view #parent-edit")).toHaveCount(0);
   await expect(page.locator("#advanced-view #parent-clear")).toHaveCount(0);
 
+  // Change opens the same dialog; clearing returns the zone to a root and
+  // removes both Advanced controls.
+  await page.locator("#parent-advanced-edit").click();
+  await expect(page.locator("#parent-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#parent-dialog")).toBeHidden();
+  await page.locator("#parent-advanced-clear").click();
+  await expect(page.locator("#parent-name")).toHaveText("Root");
+  await expect(page.locator("#parent-advanced-edit")).toBeHidden();
+  await expect(page.locator("#parent-advanced-clear")).toBeHidden();
   await openSimple(page);
-  await page.locator("#parent-clear").click();
-  await expect(page.locator("#simple-parent-name")).toHaveText("Root");
-  await expect(page.locator("#parent-edit")).toHaveText("Set parent…");
-  await expect(page.locator("#parent-clear")).toBeHidden();
+  await expect(page.locator("#simple-parent")).toBeVisible();
+  await expect(page.locator("#parent-edit")).toHaveText("Add a parent");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -644,7 +667,7 @@ test("keeps Check for payments when auto-advance is not active", async ({
   await openAdvanced(page);
   await expect(page.locator("#payment-check")).toBeVisible();
   await expect(page.locator("#payment-note")).toHaveText(
-    "Payments move one board at a time. Each owner opens their board to sign their leg.",
+    "Payments move one zone at a time. Each owner opens their zone to sign their leg.",
   );
   await expect(page.locator("#payment-auto-note")).toBeHidden();
   await expect(page.locator("#payment-open-ledger")).toHaveCount(0);
@@ -680,99 +703,26 @@ test("keeps the contract id in a closed Details section", async ({ page }) => {
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("requires a board name on first load and cannot be dismissed", async ({
-  page,
-}) => {
-  const errors = watchConsole(page);
-
-  await page.goto("/?unnamed=1");
-  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
-  await expect(page.locator("#board-name-dialog")).toBeVisible();
-  await expect(page.locator("#board-name-title")).toHaveText("Name your board");
-  await expect(page.locator("#board-name-close")).toBeHidden();
-  await expect(page.locator("#board-name-cancel")).toBeHidden();
-
-  // Required mode: Escape and the backdrop must not dismiss it.
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#board-name-dialog")).toBeVisible();
-  await page.mouse.click(8, 8);
-  await expect(page.locator("#board-name-dialog")).toBeVisible();
-
-  const promptAccessibility = await new AxeBuilder({ page }).analyze();
-  expect(
-    promptAccessibility.violations,
-    `axe violations:\n${JSON.stringify(promptAccessibility.violations, null, 2)}`,
-  ).toEqual([]);
-
-  await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-warning")).toContainText("Enter a name");
-
-  await page.locator("#board-name-input").fill("Test board");
-  await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-dialog")).toBeHidden();
-  await openAdvanced(page);
-  await expect(page.locator("#board-name-row")).toBeVisible();
-  await expect(page.locator("#board-name")).toHaveText("Test board");
-  await expect(page.locator("#contacts-count")).toHaveText("0");
-
-  // Let the modal close settle before axe samples the page colours.
-  await page.waitForTimeout(250);
-  const accessibility = await new AxeBuilder({ page }).analyze();
-  expect(
-    accessibility.violations,
-    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
-  ).toEqual([]);
-
-  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
-});
-
-test("renames the board as a signed name, separate from contact labels", async ({
+test("never asks for a zone name and shows no name controls", async ({
   page,
 }) => {
   const errors = watchConsole(page);
 
   await page.goto("/");
+  await expect(page.locator("#status-pill")).toHaveAttribute("data-status", "offline");
+  await expect(page.locator("#simple-view")).toBeVisible();
+  await expect(page.locator("#board-title")).toHaveText("Your zone");
+  await expect(page.locator("#board-name-dialog")).toHaveCount(0);
+  await expect(page.locator("#board-name")).toHaveCount(0);
+
   await openAdvanced(page);
-  await expect(page.locator("#board-name")).toHaveText("My board");
+  await expect(page.locator("#board-name-row")).toHaveCount(0);
+  await expect(page.locator("#board-name-edit")).toHaveCount(0);
+  expect(await page.locator("body").innerText()).not.toMatch(/board name/i);
 
-  await page.locator("#board-name-edit").click();
-  await expect(page.locator("#board-name-dialog")).toBeVisible();
-  await expect(page.locator("#board-name-title")).toHaveText("Rename your board");
-  await expect(page.locator("#board-name-input")).toHaveValue("My board");
-  await expect(page.locator("#board-name-cancel")).toBeVisible();
-
-  await page.locator("#board-name-input").fill("Renamed board");
-  await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-dialog")).toBeHidden();
-  await expect(page.locator("#board-name")).toHaveText("Renamed board");
-
-  // v6: the board name is its own signed record, not an address-book entry, so
-  // it shares no namespace with contact labels.
-  await addContact(page, "Alice", ALICE_ID);
-  await page.locator("#board-name-edit").click();
-  await page.locator("#board-name-input").fill("Alice");
-  await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-dialog")).toBeHidden();
-  await expect(page.locator("#board-name")).toHaveText("Alice");
-  await expect(page.locator("#contacts-count")).toHaveText("1");
-
-  // A contact may use the board's old name, because the names are private and
-  // signed separately.
-  await page.locator("#contacts-open").click();
-  await page.locator("#contact-label-input").fill("Renamed board");
-  await page.locator("#contact-userid-input").fill(BOB_ID);
-  await page.locator("#contact-add-button").click();
-  await expect(page.locator("#contacts-list")).toContainText("Renamed board");
-
-  // Contact labels still have to be unique among themselves.
-  await page.locator("#contact-label-input").fill("Alice");
-  await page.locator("#contact-userid-input").fill(CAROL_ID);
-  await page.locator("#contact-add-button").click();
-  await expect(page.locator("#contact-label-warning")).toContainText(
-    "Another contact",
-  );
-  await page.locator("#contacts-done").click();
-  await expect(page.locator("#contacts-count")).toHaveText("2");
+  // The only name on the simple view belongs to the children the parent named.
+  await openSimple(page);
+  expect(await page.locator("#simple-view").innerText()).not.toMatch(/board name/i);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -814,9 +764,8 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await setParent(page, MOCK_PARENT_ID);
   await openAdvanced(page);
   await expect(page.locator("#parent-status")).toHaveText("Linked");
-  // The parent row uses the parent board's own signed name, not the private
-  // contact label ("Parent").
-  await expect(page.locator("#parent-name")).toHaveText("Parent board");
+  // The parent row uses this device's private contact label.
+  await expect(page.locator("#parent-name")).toHaveText("Parent");
 
   // Removing the child contact keeps both the signed id and the name this
   // board already gave the slot.
@@ -828,14 +777,14 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await page.locator("#contacts-done").click();
   await expect(page.locator(".slot .slot-label").first()).toHaveText("Child");
 
-  // The parent row already shows the parent's own name and does not change.
+  // The parent row keeps the private contact label even after the contact goes.
   await page.locator("#contacts-open").click();
   await page.getByRole("button", { name: "Remove Parent" }).click();
   await expect(page.locator("#contacts-confirm")).toBeVisible();
   await page.locator("#contacts-confirm-remove").click();
   await expect(page.locator("#contacts-list")).not.toContainText("Parent");
   await page.locator("#contacts-done").click();
-  await expect(page.locator("#parent-name")).toHaveText("Parent board");
+  await expect(page.locator("#parent-name")).toHaveText(/^Owner [0-9a-f]{8}$/);
 
   // The default surface uses the name this board gave the slot.
   await openSimple(page);
@@ -999,7 +948,7 @@ test("defaults to the simple surface and hides slot wording and branding", async
   await expect(page.locator("#simple-contacts")).toBeEnabled();
   await expect(page.locator("#simple-receive-link")).toBeDisabled();
   await expect(page.locator("#simple-receive-reason")).toHaveText(
-    "A board with no links cannot receive yet. Add a child or set a parent first.",
+    "A zone with no links cannot receive yet. Add a child or set a parent first.",
   );
 
   // The default surface never says "slot", and the banned branding phrases do
@@ -1066,11 +1015,12 @@ test("copies a receive-payment link with visible feedback", async ({ page }) => 
   await expect(page.locator("#simple-receive-link")).toBeEnabled();
   await page.locator("#simple-receive-link").click();
   await expect(page.locator("#simple-receive-status")).toHaveText(
-    "Link copied. Opening it adds your board to their address book.",
+    "Link copied. Opening it adds your zone to their address book.",
   );
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
-    "addr=",
-  );
+  const rootLink = await page.evaluate(() => navigator.clipboard.readText());
+  expect(rootLink).toContain("addr=");
+  // No parent has named this zone, so the link omits `name`.
+  expect(rootLink).not.toContain("name=");
 
   // A settled parent link changes the address to the parent's slot digit.
   await openAdvanced(page);
@@ -1083,7 +1033,7 @@ test("copies a receive-payment link with visible feedback", async ({ page }) => 
   await expect(page.locator("#simple-receive-link")).toBeEnabled();
   await page.locator("#simple-receive-link").click();
   await expect(page.locator("#simple-receive-status")).toHaveText(
-    "Link copied. Opening it adds your board to their address book.",
+    "Link copied. Opening it adds your zone to their address book.",
   );
   await expect(page.locator("#simple-receive-link")).toHaveText("Copied");
   await expect(page.locator("#simple-receive-link")).toHaveText(
@@ -1093,7 +1043,7 @@ test("copies a receive-payment link with visible feedback", async ({ page }) => 
 
   const clipboard = await page.evaluate(() => navigator.clipboard.readText());
   expect(clipboard).toContain("?pay=");
-  expect(clipboard).toContain("name=My+board");
+  expect(clipboard).toContain("name=My+zone");
   expect(clipboard).toContain("addr=0");
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
@@ -1112,7 +1062,7 @@ test("refuses a receive link from a board with no links or an unsettled address"
   // No links at all: no address and no receive path.
   await expect(receive).toBeDisabled();
   await expect(reason).toHaveText(
-    "A board with no links cannot receive yet. Add a child or set a parent first.",
+    "A zone with no links cannot receive yet. Add a child or set a parent first.",
   );
   await receive.evaluate((element) => (element as HTMLButtonElement).click());
   await page.waitForTimeout(50);
@@ -1137,7 +1087,7 @@ test("refuses a receive link from a board with no links or an unsettled address"
   );
   await expect(page.locator("#simple-pay")).toBeDisabled();
   await expect(page.locator("#simple-pay-reason")).toHaveText(
-    "A board on the path has not confirmed its parent yet. Check your parent link.",
+    "A zone on the path has not confirmed its parent yet. Check your parent link.",
   );
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
@@ -1268,7 +1218,7 @@ test("prefills and saves a contact from a receive-payment link", async ({
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contacts-invite")).toBeVisible();
   await expect(page.locator("#contacts-invite-title")).toHaveText(
-    "Alice shared their board with you.",
+    "Alice shared their zone with you.",
   );
   await expect(page.locator("#contacts-invite-address")).toHaveText("03");
   await expect(page.locator("#contacts-invite-key")).toHaveText(id);
@@ -1293,19 +1243,14 @@ test("prefills and saves a contact from a receive-payment link", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("waits for the board-name prompt before opening a receive link", async ({
+test("opens a receive link without a first-run name prompt", async ({
   page,
 }) => {
   const errors = watchConsole(page);
   const id = "cd".repeat(32);
 
-  await page.goto(`/?unnamed=1&pay=${id}&name=Alice&addr=03`);
-  await expect(page.locator("#board-name-dialog")).toBeVisible();
-  await expect(page.locator("#contacts-dialog")).toBeHidden();
-
-  await page.locator("#board-name-input").fill("Test board");
-  await page.locator("#board-name-save").click();
-  await expect(page.locator("#board-name-dialog")).toBeHidden();
+  await page.goto(`/?pay=${id}&name=Alice&addr=03`);
+  await expect(page.locator("#board-name-dialog")).toHaveCount(0);
   await expect(page.locator("#contacts-dialog")).toBeVisible();
   await expect(page.locator("#contact-label-input")).toHaveValue("Alice");
   await expect(page.locator("#contact-address-input")).toHaveValue("03");
@@ -1330,7 +1275,7 @@ test("rejects incomplete, own and duplicate receive links", async ({ page }) => 
   expect(ownId).toMatch(/^[0-9a-f]{64}$/);
   await page.goto(`/?pay=${ownId}&name=Self`);
   await expect(page.locator("#notice-title")).toHaveText(
-    "That link is your own board",
+    "That link is your own zone",
   );
   await expect(page.locator("#contacts-dialog")).toBeHidden();
   await expect(page).not.toHaveURL(/pay=/);

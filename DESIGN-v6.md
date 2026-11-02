@@ -1,5 +1,10 @@
 # v6 wire format — private address book, signed names
 
+> **Terminology (2026-11-02):** the UI now calls a board a **zone**, and a
+> zone has no name of its own (only the parent-signed names in child slots
+> remain). This is the historical spec for the wire format and keeps the
+> old wording; field names, signing domains and crate names are unchanged.
+
 Status: implementation spec for pass 1. Reviewed (oracle, attempt 1).
 
 Two changes drive v6:

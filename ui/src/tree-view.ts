@@ -5,9 +5,9 @@
  * slot whose contact is the child owner, and the child board's `parent.userId`
  * is the parent owner. A legacy (v2) snapshot has no parent record, so it cannot
  * be the child side, but its signed slots still make it a valid parent side.
- * Names come from the boards themselves: a board's own `selfName`, and the
- * `childNames` entry its parent signed for the slot that holds it. Nothing here
- * reads the private address book.
+ * The only signed name on an edge is the `childNames` entry the parent wrote
+ * for the slot that holds the child. Nothing here reads a zone's own dormant
+ * `selfName` record or the private address book.
  * Everything here is read-only; the caller decides when a board may be edited
  * (`BoardSnapshot` from the own delegate).
  *
@@ -167,8 +167,6 @@ export interface ParentValue {
   slot: number;
   entry: Entry;
   parentOwnerId: string;
-  /** The parent's own signed name, when it has one. */
-  parentName: string | null;
 }
 
 /**
@@ -188,7 +186,6 @@ export function parentValueFor(
     slot,
     entry,
     parentOwnerId: parent.ownerId,
-    parentName: parent.state.selfName.name,
   };
 }
 

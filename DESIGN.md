@@ -1,5 +1,10 @@
 # number — design (v4/v5)
 
+> **Terminology (2026-11-02):** the UI now calls a board a **zone**, and a
+> zone has no name of its own (only the parent-signed names in child slots
+> remain). This is the historical spec for the wire format and keeps the
+> old wording; field names, signing domains and crate names are unchanged.
+
 A personal Freenet app: one board per user, holding exactly **8 slots** and an
 **address book**, arranged as a **tree of boards**. A board is a node; its 8
 slots are its children; it has at most one parent. A slot is either empty or

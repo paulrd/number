@@ -438,34 +438,6 @@ describe("OnlineBoard.issueOrBurn", () => {
 });
 
 describe("OnlineBoard names", () => {
-  it("renaming the own board signs a selfName record, not a contacts entry", async () => {
-    const { board, contract, sent } = await harness(() => {});
-
-    await board.saveSelfName("Renamed board");
-
-    const sign = sent.find((payload) => payload.cmd === "signSelfName");
-    expect(sign).toEqual({
-      cmd: "signSelfName",
-      seq: 1,
-      name: "Renamed board",
-    });
-
-    const deltas = (contract as unknown as { deltas: Delta[] }).deltas;
-    expect(deltas).toHaveLength(1);
-    expect(deltas[0].v).toBe(6);
-    expect(deltas[0].selfName).toEqual({
-      seq: 1,
-      name: "Renamed board",
-      sig: SIG,
-    });
-    // v6 removed the replicated address book: no state or delta carries it.
-    expect(deltas[0]).not.toHaveProperty("contacts");
-    expect(board.currentState?.selfName.name).toBe("Renamed board");
-    expect(board.identity?.selfNameNextSeq).toBe(2);
-
-    board.close();
-  });
-
   it("saving a child slot writes the parent's name for that slot", async () => {
     const { board, contract, sent } = await harness(
       (state) => {

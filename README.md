@@ -2,26 +2,27 @@
 
 UI display name: **Tally**. The repository, crate names and on-disk keys keep
 `number`: renaming them changes the WASM bytes, and so the contract id and
-delegate key, which would strand every existing board.
+delegate key, which would strand every existing zone.
 
-A small Freenet dApp: one personal board of **8 number slots** and a private
-**address book**, arranged as a **tree of boards**. Each board is a node: its 8
+A small Freenet dApp: one personal **zone** of **8 number slots** and a private
+**address book**, arranged as a **tree of zones**. Each zone is a node: its 8
 slots are its children (each linked to a contact — label + user id/public key)
-and it has at most one parent board. A slot holds a two-decimal number
+and it has at most one parent zone. A slot holds a two-decimal number
 (optional; blank is `0.00`) plus optional unit and note. The child contact is
 mandatory; the slot stores the contact's public key, so renaming a label keeps
-the link. The name a child sees is the one signed with the slot (`childNames`),
-so renaming a contact does not rewrite it.
+the link. A zone has no name of its own: the only names are the ones a parent
+signs into its child slots (`childNames`), so a child is shown under the label
+its parent gave it.
 
 A parent/child edge is a tree edge only when **both sides agree**: the parent
-board has a slot for the child, and the child board's parent points back to the
+zone has a slot for the child, and the child zone's parent points back to the
 parent. A slot counts as a child slot only then; a one-sided link is shown
-separately as unconfirmed. The UI shows your own board only — there is no
-navigation to other owners' boards — although the protocol reads neighbours'
-signed state to resolve names, values, links and payment routes.
+separately as unconfirmed. The UI shows your own zone only — there is no
+navigation to other owners' zones — although the protocol reads neighbours'
+signed state to resolve values, links and payment routes.
 
 Payments route between two addresses through their least common ancestor, and
-**either endpoint may be that ancestor**: a board with any link (parent or
+**either endpoint may be that ancestor**: a zone with any link (parent or
 child) can pay and be paid. A route with only downward links means the payer
 credits the first child on the path — an *implicit issue* against that child's
 liability — and a route with only upward links means the payee debits the child
@@ -34,16 +35,18 @@ record; the slot write is the issue or burn. See
   payment, adjustment, `selfName` and `childNames` records, last-writer-wins on
   a monotonic `seq`, tombstones for cleared slots, canonical JSON state, small
   fixed-size summary, delta sync. There is no address book in contract state.
+  `selfName` remains a v6 field so older zones decode and merge, but the UI no
+  longer writes or shows it: `childNames` is the only live name record.
 - **Delegate** (`delegate/`) — holds the owner's signing key and the private
   address book (`label`, `userId`, octal `address`) locally, and signs slot,
-  parent, payment, adjustment and name updates. **v4.1:** while
-  the node runs it subscribes to the board's parent and children and can
+  parent, payment, adjustment and child-slot name updates. **v4.1:** while
+  the node runs it subscribes to the zone's parent and children and can
   advance a forward payment leg with no tab open (Background permission
   required). Secrets never leave the node.
-- **UI** (`ui/`) — TypeScript + Vite. Derives the board key from the owner key,
+- **UI** (`ui/`) — TypeScript + Vite. Derives the zone key from the owner key,
   creates the instance on first use (PUT), subscribes, sends signed deltas, and
   manages the address book.
-- **Adjustments (v5)** — each board owner can issue (raise) or burn (lower) the
+- **Adjustments (v5)** — each zone owner can issue (raise) or burn (lower) the
   liability recorded for a child slot. The adjustment is signed and carried in
   a bounded log the child can read; a burn clamps at zero. It is bookkeeping,
   not a payment.
@@ -56,6 +59,9 @@ Design and exact wire formats: [DESIGN.md](./DESIGN.md) (v4/v5), [DESIGN-payment
 information architecture: [DESIGN-views.md](./DESIGN-views.md).
 Current deployment state, done work, and the remaining backlog:
 [BACKLOG.md](./BACKLOG.md).
+The historical design docs predate the user-facing **zone** wording and keep
+"board" in their prose; the wire formats, field names and signing domains did
+not change.
 
 ## Prerequisites
 
@@ -133,7 +139,7 @@ Append the outgoing artifact to `ui/src/migrations.ts` **before** rebuilding:
 The v2 address-book release was the breaking case: its state schema and signing
 bytes changed, so v1 contract hashes are unmigratable. The v3 tree release is
 migratable: it keeps the v2 slot/contacts signing bytes and adds a parent
-record, so v2 boards are upgraded with an empty parent. The owner identity
+record, so v2 zones are upgraded with an empty parent. The owner identity
 migrates through the delegate in both cases.
 
 This is enforced, not just documented: `scripts/record-artifacts.sh` refuses to
@@ -161,9 +167,9 @@ migration tests that must not touch the node the UI uses. Override with
 contracts from another node nor publishes its own to the network, so a
 parent/child edge to/from a network peer shows **Not created yet**. For a
 two-node test, stop the local node and run `make node-network` (same data
-directories, so the identity, board, site and delegate survive), and make sure
+directories, so the identity, zone, site and delegate survive), and make sure
 the other node is also on the network (the live `:7509` peer is). Both sides
-must be able to fetch the other board for the mutual link to resolve.
+must be able to fetch the other zone for the mutual link to resolve.
 
 ```bash
 # 1. the node the UI talks to
@@ -184,7 +190,7 @@ Always pass `--port`: `fdev` defaults to `7509`, which on a development
 machine may be an SSH forward or a system service rather than this node. The
 same applies to `fdev --port 7510 website list`.
 
-Open the printed `/v1/contract/web/<id>/` URL on the node's port. The board is
+Open the printed `/v1/contract/web/<id>/` URL on the node's port. The zone is
 created on first load (the UI PUTs the bundled `number_contract.wasm` with the
 owner key as parameters).
 
@@ -197,7 +203,7 @@ migration) before building that site's UI.
 ### Frontend iteration (dev server)
 
 `npm --prefix ui run dev` serves the UI at `:8080` and proxies `/v1` (HTTP and
-WebSocket) to the local node, so the app uses the real delegate and board
+WebSocket) to the local node, so the app uses the real delegate and zone
 instead of talking to `:8080`.
 
 On startup it mints a dev auth token the way the gateway shell does: it loads
@@ -219,75 +225,80 @@ server after restarting the node. None of this runs for `npm run build`,
 The dev server proxies a node credential, so keep it on loopback: do not pass
 `--host 0.0.0.0` on a machine where other users can reach the port.
 
-## Boards as a tree
+## Zones as a tree
 
-Every board is a node in a tree. Its 8 slots are its **children** (each slot's
-contact is the child board owner's user id) and it has at most one **parent**.
+Every zone is a node in a tree. Its 8 slots are its **children** (each slot's
+contact is the child zone owner's user id) and it has at most one **parent**.
 
-Each board also has a **name**, owned by its owner and stored as the owner's own
-entry in that board's signed address book. When you look at another board, the
-label shown is your address-book label for that user if you have one, otherwise
-the target board's own name, otherwise a shortened id. The owner is asked to
-name their board on first load; the name is signed and replicated like any other
-contact, and the self-entry is hidden from the normal contact list. The Contract
-id is under **Details**, not in the primary header.
+A zone has no name of its own. The only names left are the ones a parent signs
+into its child slots (`childNames`), so a parent lists each child under the
+label it gave that slot. On its own view a zone is simply **Your zone**, shown
+with its value, its children and its octal address; there is no name field to
+fill in or rename. The contract id is under **Details**, not in the primary
+header.
 
 - **Link a child:** open a slot, choose the child's contact, and save. The
-  child's owner opens *their* board, sets its parent to your board, and adds
-  your contact if needed.
-- **Link a parent:** open **Parent → Set parent** on your board and choose the
-  parent's contact. Clear it to become a root.
-- **Mutual match:** an edge is a tree edge only when both boards agree — the
+  child's owner opens *their* zone, sets its parent to your zone, and adds your
+  contact if needed.
+- **Link a parent:** a zone with no usable parent shows **Add a parent** on the
+  simple view; choose the parent's contact. To change or clear an existing
+  parent, use **Advanced → Parent** (clearing it makes the zone a root).
+- **Mutual match:** an edge is a tree edge only when both zones agree — the
   parent has a slot for the child and the child's parent points back. One-sided
-  links show as **Pending**; a board that does not exist shows **Not created**.
-  A v2 board can be a parent (its slots are readable) but must be opened in v3
+  links show as **Pending**; a zone that does not exist shows **Not created**.
+  A v2 zone can be a parent (its slots are readable) but must be opened in v3
   to become a child.
-- **Navigate:** breadcrumbs follow mutual parent edges to the root; **Home**
-  returns to your own board. Other owners' boards are read-only. The address
-  book labels a board's own slots; a viewed board's labels come from its state.
-- **Parent value:** when a board has a parent and the parent's signed slot
-  points at it, the value the parent holds for that board is shown prominently
-  above the grid, with its unit, note, and zero-based slot. A root, a pending
-  link, or a cleared parent slot has nothing to show.
-- **Octal address:** every board shows an address made of zero-based slot digits
+- **No navigation:** the UI shows your own zone only. The protocol reads
+  neighbouring zones for values, links and payment routes; there is no
+  breadcrumb or other-owner browsing.
+- **Parent value:** when a zone has a mutual parent, the value the parent holds
+  in the slot naming it is shown on the simple view as a record from above,
+  with its unit and note, captioned `You can't change it here.` The parent is
+  not named there. A root, a pending link, or a cleared parent slot has nothing
+  to show, and the simple view instead offers the parent prompt when the link
+  is missing.
+- **Octal address:** every zone shows an address made of zero-based slot digits
   from the root, with no separator. A root is the empty string; each child
-  appends its slot digit (`0`–`7`) to its parent's address, so a board in slot 2
-  of a board in slot 5 of the root has address `52`. The address is derived
-  from mutual parent links, not stored; a pending, missing, unreadable, looping,
-  or over-deep chain leaves it unsettled.
+  appends its slot digit (`0`–`7`) to its parent's address, so a zone in slot 2
+  of a zone in slot 5 of the root has address `52`. The simple view shows it
+  quietly beside the heading; Advanced repeats it as a chip. The address is
+  derived from mutual parent links, not stored; a pending, missing, unreadable,
+  looping, or over-deep chain leaves it unsettled.
 - **Cycles** are detected by the UI and are not followed. The contract enforces
-  one signed parent per board and rejects a board parenting itself; it cannot
-  enforce agreement or acyclicity across boards.
+  one signed parent per zone and rejects a zone parenting itself; it cannot
+  enforce agreement or acyclicity across zones.
 
 ### Payments
 
-A payment moves a positive amount from one board to another along the unique
+A payment moves a positive amount from one zone to another along the unique
 path through their least common ancestor (LCA). The sender supplies the
 destination's **octal address**, the destination **user id**, and the amount.
 
-- Each board owner signs only their own state, so a payment is a sequence of
-  signed legs, not one transaction. The source writes the offer; each board on
+- Each zone owner signs only their own state, so a payment is a sequence of
+  signed legs, not one transaction. The source writes the offer; each zone on
   the upward path signs a debit, the LCA signs the paired debit and credit in
-  one delta, and each board on the downward path signs a credit. A board
+  one delta, and each zone on the downward path signs a credit. A zone
   advances the payments it can see in its inbox (its parent and eight children)
   when its owner opens it.
 - An upward debit that would take a value below `0.00` fails before signing.
-  A missing destination, a user id that does not match the board at the address,
-  or a failed leg starts a **reverse** walk: every board that already acted undoes
+  A missing destination, a user id that does not match the zone at the address,
+  or a failed leg starts a **reverse** walk: every zone that already acted undoes
   its own leg. A reversal is best effort; a later signed write can supersede a
   leg, and an offline owner can leave the payment reversing. The UI reports the
   state rather than pretending it settled.
-- There is one active payment per board in this version. Discovery is manual:
-  **Check for payments** clears the session cache. There is no push or timeout,
-  so a payment can wait indefinitely for an owner to open their board.
-- The v4 `payments` record is signed like the parent and address book. v3 boards
+- There is one active payment per zone in this version. Discovery is manual
+  unless the node grants the Background capability: **Check for payments**
+  clears the session cache, and the delegate auto-advances legs when the node
+  runs its background task. A zone can still wait indefinitely for an owner to
+  open it.
+- The v4 `payments` record is signed like the parent record. v3 zones
   upgrade by adding an empty payments record; the v4 contract and delegate are a
   new generation with the usual migration path.
 
 ## Identity backup and restore
 
 The owner identity is an Ed25519 seed held in this device's Freenet delegate.
-The board's contract key is derived from its public key, so the seed *is* the
+The zone's contract key is derived from its public key, so the seed *is* the
 account: anyone with it can sign updates as the owner.
 
 - **Back up:** open **Back up identity** in the Identity row, choose **Reveal
@@ -299,11 +310,11 @@ account: anyone with it can sign updates as the owner.
   first-run dialog offers **Restore from a backup**. Paste the code there. This
   is the only moment restore is possible — the delegate refuses to replace an
   existing seed, so a device that already has an identity cannot import one.
-- The backup carries the key, not the board. Another device restores the same
-  key, derives the same board address, and loads the board (including its
-  address book, which lives in contract state) from Freenet, so it needs
-  network access. A local-only node will show an empty board even though the
-  identity is correct (live deployment is #12).
+- The backup carries the key and the private address book (payload v2), not the
+  zone. Another device restores the same key, derives the same zone address,
+  and loads the zone's signed state from Freenet, so it needs network access.
+  A local-only node will show an empty zone even though the identity is
+  correct (live deployment is #12).
 - The code is never stored by the app: it is fetched only when you reveal it,
   kept in a readonly field, and cleared when you hide the code or close the
   dialog.
@@ -332,10 +343,10 @@ updates are in place. Any node that can fetch the contract serves it at
 ## Behaviour notes
 
 - **A slot's contact is mandatory and is the child node.** It is selected from
-  the address book and stored as the child board owner's 64-hex public key.
+  the address book and stored as the child zone owner's 64-hex public key.
   Removing a contact does not invalidate old signed slots; they show an
   "unknown contact" id until re-linked.
-- **A board has one signed parent record.** Setting a parent is a signed write;
+- **A zone has one signed parent record.** Setting a parent is a signed write;
   clearing it writes a parent tombstone at a higher `seq`. A parent edge only
   counts as a tree edge when the other side links back; one-sided links are
   shown as pending. Cycles are detected by the UI, not the contract.
@@ -344,16 +355,16 @@ updates are in place. Any node that can fetch the contract serves it at
   address book and parent record have their own signed sequences: removing every
   contact or clearing the parent leaves a legal empty record at a higher `seq`.
 - **Identity lives in the delegate** on this node. A different device has a
-  different owner key and therefore a different board until key export/import
-  exists.
+  different owner key and therefore a different zone until the identity is
+  exported and imported.
 - **Values are i64 counts of hundredths in the contract.** The wire format is a
   JSON number and the UI parses/emits it losslessly (BigInt), so the full range
   `-92233720368547758.08` … `92233720368547758.07` (displayed) survives editing,
   signing, and reload exactly. A blank input saves `0.00`; more than two decimal
   places is rejected.
-- **v3 carries v2 boards forward.** v3 keeps the v2 slot/contacts signing bytes
+- **v3 carries v2 zones forward.** v3 keeps the v2 slot/contacts signing bytes
   and adds a signed parent record; the client upgrades a v2 state with an empty
-  parent and re-PUTs it. v1 boards remain unmigratable (the v2 address book
+  parent and re-PUTs it. v1 zones remain unmigratable (the v2 address book
   changed their schema/signing bytes). The owner key is preserved through
   delegate migration in both cases.
 - **Live updates** arrive through subscription deltas. The node currently

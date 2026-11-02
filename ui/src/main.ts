@@ -15,7 +15,6 @@ import {
   resolveReceiveInvite,
   type ReceiveInvite,
 } from "./contacts-dialog";
-import { createBoardNameDialog } from "./board-name-dialog";
 import {
   DelegateError,
   delegateNeverScanned,
@@ -96,9 +95,6 @@ const statusDetail = byId<HTMLParagraphElement>("status-detail");
 const identityShort = byId<HTMLElement>("identity-short");
 const identityCopy = byId<HTMLButtonElement>("identity-copy");
 const identityBackup = byId<HTMLButtonElement>("identity-backup");
-const boardNameRow = byId<HTMLElement>("board-name-row");
-const boardName = byId<HTMLElement>("board-name");
-const boardNameEdit = byId<HTMLButtonElement>("board-name-edit");
 const contractShort = byId<HTMLElement>("contract-short");
 const contractCopy = byId<HTMLButtonElement>("contract-copy");
 const detailsBox = byId<HTMLDetailsElement>("details");
@@ -128,6 +124,8 @@ const parentStatus = byId<HTMLSpanElement>("parent-status");
 const parentNote = byId<HTMLParagraphElement>("parent-note");
 const parentEdit = byId<HTMLButtonElement>("parent-edit");
 const parentClear = byId<HTMLButtonElement>("parent-clear");
+const parentAdvancedEdit = byId<HTMLButtonElement>("parent-advanced-edit");
+const parentAdvancedClear = byId<HTMLButtonElement>("parent-advanced-clear");
 const contactsOpen = byId<HTMLButtonElement>("contacts-open");
 const contactsCount = byId<HTMLElement>("contacts-count");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
@@ -141,7 +139,6 @@ const noticeDismiss = byId<HTMLButtonElement>("notice-dismiss");
 const warningsBox = byId<HTMLDivElement>("warnings");
 const warningList = byId<HTMLUListElement>("warning-list");
 const boardTitle = byId<HTMLHeadingElement>("board-title");
-const boardTitleName = byId<HTMLElement>("board-title-name");
 const boardMode = byId<HTMLParagraphElement>("board-mode");
 const boardAddress = byId<HTMLElement>("board-address");
 const boardAddressValue = byId<HTMLElement>("board-address-value");
@@ -182,7 +179,13 @@ const simplePaymentWaiting = byId<HTMLElement>("simple-payment-waiting");
 const simplePaymentReview = byId<HTMLButtonElement>("simple-payment-review");
 const simpleChildren = byId<HTMLElement>("simple-children");
 const simpleChildrenList = byId<HTMLUListElement>("simple-children-list");
+const simpleParent = byId<HTMLElement>("simple-parent");
 const simpleParentName = byId<HTMLElement>("simple-parent-name");
+const simpleParentReason = byId<HTMLElement>("simple-parent-reason");
+const simpleRecordSheet = byId<HTMLElement>("simple-record-sheet");
+const simpleAddress = byId<HTMLElement>("simple-address");
+const simpleAddressValue = byId<HTMLElement>("simple-address-value");
+const simpleAddressNote = byId<HTMLElement>("simple-address-note");
 const childSlotsTitle = byId<HTMLElement>("child-slots-title");
 const childSlotsEmpty = byId<HTMLElement>("child-slots-empty");
 const addChildSlot = byId<HTMLButtonElement>("add-child-slot");
@@ -306,7 +309,7 @@ let slotExistenceOwner: string | null = null;
 let slotExistenceRequest = 0;
 
 /** Why the simple Send payment action is disabled, or null when it is usable. */
-let paymentBlockedReason: string | null = "Waiting for your board.";
+let paymentBlockedReason: string | null = "Waiting for your zone.";
 
 /** The own parent link's state, or null while it is being checked. */
 let ownParentLinkState: LinkState | null = null;
@@ -360,10 +363,6 @@ let autoAdvanceDirty = false;
 let ownLiveChild: boolean | null = null;
 let ownLiveChildRequest = 0;
 
-/** Session cache for neighbour boards' own names (the board cache holds states). */
-const nameCache = new Map<string, string | null>();
-const nameInflight = new Map<string, Promise<string | null>>();
-
 const OWN_BOARD_HINT =
   "Select a slot to issue or burn the liability it holds for its child, or to " +
   "change the contact, unit, or note. Amounts show two decimal places, and a " +
@@ -383,11 +382,11 @@ const LINK_LABELS: Record<LinkState, string> = {
 };
 
 const LINK_TITLES: Record<LinkState, string> = {
-  root: "This board has no parent.",
-  linked: "Both boards point at each other.",
+  root: "This zone has no parent.",
+  linked: "Both zones point at each other.",
   pending: "Only one side points at the other yet.",
-  "not-created": "No board exists for this owner yet.",
-  error: "This board could not be read.",
+  "not-created": "No zone exists for this owner yet.",
+  error: "This zone could not be read.",
 };
 
 /** Short visible reasons for an unresolved octal address. */
@@ -401,14 +400,14 @@ const ADDRESS_PROBLEM_LABELS: Record<AddressProblem, string> = {
 
 /** One-line explanations, used in the chip's title and accessible name. */
 const ADDRESS_PROBLEM_REASONS: Record<AddressProblem, string> = {
-  pending: "the parent board has not added this board yet",
-  "not-created": "the parent board has not been created yet",
-  unreadable: "a parent board could not be read",
+  pending: "the parent zone has not added this zone yet",
+  "not-created": "the parent zone has not been created yet",
+  unreadable: "a parent zone could not be read",
   loop: "the parent links form a loop",
-  truncated: `the path is more than ${MAX_TREE_DEPTH} boards deep`,
+  truncated: `the path is more than ${MAX_TREE_DEPTH} zones deep`,
 };
 
-const LEGACY_PARENT_NOTE = "Parent board is on the previous version.";
+const LEGACY_PARENT_NOTE = "Parent zone is on the previous version.";
 const LEGACY_PARENT_TITLE =
   "The parent cannot set its own parent until its owner opens the new app, but this edge is still valid.";
 
@@ -431,25 +430,17 @@ function ownContacts(): ContactRecord[] {
   return backend.contacts;
 }
 
-/** The board's own signed name, or null when it has not been named. */
-function ownSelfName(): string | null {
-  return ownState?.selfName.name ?? null;
-}
-
 function contactLabel(userId: string): string | null {
   return ownContacts().find((contact) => contact.userId === userId)?.label ?? null;
 }
 
-function unknownLabel(ownerId: string): string {
-  return `Unknown · ${shortUserId(ownerId)}`;
-}
-
 /**
- * A board's visible name: its own signed `selfName`, then a shortened id. The
- * private address book never names another owner's board in v6.
+ * How a zone is identified when there is no parent-given or private contact
+ * name: the private label on this device, then a shortened owner key. A zone
+ * has no public name of its own.
  */
-function boardNameOf(ownerId: string, state: StateV3): string {
-  return state.selfName.name ?? unknownLabel(ownerId);
+function ownerLabel(ownerId: string): string {
+  return contactLabel(ownerId) ?? `Owner ${shortUserId(ownerId)}`;
 }
 
 /**
@@ -507,59 +498,6 @@ const linkDeps = {
   readBoard: readBoardForView,
 };
 
-/** Cached own name for a neighbour board; undefined means "not read yet". */
-function cachedSelfName(ownerId: string): string | null | undefined {
-  if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSelfName();
-  return nameCache.get(ownerId);
-}
-
-/** Read a board's own name for labels, without blocking render. */
-async function resolveSelfName(ownerId: string): Promise<string | null> {
-  if (ownIdentity && ownerId === ownIdentity.pubkey) return ownSelfName();
-  const cached = nameCache.get(ownerId);
-  if (cached !== undefined) return cached;
-  const pending = nameInflight.get(ownerId);
-  if (pending) return pending;
-
-  const request = readBoardForView(ownerId)
-    .then((snapshot) =>
-      snapshot === null ? null : snapshot.state.selfName.name,
-    )
-    .catch(() => null)
-    .then((name) => {
-      nameCache.set(ownerId, name);
-      nameInflight.delete(ownerId);
-      return name;
-    });
-  nameInflight.set(ownerId, request);
-  return request;
-}
-
-/** Fill in a slot label once the child board's own name arrives. */
-function applyResolvedSlotName(
-  index: number,
-  ownerId: string,
-  name: string | null,
-): void {
-  if (name === null) return;
-  const current = view;
-  if (!current) return;
-  const slot = current.state.slots[index];
-  if (slot?.entry?.contact !== ownerId) return;
-  // A signed parent-given name always wins; this fallback only fills a slot the
-  // viewed board has not named.
-  if (parentGivenName(current, ownerId) !== null) return;
-  const slotView = slotViews[index];
-  slotView.label.textContent = name;
-  slotView.label.classList.remove("is-unknown");
-  slotView.label.title = ownerId;
-}
-
-async function resolveSlotName(index: number, ownerId: string): Promise<void> {
-  const name = await resolveSelfName(ownerId);
-  applyResolvedSlotName(index, ownerId, name);
-}
-
 /** Contract key shown in the header: the viewed board's instance id. */
 function currentContractKey(): string | null {
   if (!view) return null;
@@ -607,7 +545,7 @@ function buildSlots(): void {
     const label = createElement("span", "slot-label is-placeholder", "Waiting…");
     const note = createElement("span", "slot-note");
     note.hidden = true;
-    const action = createElement("span", "sr-only", "Waiting for the board.");
+    const action = createElement("span", "sr-only", "Waiting for the zone.");
 
     // Let the button's own visible content name it, with one hidden action hint.
     // This keeps voice-control labels and screen-reader output in sync.
@@ -674,7 +612,7 @@ function renderBoard(): void {
       slotView.label.title = "";
       slotView.note.hidden = true;
       slotView.seq.textContent = "seq 0";
-      slotView.action.textContent = "Waiting for the board.";
+      slotView.action.textContent = "Waiting for the zone.";
     }
     renderChildSlotsMeta();
     renderSimpleChildren();
@@ -728,27 +666,15 @@ function renderBoard(): void {
     slotView.unit.textContent = entry?.unit ?? "";
 
     // A slot's visible name is the one this board gave it in `childNames`.
-    // Only when that record does not describe the slot do we read the child
-    // board's own signed name.
+    // Without one, fall back to the private contact label, then the short key.
+    // A zone has no public name of its own any more.
     const givenName = entry ? parentGivenName(current, entry.contact) : null;
-    let resolvedName: string | null | undefined;
-    if (entry && givenName === null) {
-      resolvedName = cachedSelfName(entry.contact);
-      if (resolvedName === undefined) {
-        // Never block the grid on a neighbour read; fill the name in later.
-        void resolveSlotName(index, entry.contact);
-      }
-    }
     const labelText = entry
-      ? givenName ??
-        (typeof resolvedName === "string"
-          ? resolvedName
-          : unknownLabel(entry.contact))
+      ? givenName ?? ownerLabel(entry.contact)
       : slot.seq > 0
         ? "Cleared"
         : "Empty";
-    const unknownSlotLabel =
-      Boolean(entry) && givenName === null && typeof resolvedName !== "string";
+    const unknownSlotLabel = Boolean(entry) && givenName === null;
 
     slotView.label.textContent = labelText;
     slotView.label.classList.toggle("is-placeholder", !entry);
@@ -788,6 +714,7 @@ function renderSimpleChildren(): void {
   ) {
     simpleChildren.hidden = true;
     simpleChildrenList.replaceChildren();
+    updateSimpleRecordSheet();
     return;
   }
 
@@ -798,9 +725,7 @@ function renderSimpleChildren(): void {
 
     const row = createElement("li", "simple-child");
     const name =
-      parentGivenName(current, entry.contact) ??
-      cachedSelfName(entry.contact) ??
-      unknownLabel(entry.contact);
+      parentGivenName(current, entry.contact) ?? ownerLabel(entry.contact);
     const label = createElement("span", "simple-child-name", name);
     label.title = entry.contact;
     const value = createElement(
@@ -814,6 +739,7 @@ function renderSimpleChildren(): void {
 
   simpleChildrenList.replaceChildren(...rows);
   simpleChildren.hidden = rows.length === 0;
+  updateSimpleRecordSheet();
 }
 
 /**
@@ -849,9 +775,7 @@ function unconfirmedRow(index: number): HTMLLIElement {
   if (entry === null) return row;
 
   const name =
-    parentGivenName(current, entry.contact) ??
-    cachedSelfName(entry.contact) ??
-    unknownLabel(entry.contact);
+    parentGivenName(current, entry.contact) ?? ownerLabel(entry.contact);
   const copy = createElement("div", "unconfirmed-copy");
   const title = createElement("span", "unconfirmed-name", name);
   title.title = entry.contact;
@@ -863,7 +787,7 @@ function unconfirmedRow(index: number): HTMLLIElement {
   const fact = createElement(
     "span",
     "unconfirmed-fact",
-    "Their board does not name this board as its parent yet.",
+    "Their zone does not name this zone as its parent yet.",
   );
   copy.append(title, amount, fact);
 
@@ -1030,45 +954,47 @@ function renderContractKey(): void {
 }
 
 function renderBoardHeader(): void {
-  const current = view;
-
-  if (!current) {
-    boardNameRow.hidden = true;
-    boardName.textContent = "Not named";
-    boardName.classList.add("is-empty");
-    boardName.removeAttribute("title");
-    boardNameEdit.disabled = true;
-    boardMode.textContent = "Signed · two decimals";
-    boardHint.textContent = OWN_BOARD_HINT;
-    return;
-  }
-
-  boardNameRow.hidden = false;
-
-  const self = ownSelfName();
-  boardName.textContent = self ?? "Not named";
-  boardName.classList.toggle("is-empty", self === null);
-  boardName.title = self ?? "This board has no name yet.";
-  boardNameEdit.disabled = busy || self === null;
-
   boardMode.textContent = "Signed · two decimals";
   boardHint.textContent = OWN_BOARD_HINT;
 }
 
-/**
- * The simple card owns the `#board-title` heading: it reads the parent's
- * `childNames` entry first and falls back to the board's own signed `selfName`.
- * `renderParentValue` paints it; this only resets the loading label.
- */
-function renderBoardTitle(): void {
-  if (view !== null) return;
-  boardTitleName.textContent = "Your board";
-  boardTitle.removeAttribute("title");
+/** Paint the discreet octal address on the simple surface. */
+function paintSimpleAddress(info: AddressInfo | null): void {
+  if (info === null) {
+    simpleAddressValue.textContent = "—";
+    simpleAddressNote.textContent = "checking";
+    simpleAddress.title = "Working out this zone's octal address.";
+    return;
+  }
+
+  if (info.address === null) {
+    const problem: AddressProblem = info.problem ?? "unreadable";
+    const reason = ADDRESS_PROBLEM_REASONS[problem];
+    simpleAddressValue.textContent = "—";
+    simpleAddressNote.textContent = reason;
+    simpleAddress.title = `Octal address unavailable: ${reason}.`;
+    return;
+  }
+
+  if (info.address === "") {
+    simpleAddressValue.textContent = "root";
+    simpleAddressNote.textContent = "";
+    simpleAddress.title =
+      "This zone is a root, so its octal address is the empty string.";
+    return;
+  }
+
+  simpleAddressValue.textContent = info.address;
+  simpleAddressNote.textContent = "";
+  simpleAddress.title =
+    `Octal address ${info.address}. Each digit is a zero-based slot ` +
+    "number counted from the root.";
 }
 
 /**
- * Derive the octal address and paint the chip. The walk is asynchronous, so a
- * late read is ignored unless it still belongs to the current request and board.
+ * Derive the octal address and paint both the Advanced chip and the quiet
+ * label on the simple surface. The walk is asynchronous, so a late read is
+ * ignored unless it still belongs to the current request and zone.
  */
 function renderBoardAddress(): void {
   const request = ++addressRequest;
@@ -1081,6 +1007,8 @@ function renderBoardAddress(): void {
   }
 
   if (!current) {
+    simpleAddress.hidden = true;
+    paintSimpleAddress(null);
     boardAddress.hidden = true;
     boardAddress.removeAttribute("data-address");
     boardAddress.removeAttribute("data-state");
@@ -1093,6 +1021,9 @@ function renderBoardAddress(): void {
     return;
   }
 
+  simpleAddress.hidden = false;
+  paintSimpleAddress(null);
+
   boardAddress.hidden = false;
   delete boardAddress.dataset.address;
   boardAddress.dataset.state = "checking";
@@ -1100,7 +1031,7 @@ function renderBoardAddress(): void {
   boardAddressValue.classList.remove("is-long", "is-xlong");
   boardAddressNote.textContent = "checking";
   boardAddressNote.hidden = false;
-  boardAddress.title = "Working out this board's octal address.";
+  boardAddress.title = "Working out this zone's octal address.";
   boardAddress.setAttribute("aria-label", "Octal address: checking");
 
   const board = ownSnapshot() ?? current;
@@ -1110,6 +1041,7 @@ function renderBoardAddress(): void {
     ownReceiveAddress = info;
     ownReceiveAddressOwner = current.ownerId;
     renderSimpleActions();
+    paintSimpleAddress(info);
 
     if (info.address === null) {
       const problem: AddressProblem = info.problem ?? "unreadable";
@@ -1138,7 +1070,7 @@ function renderBoardAddress(): void {
       boardAddressNote.textContent = "root";
       boardAddressNote.hidden = false;
       boardAddress.title =
-        "This board is a root, so its octal address is the empty string.";
+        "This zone is a root, so its octal address is the empty string.";
       boardAddress.setAttribute("aria-label", "Octal address: root (empty)");
       return;
     }
@@ -1165,9 +1097,8 @@ function renderBoardAddress(): void {
  * gets no band; its parent row says so instead.
  */
 function resetParentValue(): void {
-  parentValueBox.hidden = false;
   parentValueBox.removeAttribute("data-state");
-  parentValueTitle.textContent = "Held by your parent";
+  parentValueTitle.textContent = RECORD_EYEBROW;
   parentValueBoard.textContent = "";
   parentValueBoard.removeAttribute("title");
   parentValueSlot.textContent = "";
@@ -1208,21 +1139,6 @@ function paintParentAmount(amount: string): void {
   parentValueAmount.classList.toggle("is-xlong", amount.length > 15);
 }
 
-function parentEmptyExplanation(state: LinkState, label: string): string {
-  switch (state) {
-    case "pending":
-      return `${label} has this board in no slot yet, so there is no value to show.`;
-    case "not-created":
-      return `${label} has not opened ${APP_NAME} yet, so there is no board there.`;
-    case "error":
-      return `Could not read ${label}'s board, so the value could not be checked.`;
-    case "root":
-      return "Nothing is recorded above this board, because it has no parent.";
-    case "linked":
-      return `${label} has this board in no slot yet, so there is no value to show.`;
-  }
-}
-
 function adjustmentRow(entry: Adjustment): HTMLLIElement {
   const row = createElement("li", "adjustment");
   row.title = `Recorded at slot sequence ${entry.slotSeq}.`;
@@ -1258,7 +1174,7 @@ function adjustmentRow(entry: Adjustment): HTMLLIElement {
 }
 
 /**
- * The parent's log for one slot, newest first and bounded. A board on the
+ * The parent's log for one slot, newest first and bounded. A zone on the
  * previous version has no log at all, so it gets an explained empty state
  * rather than a misleading "nothing yet".
  */
@@ -1318,73 +1234,112 @@ function renderParentAdjustments(options: {
   parentAdjustmentsList.replaceChildren(...recent.map(adjustmentRow));
 }
 
+const RECORD_EYEBROW = "Recorded above";
+const RECORD_CAPTION = "You can't change it here.";
+
+/**
+ * The record sheet holds the value recorded above and this zone's children.
+ * When there is no usable parent the card is absent, so the sheet is hidden
+ * unless children remain; those then take the card's rounded top edge.
+ */
+function updateSimpleRecordSheet(): void {
+  const hasCard = !parentValueBox.hidden;
+  const hasChildren = !simpleChildren.hidden;
+  simpleRecordSheet.hidden = !hasCard && !hasChildren;
+  simpleRecordSheet.classList.toggle(
+    "record-sheet--cardless",
+    !hasCard && hasChildren,
+  );
+}
+
+/** The simple view mentions a parent only when there is no usable link. */
+function paintParentPrompt(state: LinkState): void {
+  simpleParent.hidden = false;
+  parentEdit.hidden = false;
+  parentEdit.disabled = busy;
+  parentClear.hidden = true;
+
+  switch (state) {
+    case "root":
+      simpleParentName.textContent = "No parent yet";
+      simpleParentReason.textContent =
+        "A parent records a value above this zone and lets payments move through it.";
+      parentEdit.textContent = "Add a parent";
+      break;
+    case "pending":
+      simpleParentName.textContent = "Parent link not confirmed";
+      simpleParentReason.textContent =
+        "The parent you chose has not added this zone to a slot yet.";
+      parentEdit.textContent = "Fix parent link…";
+      break;
+    case "not-created":
+      simpleParentName.textContent = "Parent not found";
+      simpleParentReason.textContent =
+        `The owner you chose has not opened ${APP_NAME} yet, so there is no zone to link to.`;
+      parentEdit.textContent = "Fix parent link…";
+      break;
+    case "error":
+      simpleParentName.textContent = "Parent could not be read";
+      simpleParentReason.textContent =
+        "The parent link could not be checked. Try again in a moment.";
+      parentEdit.textContent = "Fix parent link…";
+      break;
+    default:
+      simpleParentName.textContent = "Parent link checked";
+      simpleParentReason.textContent = "";
+      parentEdit.textContent = "Add a parent";
+  }
+}
+
+function paintParentPromptLoading(): void {
+  simpleParent.hidden = false;
+  parentEdit.hidden = true;
+  parentClear.hidden = true;
+  simpleParentName.textContent = "Checking your parent link…";
+  simpleParentReason.textContent =
+    "Working out whether this zone sits under another zone.";
+}
+
 function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
   const parentId = own.state.parent.userId;
   if (parentId === null) {
     ownParentLinkState = "root";
     renderSimpleActions();
-    parentValueTitle.textContent = "No parent yet";
-    boardTitleName.textContent = own.state.selfName.name ?? "—";
-    boardTitle.removeAttribute("title");
-    parentValueEmpty.textContent = parentEmptyExplanation("root", "");
-    parentValueEmpty.hidden = false;
+    parentValueBox.hidden = true;
+    paintParentPrompt("root");
+    updateSimpleRecordSheet();
     return;
   }
 
   ownParentLinkState = info.state;
   renderSimpleActions();
 
-  const label =
-    info.snapshot !== null
-      ? boardNameOf(parentId, info.snapshot.state)
-      : (cachedSelfName(parentId) ?? unknownLabel(parentId));
-  parentValueBoard.textContent = label;
-  parentValueBoard.title = parentId;
-
-  parentValueBox.dataset.state = info.state;
-  if (info.state === "linked") parentValueTitle.textContent = `Held by ${label}`;
-  else if (info.state === "pending") parentValueTitle.textContent = `Waiting on ${label}`;
-  else if (info.state === "not-created") {
-    parentValueTitle.textContent = `${label} · not created`;
-  } else if (info.state === "error") {
-    parentValueTitle.textContent = `Could not check ${label}`;
-  } else parentValueTitle.textContent = "No parent yet";
-
-  const given =
-    info.state === "linked" && info.snapshot !== null
-      ? parentGivenName(info.snapshot, own.ownerId)
-      : null;
-  const ownName = own.state.selfName.name;
-  boardTitleName.textContent = given ?? ownName ?? "—";
-  boardTitle.title =
-    given !== null
-      ? ownName !== null && ownName !== given
-        ? `As named by ${label}. Its own name is “${ownName}”.`
-        : `As named by ${label}.`
-      : ownName !== null
-        ? "This board's own signed name."
-        : "This board has no name yet.";
-
   if (info.state !== "linked" || info.snapshot === null) {
-    parentValueState.hidden = false;
-    parentValueState.dataset.state = info.state;
-    parentValueState.textContent = LINK_LABELS[info.state];
-    parentValueState.title = LINK_TITLES[info.state];
-    parentValueEmpty.textContent = parentEmptyExplanation(info.state, label);
-    parentValueEmpty.hidden = false;
+    parentValueBox.hidden = true;
+    paintParentPrompt(info.state);
+    updateSimpleRecordSheet();
     return;
   }
 
+  parentValueBox.hidden = false;
+  parentValueBox.dataset.state = "linked";
+  simpleParent.hidden = true;
+  parentValueTitle.textContent = RECORD_EYEBROW;
+  parentValueBoard.textContent = "";
+  parentValueBoard.removeAttribute("title");
+  parentValueState.hidden = true;
+
   const value = parentValueFor(info.snapshot, own.ownerId);
   if (value === null) {
-    parentValueEmpty.textContent = parentEmptyExplanation("linked", label);
+    parentValueEmpty.textContent = "No value is recorded above this zone yet.";
     parentValueEmpty.hidden = false;
+    updateSimpleRecordSheet();
     return;
   }
 
   parentValueSlot.textContent = `zero-based slot ${value.slot}`;
   parentValueSlot.title =
-    "The slot number in the parent board. The grid's slot labels are one-based.";
+    "The slot number in the parent zone. The grid's slot labels are one-based.";
 
   parentValueFigure.hidden = false;
   paintParentAmount(formatCents(value.entry.value));
@@ -1393,7 +1348,7 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
   parentValueUnit.textContent = unit;
   parentValueUnit.hidden = unit === "";
 
-  parentValueRecorded.textContent = `Recorded by ${label}. You can't change it here.`;
+  parentValueRecorded.textContent = RECORD_CAPTION;
   parentValueRecorded.hidden = false;
 
   const note = value.entry.note ?? "";
@@ -1401,8 +1356,9 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
   parentValueNote.title = note;
   parentValueNote.hidden = note === "";
 
+  updateSimpleRecordSheet();
   // Advanced's adjustments block is painted by renderAdvancedAdjustments; the
-  // request guard keeps a late read from overwriting a newer board.
+  // request guard keeps a late read from overwriting a newer zone.
 }
 
 /**
@@ -1416,7 +1372,7 @@ function renderAdvancedAdjustments(board: BoardSnapshot, request: number): void 
   void parentLink(board, linkDeps).then((info) => {
     if (request !== parentValueRequest) return;
     if (info.state !== "linked" || info.snapshot === null) return;
-    const label = boardNameOf(parentId, info.snapshot.state);
+    const label = ownerLabel(parentId);
     const value = parentValueFor(info.snapshot, board.ownerId);
     if (value === null) return;
     renderParentAdjustments({
@@ -1437,16 +1393,23 @@ function renderParentValue(): void {
   const own = ownSnapshot();
   if (own === null) {
     ownParentLinkState = null;
-    parentValueBox.dataset.state = "loading";
-    parentValueTitle.textContent = "Held by your parent";
-    boardTitleName.textContent = "Your board";
-    boardTitle.removeAttribute("title");
-    parentValueEmpty.textContent = "Reading your board…";
-    parentValueEmpty.hidden = false;
+    parentValueBox.hidden = true;
+    paintParentPromptLoading();
+    updateSimpleRecordSheet();
     return;
   }
 
   ownParentLinkState = own.state.parent.userId === null ? "root" : null;
+
+  if (own.state.parent.userId === null) {
+    parentValueBox.hidden = true;
+    paintParentPrompt("root");
+  } else if (parentValueBox.hidden) {
+    // First paint, or a zone that had no usable parent a moment ago: show the
+    // check rather than a stale "Add a parent" button.
+    paintParentPromptLoading();
+  }
+  updateSimpleRecordSheet();
 
   void parentLink(own, linkDeps).then((info) => {
     if (request !== parentValueRequest) return;
@@ -1466,65 +1429,46 @@ function renderParentRow(): void {
     parentName.classList.remove("is-root");
     parentStatus.hidden = true;
     parentNote.hidden = true;
-    parentEdit.hidden = true;
-    parentClear.hidden = true;
-    simpleParentName.textContent = "—";
-    simpleParentName.removeAttribute("title");
+    parentAdvancedEdit.hidden = true;
+    parentAdvancedClear.hidden = true;
     return;
   }
 
   const parentId = current.state.parent.userId;
-  parentEdit.hidden = false;
-  parentEdit.disabled = busy;
-  // Until the link is checked, "Set parent…" is the honest label: it never
-  // claims a mutual parent that the asynchronous check has not confirmed.
-  parentEdit.textContent = "Set parent…";
-  parentClear.hidden = parentId === null;
-  parentClear.disabled = busy;
 
   if (parentId === null) {
     parentName.textContent = "Root";
-    parentName.title = "This board has no parent.";
+    parentName.title = "This zone has no parent.";
     parentName.classList.add("is-root");
     parentStatus.hidden = true;
     parentNote.textContent =
-      "No parent board, so no board holds a liability for this one.";
+      "No parent zone, so no zone holds a liability for this one.";
     parentNote.title =
-      "Set a parent to record a liability above this board and to receive payments through it.";
+      "Add a parent from the simple view to record a liability above this zone and receive payments through it.";
     parentNote.hidden = false;
-    simpleParentName.textContent = "Root";
-    simpleParentName.title = "This board has no parent.";
+    parentAdvancedEdit.hidden = true;
+    parentAdvancedClear.hidden = true;
     return;
   }
 
-  parentName.textContent = cachedSelfName(parentId) ?? unknownLabel(parentId);
+  parentName.textContent = ownerLabel(parentId);
   parentName.title = parentId;
   parentName.classList.remove("is-root");
   parentStatus.hidden = false;
   parentStatus.dataset.state = "checking";
   parentStatus.textContent = "Checking…";
-  parentStatus.title = "Checking the parent board.";
+  parentStatus.title = "Checking the parent zone.";
   parentNote.hidden = true;
-  simpleParentName.textContent = parentName.textContent;
-  simpleParentName.title = parentId;
+  parentAdvancedEdit.hidden = false;
+  parentAdvancedClear.hidden = false;
 
-  const initialLabel = parentName.textContent;
   const board = ownSnapshot() ?? current;
 
   void parentLink(board, linkDeps).then((info) => {
     if (request !== parentStatusRequest || view !== current) return;
     paintBadge(parentStatus, info.state);
-    const selfName = info.snapshot
-      ? boardNameOf(parentId, info.snapshot.state)
-      : null;
-    if (selfName !== null && initialLabel === unknownLabel(parentId)) {
-      parentName.textContent = selfName;
-    }
-    simpleParentName.textContent = parentName.textContent ?? "";
-    // The simple surface offers "Change parent" only for a live mutual link;
-    // every other state needs the same "Set parent…" entry point a root does.
-    parentEdit.textContent =
-      info.state === "linked" ? "Change parent" : "Set parent…";
+    parentName.textContent = ownerLabel(parentId);
+    parentName.title = parentId;
     const legacyParent = info.snapshot?.legacy === true;
     parentNote.hidden = !legacyParent;
     parentNote.title = LEGACY_PARENT_TITLE;
@@ -1550,9 +1494,10 @@ function renderControls(): void {
     boardStatus === "identity";
   reconnectButton.hidden = isOffline;
   reconnectButton.disabled = isOffline || busy || settling;
-  boardNameEdit.disabled = busy || ownSelfName() === null;
   parentEdit.disabled = busy;
   parentClear.disabled = busy;
+  parentAdvancedEdit.disabled = busy;
+  parentAdvancedClear.disabled = busy;
 }
 
 function setActionReason(element: HTMLElement, reason: string | null): void {
@@ -1577,31 +1522,31 @@ function renderSimpleActions(): void {
   const hasAnyLink = hasParent || hasChildLink;
 
   let payReason: string | null = null;
-  if (!ownBoard || !ready) payReason = "Waiting for your board.";
+  if (!ownBoard || !ready) payReason = "Waiting for your zone.";
   else if (!hasAnyLink) {
     payReason =
-      "A board with no links cannot pay yet. Add a child or set a parent first.";
+      "A zone with no links cannot pay yet. Add a child or set a parent first.";
   } else if (ownParentLinkState === null) {
     payReason = "Checking your parent link…";
   } else if (ownParentLinkState !== "linked" && !hasChildLink) {
     payReason =
-      "A board on the path has not confirmed its parent yet. Check your parent link.";
+      "A zone on the path has not confirmed its parent yet. Check your parent link.";
   } else if (paymentBlockedReason !== null) {
     payReason = paymentBlockedReason;
   }
   simplePay.disabled = payReason !== null;
   setActionReason(simplePayReason, payReason);
 
-  const contactsReason = ownBoard ? null : "Waiting for your board.";
+  const contactsReason = ownBoard ? null : "Waiting for your zone.";
   simpleContacts.disabled = contactsReason !== null;
   setActionReason(simpleContactsReason, contactsReason);
 
   let linkReason: string | null = null;
-  if (!ownBoard) linkReason = "Waiting for your board.";
+  if (!ownBoard) linkReason = "Waiting for your zone.";
   else if (ownIdentity === null) linkReason = "Waiting for your identity.";
   else if (!hasAnyLink) {
     linkReason =
-      "A board with no links cannot receive yet. Add a child or set a parent first.";
+      "A zone with no links cannot receive yet. Add a child or set a parent first.";
   } else if (
     ownReceiveAddress === null ||
     ownReceiveAddressOwner !== ownIdentity.pubkey
@@ -1701,7 +1646,6 @@ function renderAll(): void {
   renderWarnings();
   renderContactCount();
   renderBoardHeader();
-  renderBoardTitle();
   renderBoardAddress();
   renderParentValue();
   renderControls();
@@ -1734,10 +1678,10 @@ const PAYMENT_FAIL_REASONS: Record<
   string
 > = {
   negative: "a slot would go below zero",
-  "no-destination": "the destination board is missing",
+  "no-destination": "the destination zone is missing",
   busy: "another payment was already in progress",
-  refused: "a board refused the payment",
-  "address-mismatch": "a board did not match the route",
+  refused: "a zone refused the payment",
+  "address-mismatch": "a zone did not match the route",
   blocked: "a leg could not be reversed",
   superseded: "a later signed change replaced a leg",
 };
@@ -1746,7 +1690,7 @@ const ZERO_PAYMENT_OWNER = "0".repeat(64);
 
 /** The status area's label source: the own address book only. */
 function paymentOwnerLabel(ownerId: string): string {
-  return contactLabel(ownerId) ?? unknownLabel(ownerId);
+  return ownerLabel(ownerId);
 }
 
 function paymentAddresses(entry: PaymentEntry): string {
@@ -1819,7 +1763,7 @@ function paintPaymentStatus(display: PaymentEntry): void {
     // Known accepted risk: a downward-only payment issues before the payee
     // consents. Make the stalled state visible instead of leaving it implicit.
     detail +=
-      " Issued, not delivered: the credit stays in your slot until you withdraw it or the next board signs.";
+      " Issued, not delivered: the credit stays in your slot until you withdraw it or the next zone signs.";
   }
   paymentStatusDetail.textContent = detail;
   paymentStatus.hidden = false;
@@ -1831,10 +1775,10 @@ function paintPaymentStatus(display: PaymentEntry): void {
  * fact that the board cannot sign anything until the record is cleared.
  */
 function paintStuckPayment(entry: PaymentEntry, display: PaymentEntry): void {
-  const detail = `A later copy of this payment is ${display.status}, but this board's own record is still pending. Clear it to continue.`;
+  const detail = `A later copy of this payment is ${display.status}, but this zone's own record is still pending. Clear it to continue.`;
   paymentStatusBadge.textContent = "Stuck";
   paymentStatusBadge.dataset.state = "stuck";
-  paymentStatusBadge.title = `${detail} The delegate reports Busy for this board until the record is cleared.`;
+  paymentStatusBadge.title = `${detail} The delegate reports Busy for this zone until the record is cleared.`;
   paymentStatus.dataset.state = "stuck";
   paymentStatusTitle.textContent = `${formatCents(entry.amount)} along ${paymentAddresses(entry)}`;
   const route = planRoute(entry.srcAddr, entry.dstAddr);
@@ -1870,8 +1814,8 @@ function renderPaymentInboxItem(item: IncomingPayment): HTMLLIElement {
 
   // Payment counterparties are named from this device's private address book;
   // v6 has no public contact list to fall back to.
-  const srcLabel = contactLabel(item.entry.src) ?? unknownLabel(item.entry.src);
-  const dstLabel = contactLabel(item.entry.dst) ?? unknownLabel(item.entry.dst);
+  const srcLabel = ownerLabel(item.entry.src);
+  const dstLabel = ownerLabel(item.entry.dst);
   const meta = createElement(
     "p",
     "payment-inbox-meta",
@@ -1906,7 +1850,7 @@ async function advanceIncomingPayment(
 ): Promise<void> {
   const own = ownSnapshot();
   if (own === null) {
-    showNotice("error", "Could not advance payment", "Your board is not loaded yet.");
+    showNotice("error", "Could not advance payment", "Your zone is not loaded yet.");
     return;
   }
 
@@ -1919,8 +1863,8 @@ async function advanceIncomingPayment(
       "info",
       "Payment advanced",
       item.entry.phase === "reverse"
-        ? "Your leg was undone. The previous board is asked to undo theirs."
-        : "Your leg was signed. The next board is asked to sign theirs.",
+        ? "Your leg was undone. The previous zone is asked to undo theirs."
+        : "Your leg was signed. The next zone is asked to sign theirs.",
     );
     renderAll();
   } catch (error) {
@@ -1947,7 +1891,7 @@ async function renderPayments(): Promise<void> {
     paymentClear.hidden = true;
     simplePaymentWaiting.hidden = true;
     paymentInboxList.replaceChildren();
-    paymentBlockedReason = "Waiting for your board.";
+    paymentBlockedReason = "Waiting for your zone.";
     renderSimpleActions();
     return;
   }
@@ -1998,8 +1942,8 @@ async function renderPayments(): Promise<void> {
   paymentClear.hidden = !canClear;
   paymentClear.disabled = busy;
   paymentClear.title = stuck
-    ? "Clear this board's stuck payment record; the network copy is already settled."
-    : "Clear this board's payment record.";
+    ? "Clear this zone's stuck payment record; the network copy is already settled."
+    : "Clear this zone's payment record.";
   paymentBlockedReason =
     active || stuck
       ? "A payment is already in progress. Review it under Advanced."
@@ -2095,12 +2039,12 @@ function formatScanCount(value: number | null): { text: string; title: string } 
 
 const DELEGATE_ERROR_TEXT: Record<string, string> = {
   "mixed-version":
-    "a board on this route uses a different version, so that payment was skipped",
+    "a zone on this route uses a different version, so that payment was skipped",
   "auto-advance-disabled": "auto-advance is off in the local component",
   "address-mismatch":
-    "the local component's owner address did not match the board it read",
+    "the local component's owner address did not match the zone it read",
   "destination-unknown":
-    "the destination board could not be read, so the payment was skipped",
+    "the destination zone could not be read, so the payment was skipped",
   "update-failed": "the node did not confirm the signed change",
   "network budget exhausted":
     "this scan used its network requests, so it will try again on the next wake",
@@ -2179,7 +2123,7 @@ function renderAutoAdvance(): void {
   paymentCheck.hidden = active;
   paymentNote.textContent = active
     ? "Your node signs your part as it arrives."
-    : "Payments move one board at a time. Each owner opens their board to sign their leg.";
+    : "Payments move one zone at a time. Each owner opens their zone to sign their leg.";
   paymentAutoNote.hidden = !active;
 
   let reason: string | null = null;
@@ -2199,7 +2143,7 @@ function renderAutoAdvance(): void {
         : `Could not read the status: ${autoAdvanceRefreshError}`;
   } else if (!status.configured) {
     reason =
-      "The local component is not set up for this board, so it has nothing to advance. It is configured when your own board opens on this node with the current component.";
+      "The local component is not set up for this zone, so it has nothing to advance. It is configured when your own zone opens on this node with the current component.";
   } else if (!controllable) {
     reason =
       "This build can show background payments but cannot change them.";
@@ -2252,19 +2196,19 @@ function renderAutoAdvance(): void {
   } else if (!status.configured) {
     badgeLabel = "Not set up";
     badgeState = "not-configured";
-    badgeTitle = "The local component has no owner address for this board.";
+    badgeTitle = "The local component has no owner address for this zone.";
   } else if (neverScanned) {
     badgeLabel = ownLiveChild === true ? "Not advancing" : "No scans";
     badgeState = "stale";
     badgeTitle =
       ownLiveChild === true
-        ? "This board has a live child, so payments can route through it, but this node is not auto-advancing. Reinstall the component so the node asks for background permission."
+        ? "This zone has a live child, so payments can route through it, but this node is not auto-advancing. Reinstall the component so the node asks for background permission."
         : "The component is configured but no scan has run. If this lasts more than a minute, this node has not granted background permission; reinstall the component so the node asks again.";
   } else if (isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash)) {
     badgeLabel = "Stale";
     badgeState = "stale";
     badgeTitle =
-      "The component's contract build does not match this board, so it cannot find this board's payments.";
+      "The component's contract build does not match this zone, so it cannot find this zone's payments.";
   } else if (status.autoAdvance) {
     badgeLabel = "On";
     badgeState = "on";
@@ -2323,7 +2267,7 @@ function renderAutoAdvance(): void {
       autoAdvanceAddress,
       address,
       status.address === ""
-        ? "This board is a root (empty octal address)."
+        ? "This zone is a root (empty octal address)."
         : `Octal address ${status.address}`,
     );
   } else {
@@ -2345,10 +2289,10 @@ function renderAutoAdvance(): void {
     const count = status.subscriptions.length;
     setAutoAdvanceFact(
       autoAdvanceSubs,
-      count === 0 ? "None yet" : `${count} board${count === 1 ? "" : "s"}`,
+      count === 0 ? "None yet" : `${count} zone${count === 1 ? "" : "s"}`,
       count === 0
-        ? "No board subscriptions reported."
-        : `Subscribed to ${count} board instance${count === 1 ? "" : "s"}.`,
+        ? "No zone subscriptions reported."
+        : `Subscribed to ${count} zone instance${count === 1 ? "" : "s"}.`,
     );
   }
 
@@ -2357,11 +2301,11 @@ function renderAutoAdvance(): void {
     isDelegateStatusStale(status, BOARD_CONFIG.contractCodeHash);
   autoAdvanceStale.hidden = !stale;
   autoAdvanceStale.textContent = stale
-    ? "The local component's contract build does not match this board. It cannot see this board's payments, so enabling auto-advance will not move anything until both are on the same build."
+    ? "The local component's contract build does not match this zone. It cannot see this zone's payments, so enabling auto-advance will not move anything until both are on the same build."
     : "";
   const routeAlert =
     neverScanned && ownLiveChild === true
-      ? "This board can carry payments but won't auto-advance on this node. Reinstall the component so the node asks for background permission."
+      ? "This zone can carry payments but won't auto-advance on this node. Reinstall the component so the node asks for background permission."
       : "";
   autoAdvanceRouteAlert.hidden = routeAlert === "";
   autoAdvanceRouteAlert.textContent = routeAlert;
@@ -2373,8 +2317,8 @@ function renderAutoAdvance(): void {
       "Details, background payments need attention",
     );
     detailsSummary.title = stale
-      ? "Background payments are using a different contract build than this board."
-      : "A board with a live child cannot auto-advance on this node.";
+      ? "Background payments are using a different contract build than this zone."
+      : "A zone with a live child cannot auto-advance on this node.";
   } else {
     detailsSummary.removeAttribute("aria-label");
     detailsSummary.removeAttribute("title");
@@ -2431,9 +2375,9 @@ function renderAutoAdvance(): void {
     if (action.role !== "") {
       item.title =
         action.role === "debit"
-          ? "A debit on this board."
+          ? "A debit on this zone."
           : action.role === "credit"
-            ? "A credit on this board."
+            ? "A credit on this zone."
             : action.role;
     }
 
@@ -2616,17 +2560,17 @@ function paymentProblemMessage(failure: PaymentFailure): string {
     case "negative":
       return "A slot on the route would go below 0.00. Nothing was signed.";
     case "address-mismatch":
-      return "The user id does not own the board at that address.";
+      return "The user id does not own the zone at that address.";
     case "busy":
-      return "This board already has a payment in progress.";
+      return "This zone already has a payment in progress.";
     case "no-destination":
-      return "There is no board at that address.";
+      return "There is no zone at that address.";
     case "pending":
-      return `A board on the path has not confirmed its parent yet. ${failure.detail}`;
+      return `A zone on the path has not confirmed its parent yet. ${failure.detail}`;
     case "not-created":
-      return `A board on the path has not been created yet. ${failure.detail}`;
+      return `A zone on the path has not been created yet. ${failure.detail}`;
     case "legacy":
-      return `A board on the path is still on the previous version; its owner must open the new app once. ${failure.detail}`;
+      return `A zone on the path is still on the previous version; its owner must open the new app once. ${failure.detail}`;
     case "invalid-address":
       return "Use only digits 0–7 for the octal address.";
     case "overflow":
@@ -2649,7 +2593,7 @@ function updatePaymentRecipient(): void {
   if (contact !== null) {
     line =
       ownIdentity !== null && contact.userId === ownIdentity.pubkey
-        ? "That is your own board. Choose someone else."
+        ? "That is your own zone. Choose someone else."
         : contact.address === null
           ? recipientAddressLine(null)
           : contact.address === ""
@@ -2673,7 +2617,7 @@ function refreshPaymentSubmit(): void {
   if (contact !== null) {
     if (ownIdentity !== null && contact.userId === ownIdentity.pubkey) {
       blocked = true;
-      title = "Choose a contact other than this board.";
+      title = "Choose a contact other than this zone.";
     } else if (contact.address === null) {
       blocked = true;
       title = "That contact has no address yet. Ask them for a receive link.";
@@ -2738,7 +2682,7 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
   let user: string;
   if (contact !== null) {
     if (ownIdentity !== null && contact.userId === ownIdentity.pubkey) {
-      showPaymentWarning("That is your own board. Choose someone else.");
+      showPaymentWarning("That is your own zone. Choose someone else.");
       return;
     }
     if (contact.address === null) {
@@ -2784,7 +2728,7 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
 
   const own = ownSnapshot();
   if (own === null) {
-    showPaymentError("Your board is not loaded yet.");
+    showPaymentError("Your zone is not loaded yet.");
     return;
   }
 
@@ -2824,7 +2768,7 @@ async function handlePaymentSubmit(event: SubmitEvent): Promise<void> {
       terminal ? "Payment sent" : "Payment offered",
       terminal
         ? "The destination was credited in the same step."
-        : "Each owner on the path must open their board to sign their leg.",
+        : "Each owner on the path must open their zone to sign their leg.",
     );
     announce(terminal ? "Payment sent." : "Payment offered.");
     renderAll();
@@ -2849,10 +2793,10 @@ const STATUS_LABELS: Record<BoardStatus, string> = {
 };
 
 const STATUS_DEFAULT_DETAIL: Record<BoardStatus, string> = {
-  starting: "Preparing the board",
-  connecting: "Opening the board",
+  starting: "Preparing the zone",
+  connecting: "Opening the zone",
   identity: "Waiting for the delegate",
-  ready: "Live board",
+  ready: "Live zone",
   offline: "In-memory mock; changes reset on reload",
   disconnected: "Reconnect when ready",
   error: "See the message above",
@@ -2948,7 +2892,7 @@ function humanError(error: unknown): string {
 }
 
 function showFatal(error: unknown): void {
-  let title = "Could not open the board";
+  let title = "Could not open the zone";
 
   if (error instanceof ContractBuildError) {
     title =
@@ -3078,14 +3022,14 @@ function populateContactOptions(
 /** Guidance for a child id that cannot be written into this slot. */
 function childProblem(contact: string): string | null {
   if (ownIdentity && contact === ownIdentity.pubkey) {
-    return "A slot's child must be a different board. Choose another contact.";
+    return "A slot's child must be a different zone. Choose another contact.";
   }
   const otherIndex =
     ownState?.slots.findIndex(
       (slot, index) => index !== currentSlot && slot.entry?.contact === contact,
     ) ?? -1;
   if (otherIndex !== -1) {
-    return `That board is already in slot ${otherIndex + 1}. Each child can use only one slot.`;
+    return `That zone is already in slot ${otherIndex + 1}. Each child can use only one slot.`;
   }
   return null;
 }
@@ -3134,7 +3078,7 @@ function setChildLink(contactId: string | null): void {
   childLinkStatus.hidden = false;
   childLinkStatus.dataset.state = "checking";
   childLinkStatus.textContent = "Checking…";
-  childLinkStatus.title = "Checking the child board.";
+  childLinkStatus.title = "Checking the child zone.";
   childLinkDetail.textContent = "";
   childLinkDetail.hidden = true;
   void refreshChildLink(contactId, editorRequest);
@@ -3147,11 +3091,7 @@ async function refreshChildLink(
   const info = await childLink(ownIdentity?.pubkey ?? "", contactId, linkDeps);
   if (generation !== editorRequest || !editor.open) return;
 
-  const label =
-    contactLabel(contactId) ??
-    (info.snapshot
-      ? boardNameOf(contactId, info.snapshot.state)
-      : unknownLabel(contactId));
+  const label = ownerLabel(contactId);
   const legacyChild = info.snapshot?.legacy === true;
   childLinkStatus.dataset.state = info.state;
   childLinkStatus.textContent = LINK_LABELS[info.state];
@@ -3161,17 +3101,17 @@ async function refreshChildLink(
 
   let detail = "";
   if (info.state === "linked") {
-    detail = `${label} lists this board as its parent.`;
+    detail = `${label} lists this zone as its parent.`;
   } else if (legacyChild) {
     detail =
       `${label} is on the previous version. Child owner must open the v3 app ` +
       "to link back.";
   } else if (info.state === "pending") {
-    detail = `${label} has not set this board as its parent yet.`;
+    detail = `${label} has not set this zone as its parent yet.`;
   } else if (info.state === "not-created") {
     detail = `${label} has not opened ${APP_NAME} yet.`;
   } else if (info.state === "error") {
-    detail = `Could not check this board: ${info.error ?? "the read failed"}.`;
+    detail = `Could not check this zone: ${info.error ?? "the read failed"}.`;
   }
 
   childLinkDetail.textContent = detail;
@@ -3303,7 +3243,7 @@ function renderAdjust(): void {
   const child = entry?.contact ?? "";
 
   adjustChild.textContent =
-    child === "" ? "Not set" : (contactLabel(child) ?? unknownLabel(child));
+    child === "" ? "Not set" : ownerLabel(child);
   adjustChild.classList.toggle("is-empty", child === "");
   if (child === "") adjustChild.removeAttribute("title");
   else adjustChild.title = child;
@@ -3581,7 +3521,7 @@ function fallbackCopy(text: string): void {
 /**
  * Receive-payment links carry `?pay=<owner id>&name=<label>&addr=<octal>`.
  * Parse them at boot, before the board paints, and keep the invite pending
- * until the delegate/identity/board-name prompts have settled. Resolving the
+ * until the delegate/identity prompts have settled. Resolving the
  * link opens the address book prefilled and drops the params with
  * `replaceState`.
  */
@@ -3595,7 +3535,7 @@ function maybeOpenReceiveLink(): void {
     showNotice(
       "warning",
       "That link is incomplete",
-      "The link is missing a valid board key. Ask for a new receive-payment link.",
+      "The link is missing a valid zone key. Ask for a new receive-payment link.",
     );
     announce("That link is incomplete.");
     return;
@@ -3608,11 +3548,10 @@ function maybeOpenReceiveLink(): void {
 function receiveLinkReady(): boolean {
   if (pendingReceiveLink === null) return false;
   if (ownIdentity === null || ownState === null) return false;
-  if (ownSelfName() === null) return false;
   if (boardStatus !== "ready" && boardStatus !== "offline") return false;
   return (
     document.querySelector(
-      "#delegate-install[open], #identity-setup[open], #identity-manage[open], #board-name-dialog[open]",
+      "#delegate-install[open], #identity-setup[open], #identity-manage[open]",
     ) === null
   );
 }
@@ -3635,10 +3574,10 @@ function tryOpenReceiveLink(): void {
   if (resolved.kind === "own") {
     showNotice(
       "info",
-      "That link is your own board",
-      "You cannot add your own board to your address book.",
+      "That link is your own zone",
+      "You cannot add your own zone to your address book.",
     );
-    announce("That link is your own board.");
+    announce("That link is your own zone.");
     return;
   }
   if (resolved.kind === "existing") {
@@ -3692,6 +3631,19 @@ function stripReceiveLinkParams(): void {
   }
 }
 
+/**
+ * The name the parent signed for this zone in its `childNames` record, or
+ * null when there is no mutual parent or the parent named no slot. The zone
+ * has no name of its own, so a receive link omits `name` in that case.
+ */
+async function ownParentGivenName(): Promise<string | null> {
+  const own = ownSnapshot();
+  if (own === null || own.state.parent.userId === null) return null;
+  const info = await parentLink(own, linkDeps);
+  if (info.state !== "linked" || info.snapshot === null) return null;
+  return parentGivenName(info.snapshot, own.ownerId);
+}
+
 /** `<origin><path>?pay=…&name=…&addr=…`; the address is required. */
 function receivePaymentLink(
   ownerId: string,
@@ -3728,7 +3680,7 @@ async function copyReceivePaymentLink(): Promise<void> {
     }
     link = receivePaymentLink(
       ownIdentity.pubkey,
-      own.state.selfName.name,
+      await ownParentGivenName(),
       info.address,
     );
     if (navigator.clipboard?.writeText) {
@@ -3737,7 +3689,7 @@ async function copyReceivePaymentLink(): Promise<void> {
       fallbackCopy(link);
     }
     simpleReceiveStatus.textContent =
-      "Link copied. Opening it adds your board to their address book.";
+      "Link copied. Opening it adds your zone to their address book.";
     simpleReceiveLink.textContent = RECEIVE_LINK_COPIED_LABEL;
     window.setTimeout(() => {
       simpleReceiveLink.textContent = RECEIVE_LINK_LABEL;
@@ -3760,8 +3712,6 @@ async function reconnect(): Promise<void> {
   hideNotice();
   if (editor.open) closeEditor();
   boardCache.clear();
-  nameCache.clear();
-  nameInflight.clear();
   try {
     await backend.retry();
   } catch (error) {
@@ -3780,7 +3730,7 @@ async function clearParent(): Promise<void> {
   try {
     await backend.saveParent(null);
     hideErrorNotice();
-    announce("Parent cleared. This board is a root.");
+    announce("Parent cleared. This zone is a root.");
   } catch (error) {
     showNotice("error", "Parent not cleared", humanError(error));
     announce("Parent not cleared.");
@@ -3798,37 +3748,29 @@ async function handleParentSaved(): Promise<void> {
   renderAll();
 
   if (parentId === null) {
-    announce("Parent cleared. This board is a root.");
+    announce("Parent cleared. This zone is a root.");
     return;
   }
 
   const snapshot = ownSnapshot();
   if (snapshot === null) return;
   const info = await parentLink(snapshot, linkDeps);
-  const label = info.snapshot
-    ? boardNameOf(parentId, info.snapshot.state)
-    : (cachedSelfName(parentId) ?? unknownLabel(parentId));
+  const label = ownerLabel(parentId);
   const legacyNote = info.snapshot?.legacy
-    ? " The parent board is on the previous version."
+    ? " The parent zone is on the previous version."
     : "";
 
   if (info.state === "linked") {
     announce(`Parent saved. Linked to ${label}.${legacyNote}`);
   } else if (info.state === "pending") {
     announce(
-      `Parent saved. Pending until ${label} adds this board.${legacyNote}`,
+      `Parent saved. Pending until ${label} adds this zone to a slot.${legacyNote}`,
     );
   } else if (info.state === "not-created") {
-    announce(`Parent saved. ${label} has not created a board yet.`);
+    announce(`Parent saved. ${label} has not opened ${APP_NAME} yet.`);
   } else {
     announce("Parent saved. The link could not be checked.");
   }
-}
-
-function maybePromptForBoardName(): void {
-  if (!ownState || !ownIdentity) return;
-  if (ownSelfName() !== null) return;
-  boardNameDialog.requireName();
 }
 
 function startBoard(): void {
@@ -3851,7 +3793,6 @@ const callbacks: BoardCallbacks = {
       populatePaymentRecipients(paymentRecipient.value);
     }
     parentDialog?.refresh();
-    maybePromptForBoardName();
     tryOpenReceiveLink();
     // A contacts write can land while the editor is open (the address book is
     // reachable from it). Keep the options honest without losing the selection.
@@ -3866,7 +3807,6 @@ const callbacks: BoardCallbacks = {
     const snapshot = ownSnapshot();
     if (snapshot) view = toView(snapshot);
     renderAll();
-    maybePromptForBoardName();
     tryOpenReceiveLink();
   },
   onContractKey: (key) => {
@@ -3899,22 +3839,6 @@ const paymentDeps: PaymentDeps = {
   readBoard: (id) => readBoardForView(id),
   savePayment: (entry, slots) => backend.savePayment(entry, slots),
 };
-
-const boardNameDialog = createBoardNameDialog({
-  getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
-  getCurrentName: ownSelfName,
-  // v6: the name is the board's own signed `selfName`, not an address-book
-  // entry, so saving it never rewrites the private contacts.
-  saveName: async (name) => {
-    if (!ownIdentity) throw new Error("Your board is not loaded yet.");
-    await backend.saveSelfName(name);
-  },
-  onSaved: (name) => {
-    hideErrorNotice();
-    announce(`Board name saved as ${name}.`);
-    boardNameEdit.focus({ preventScroll: true });
-  },
-});
 
 let parentDialog: ParentDialog | null = null;
 
@@ -3972,7 +3896,7 @@ parentDialog = createParentDialog({
   readBoard: readBoardForView,
   saveParent: async (userId) => {
     if (!view) {
-      throw new Error("Your board is not loaded yet.");
+      throw new Error("Your zone is not loaded yet.");
     }
     busy = true;
     renderBoard();
@@ -4039,7 +3963,7 @@ const identityDialogs = createIdentityDialogs({
     showNotice(
       "info",
       "Identity restored",
-      "This device now uses the restored owner key. The board is loading; " +
+      "This device now uses the restored owner key. The zone is loading; " +
         "check that the Identity in the header matches your other device.",
     );
   },
@@ -4248,7 +4172,7 @@ paymentClear.addEventListener("click", () => {
       showNotice(
         "info",
         "Stuck payment cleared",
-        "The board's payments record is now a tombstone; it can take a new payment.",
+        "The zone's payments record is now a tombstone; it can take a new payment.",
       );
       announce("Stuck payment cleared.");
       renderAll();
@@ -4283,16 +4207,16 @@ editor.addEventListener("click", (event) => {
   if (event.target === editor && !busy) closeEditor();
 });
 
-boardNameEdit.addEventListener("click", () => {
-  if (view === null) return;
-  const name = ownSelfName();
-  if (name !== null) boardNameDialog.openEdit(name);
-  else boardNameDialog.requireName();
-});
 parentEdit.addEventListener("click", () => {
   parentDialog?.open();
 });
 parentClear.addEventListener("click", () => {
+  void clearParent();
+});
+parentAdvancedEdit.addEventListener("click", () => {
+  parentDialog?.open();
+});
+parentAdvancedClear.addEventListener("click", () => {
   void clearParent();
 });
 
@@ -4327,7 +4251,6 @@ for (const id of [
   "delegate-install",
   "identity-setup",
   "identity-manage",
-  "board-name-dialog",
 ]) {
   document.getElementById(id)?.addEventListener("close", () => {
     tryOpenReceiveLink();

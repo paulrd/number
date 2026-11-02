@@ -11,7 +11,7 @@
     -->
     <meta
       name="description"
-      content="A personal board where one owner signs every change, with payments through the board tree."
+      content="A personal zone where one owner signs every change, with payments through the zone tree."
     />
     <meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#11120f" media="(prefers-color-scheme: dark)" />
@@ -63,12 +63,18 @@
           class="simple-view"
           aria-labelledby="board-title"
         >
-          <div class="record-sheet">
-            <article id="parent-value" class="record-card">
-              <p id="parent-value-title" class="record-eyebrow">Held by your parent</p>
-              <h2 id="board-title" class="record-title" tabindex="-1">
-                <span class="board-title-label">Your Board Name: </span><span id="board-title-name">Your board</span>
-              </h2>
+          <header class="simple-head">
+            <h2 id="board-title" class="simple-heading" tabindex="-1">Your zone</h2>
+            <p id="simple-address" class="simple-address" hidden>
+              <span class="simple-address-label">Octal address</span>
+              <code id="simple-address-value" class="simple-address-value">—</code>
+              <span id="simple-address-note" class="sr-only"></span>
+            </p>
+          </header>
+
+          <div id="simple-record-sheet" class="record-sheet" hidden>
+            <article id="parent-value" class="record-card" hidden>
+              <p id="parent-value-title" class="record-eyebrow">Recorded above</p>
               <p id="parent-value-figure" class="record-figure" hidden>
                 <span class="sr-only">Value: </span>
                 <span id="parent-value-amount" class="record-amount">—</span>
@@ -92,10 +98,11 @@
             </div>
           </div>
 
-          <div id="simple-parent" class="simple-parent">
+          <div id="simple-parent" class="simple-parent" hidden>
             <div class="simple-parent-main">
               <span class="simple-parent-label">Parent</span>
-              <span id="simple-parent-name" class="simple-parent-name">Root</span>
+              <span id="simple-parent-name" class="simple-parent-name">No parent yet</span>
+              <p id="simple-parent-reason" class="simple-parent-reason"></p>
             </div>
             <div class="simple-parent-actions">
               <button
@@ -105,7 +112,7 @@
                 aria-haspopup="dialog"
                 aria-controls="parent-dialog"
               >
-                Set parent…
+                Add a parent
               </button>
               <button
                 id="parent-clear"
@@ -186,7 +193,7 @@
           <h2 id="advanced-title" class="advanced-title" tabindex="-1">Advanced</h2>
 
           <section class="advanced-block" aria-labelledby="advanced-board-title">
-            <h3 id="advanced-board-title" class="advanced-block-title">Your board</h3>
+            <h3 id="advanced-board-title" class="advanced-block-title">Your zone</h3>
         <div class="connection-block">
           <div class="status-row">
             <span id="status-pill" class="status-pill" data-status="starting" role="status" aria-live="polite">
@@ -195,7 +202,7 @@
             </span>
             <button id="reconnect" class="button button--quiet" type="button">Reconnect</button>
           </div>
-          <p id="status-detail" class="status-detail" aria-live="polite">Preparing the board</p>
+          <p id="status-detail" class="status-detail" aria-live="polite">Preparing the zone</p>
 
           <dl class="meta-list">
             <div class="meta-row">
@@ -218,25 +225,7 @@
                 </div>
               </dd>
             </div>
-            <div id="board-name-row" class="meta-row meta-row--group-start" hidden>
-              <dt>Board name</dt>
-              <dd>
-                <div class="meta-line">
-                  <span id="board-name" class="board-name">Not named</span>
-                  <button
-                    id="board-name-edit"
-                    class="meta-action"
-                    type="button"
-                    aria-haspopup="dialog"
-                    aria-controls="board-name-dialog"
-                    disabled
-                  >
-                    Rename
-                  </button>
-                </div>
-              </dd>
-            </div>
-            <div class="meta-row">
+            <div class="meta-row meta-row--group-start">
               <dt>Parent</dt>
               <dd>
                 <div class="meta-value">
@@ -245,8 +234,28 @@
                     <span id="parent-status" class="state-badge" role="status" hidden></span>
                   </div>
                   <p id="parent-note" class="meta-note" hidden>
-                    Parent board is on the previous version.
+                    Parent zone is on the previous version.
                   </p>
+                  <div class="meta-line">
+                    <button
+                      id="parent-advanced-edit"
+                      class="meta-action"
+                      type="button"
+                      aria-haspopup="dialog"
+                      aria-controls="parent-dialog"
+                      hidden
+                    >
+                      Change parent…
+                    </button>
+                    <button
+                      id="parent-advanced-clear"
+                      class="meta-action meta-action--danger"
+                      type="button"
+                      hidden
+                    >
+                      Clear parent
+                    </button>
+                  </div>
                 </div>
               </dd>
             </div>
@@ -339,7 +348,7 @@
                       Auto-advance
                     </span>
                     <span id="auto-advance-switch-hint" class="auto-advance-switch-hint">
-                      Let this node sign the next leg for your board when it
+                      Let this node sign the next leg for your zone when it
                       notices one.
                     </span>
                   </span>
@@ -445,7 +454,7 @@
 
           <section class="advanced-block" aria-labelledby="advanced-location-title">
             <h3 id="advanced-location-title" class="advanced-block-title">
-              Where this board sits
+              Where this zone sits
             </h3>
             <div class="board-head">
               <div class="board-head-main">
@@ -484,7 +493,7 @@
                 <button id="payment-check" class="meta-action" type="button">Check for payments</button>
               </div>
             </div>
-            <p id="payment-note" class="payment-note">Payments move one board at a time. Each owner opens their board to sign their leg.</p>
+            <p id="payment-note" class="payment-note">Payments move one zone at a time. Each owner opens their zone to sign their leg.</p>
             <p id="payment-auto-note" class="payment-note payment-auto-note" hidden>Auto-advance is on.</p>
             <div id="payment-status" class="payment-status" hidden>
               <span id="payment-status-badge" class="state-badge" role="status"></span>
@@ -533,8 +542,8 @@
               Add a child slot
             </button>
             <p id="child-slots-hint" class="advanced-hint">
-              A child slot records a value for one child board. A board holds up
-              to 8. A link counts as a child only when both boards name each
+              A child slot records a value for one child zone. A zone holds up
+              to 8. A link counts as a child only when both zones name each
               other.
             </p>
           </section>
@@ -616,7 +625,7 @@
             <div>
               <p class="eyebrow">Payment</p>
               <h2 id="payment-dialog-title" tabindex="-1">Send a payment</h2>
-              <p id="payment-dialog-desc" class="identity-intro">The amount moves up to the board you share and down to theirs. Each owner signs their own part, so it waits for them.</p>
+              <p id="payment-dialog-desc" class="identity-intro">The amount moves up to the zone you share and down to theirs. Each owner signs their own part, so it waits for them.</p>
             </div>
             <button id="payment-close" class="icon-button" type="button" aria-label="Close payment">×</button>
           </header>
@@ -640,11 +649,11 @@
                 <label class="field"><span>Destination octal address</span>
                   <input id="payment-address" name="payment-address" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 13" aria-describedby="payment-address-hint" />
                 </label>
-                <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>), or <code>root</code>. A root board can receive from boards below it.</p>
+                <p id="payment-address-hint" class="field-hint">Zero-based slot digits from the root (<code>0</code>–<code>7</code>), or <code>root</code>. A root zone can receive from zones below it.</p>
                 <label class="field"><span>Destination user ID</span>
                   <input id="payment-user" name="payment-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64-character public key" aria-describedby="payment-user-hint" />
                 </label>
-                <p id="payment-user-hint" class="field-hint">The owner of the board at that address. The payment is reversed if the id does not match.</p>
+                <p id="payment-user-hint" class="field-hint">The owner of the zone at that address. The payment is reversed if the id does not match.</p>
               </div>
             </details>
             <p id="payment-warning" class="field-warning" role="status" hidden></p>
@@ -688,8 +697,8 @@
                 </p>
               </div>
               <p id="adjust-desc" class="field-hint">
-                Raises or lowers the liability this board records for this
-                child. Your owner key signs it and the child board can see it.
+                Raises or lowers the liability this zone records for this
+                child. Your owner key signs it and the child zone can see it.
                 It is not a payment: nothing moves until a payment is made.
               </p>
               <p id="adjust-stale" class="field-hint is-warning" hidden></p>
@@ -822,7 +831,7 @@
 
             <section id="child-link" class="child-link" aria-labelledby="child-link-title" hidden>
               <div class="child-link-head">
-                <h3 id="child-link-title">Child board</h3>
+                <h3 id="child-link-title">Child zone</h3>
                 <span id="child-link-status" class="state-badge" role="status">Checking…</span>
               </div>
               <p id="child-link-detail" class="field-hint" hidden></p>
@@ -866,11 +875,11 @@
         <form id="parent-form" class="editor-form" novalidate>
           <header class="editor-header">
             <div>
-              <p class="eyebrow">Parent board</p>
+              <p class="eyebrow">Parent zone</p>
               <h2 id="parent-dialog-title" tabindex="-1">Set a parent</h2>
               <p id="parent-dialog-desc" class="identity-intro">
-                A parent is the board one level above this one. The link shows
-                Linked only when both boards point at each other.
+                A parent is the zone one level above this one. The link shows
+                Linked only when both zones point at each other.
               </p>
             </div>
             <button
@@ -918,75 +927,6 @@
       </dialog>
 
       <dialog
-        id="board-name-dialog"
-        class="editor board-name-dialog"
-        aria-labelledby="board-name-title"
-        aria-describedby="board-name-desc board-name-hint"
-      >
-        <form id="board-name-form" class="editor-form" novalidate>
-          <header class="editor-header">
-            <div>
-              <p class="eyebrow">Board name</p>
-              <h2 id="board-name-title" tabindex="-1">Name your board</h2>
-              <p id="board-name-desc" class="identity-intro">
-                This name is how other boards see yours in their path. It is
-                signed into this board and can be changed later.
-              </p>
-            </div>
-            <button
-              id="board-name-close"
-              class="icon-button"
-              type="button"
-              aria-label="Close board name"
-              hidden
-            >
-              ×
-            </button>
-          </header>
-
-          <div class="editor-body">
-            <label class="field">
-              <span>Name</span>
-              <input
-                id="board-name-input"
-                name="board-name"
-                type="text"
-                maxlength="64"
-                autocomplete="off"
-                autocapitalize="off"
-                spellcheck="false"
-                placeholder="e.g. My board"
-                aria-describedby="board-name-desc board-name-hint"
-                aria-required="true"
-              />
-            </label>
-            <p id="board-name-hint" class="field-hint">
-              Up to 64 characters. This name is public and signed into this
-              board.
-            </p>
-            <p id="board-name-warning" class="field-warning" role="status" hidden></p>
-            <p id="board-name-error" class="form-error" role="alert" hidden></p>
-          </div>
-
-          <footer class="editor-actions">
-            <div class="editor-actions-right">
-              <button
-                id="board-name-cancel"
-                class="button button--quiet"
-                type="button"
-                hidden
-              >
-                Cancel
-              </button>
-              <button id="board-name-save" class="button button--primary" type="submit">
-                Save name
-              </button>
-            </div>
-          </footer>
-        </form>
-      </dialog>
-
-      <dialog
         id="delegate-install"
         class="editor identity-dialog delegate-dialog"
         aria-labelledby="delegate-title"
@@ -998,9 +938,9 @@
               <p class="eyebrow">First run</p>
               <h2 id="delegate-title" tabindex="-1">Install the local component</h2>
               <p id="delegate-desc" class="identity-intro">
-                Tally keeps the key that signs your board on this device, in a
+                Tally keeps the key that signs your zone on this device, in a
                 small Freenet component called a delegate. This node does not have
-                it yet, so Tally cannot create or open a board here.
+                it yet, so Tally cannot create or open a zone here.
               </p>
             </div>
           </header>
@@ -1073,8 +1013,8 @@
               <p class="eyebrow">Owner identity</p>
               <h2 id="identity-setup-title" tabindex="-1">Set up this device</h2>
               <p id="identity-setup-desc" class="identity-intro">
-                This device has no owner key yet. The key signs every board change and
-                decides which board you see. It is kept in this device's Freenet
+                This device has no owner key yet. The key signs every zone change and
+                decides which zone you see. It is kept in this device's Freenet
                 delegate, not on a server.
               </p>
             </div>
@@ -1092,7 +1032,7 @@
                   </p>
                   <h3 id="identity-create-title">Create a new identity</h3>
                   <p>
-                    Starts an empty board owned by a new key on this device. Choose this
+                    Starts an empty zone owned by a new key on this device. Choose this
                     if you have not used Tally before.
                   </p>
                   <button id="identity-create" class="button button--primary" type="button">
@@ -1102,11 +1042,11 @@
 
                 <section class="identity-choice" aria-labelledby="identity-restore-title">
                   <p class="identity-choice-kicker">
-                    <span aria-hidden="true">02</span> Already have a board
+                    <span aria-hidden="true">02</span> Already have a zone
                   </p>
                   <h3 id="identity-restore-title">Restore from a backup</h3>
                   <p>
-                    Use the backup code from the device that owns your board. Restore
+                    Use the backup code from the device that owns your zone. Restore
                     first: this device can hold only one identity, and it will not replace
                     one later.
                   </p>
@@ -1132,7 +1072,7 @@
               <div>
                 <h3 id="identity-restore-heading">Paste your backup code</h3>
                 <p id="identity-restore-lede" class="identity-restore-lede">
-                  Paste the JSON code exactly as it was saved. The board uses the key
+                  Paste the JSON code exactly as it was saved. The zone uses the key
                   inside it, so only do this on a device you trust.
                 </p>
               </div>
@@ -1187,7 +1127,7 @@
               <p class="eyebrow">Owner identity</p>
               <h2 id="identity-manage-title" tabindex="-1">Back up your identity</h2>
               <p id="identity-manage-desc" class="identity-intro">
-                The backup code carries this board's owner key to another device. Keep it
+                The backup code carries this zone's owner key to another device. Keep it
                 somewhere safe; there is no recovery server.
               </p>
             </div>
@@ -1215,7 +1155,7 @@
                 The backup code is the private key
               </strong>
               <p>
-                Anyone who has it can sign changes as this owner and reach this board.
+                Anyone who has it can sign changes as this owner and reach this zone.
                 Save it in a password manager and never share it.
               </p>
             </div>
@@ -1274,8 +1214,8 @@
                 This device already has an identity, so it cannot import a backup. To use
                 the same key on another device, open Tally there and choose Restore from
                 a backup before it creates an identity, then check that the Identity in
-                the header matches this one. The backup carries the key, not the board:
-                the new device loads the board from Freenet, so it needs network access.
+                the header matches this one. The backup carries the key, not the zone:
+                the new device loads the zone from Freenet, so it needs network access.
               </p>
             </section>
           </div>
@@ -1320,10 +1260,10 @@
 
             <section id="contacts-invite" class="contacts-invite" aria-labelledby="contacts-invite-title" hidden>
               <p class="eyebrow">From a link</p>
-              <h3 id="contacts-invite-title">Someone shared their board with you.</h3>
+              <h3 id="contacts-invite-title">Someone shared their zone with you.</h3>
               <dl class="contacts-invite-facts">
                 <div class="contacts-invite-fact">
-                  <dt>Board address</dt>
+                  <dt>Zone address</dt>
                   <dd><code id="contacts-invite-address">not set</code></dd>
                 </div>
                 <div class="contacts-invite-fact">
@@ -1446,7 +1386,7 @@
 
       <p id="sr-status" class="sr-only" aria-live="polite"></p>
       <noscript>
-        <p class="noscript">This board needs JavaScript enabled.</p>
+        <p class="noscript">This zone needs JavaScript enabled.</p>
       </noscript>
     </div>
 
