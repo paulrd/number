@@ -30,9 +30,17 @@ ui/public/number_delegate.wasm
 playwright-report
 test-results
 
-# Local scratch databases (e.g. a dev tool's trie store); never commit
+# Local scratch databases and generated region shards; never commit any of
+# these. The source trie is 13 GB and the packed shards are ~1.5 GB; both live
+# outside version control. See DESIGN-regions.md.
 trie.db
 trie.db-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+/regions/
+/data/
 
 # Editors / OS
 .idea
