@@ -20,11 +20,11 @@ changes the compiled bytes and re-keys every zone.
 | Delegate | **v10** `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV`, code `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1793563931`, bundle `assets/index-EEsm_3TS.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1793620651`, bundle `assets/index-DNbK5akK.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Working tree | zone wording + parent-only-when-missing (2026-11-02); **not yet published** |
+| Last UI publish | 2026-11-02, `8271776`; no WASM change, contract/delegate generations unchanged |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
 eight child slots and a **private** address book in the delegate; a tree of
@@ -176,7 +176,7 @@ wake-ups — the app-origin install from the site does.
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
 
-**Unreleased (2026-11-02) — zones**
+**2026-11-02 — zones (`8271776`, site version `1793620651`)**
 - User-facing copy says **zone**; identifiers, ids and signing domains keep
   `board`. No contract/delegate change, no re-key.
 - A zone has no name of its own: the name row, Rename action and name dialog
