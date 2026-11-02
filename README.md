@@ -238,9 +238,9 @@ with its value, its children, its octal address and your shortened user id
 contract id is under **Details**, not in the primary header.
 
 - **Link a child:** open a slot, choose the child's contact, and save. Advanced
-  shows the child's shortened user id under the label that slot was given. The
-  child's owner opens *their* zone, sets its parent to your zone, and adds your
-  contact if needed.
+  and the simple children list show the child's shortened user id (full key on
+  hover). The child's owner opens *their* zone, sets its parent to your zone,
+  and adds your contact if needed.
 - **Link a parent:** a zone with no usable parent shows **Add a parent** on the
   simple view; choose the parent's contact. To change or clear an existing
   parent, use **Advanced → Parent** (clearing it makes the zone a root).

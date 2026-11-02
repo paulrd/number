@@ -195,8 +195,8 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
 - Simple view: a quiet `Your id` row after the actions shows the shortened
   64-hex user id; the full key is the title and the copy control writes it to
   the clipboard with a visible `Copied.` result.
-- Advanced child slots show the child's shortened user id under the given name
-  (full key in the title); unconfirmed rows and the simple children list do not.
+- Advanced child slots and the simple children list show the child's shortened
+  user id (full key in the title); unconfirmed rows do not.
 - UI only; no contract/delegate, state or signing change. `DESIGN-views.md`
   Revision 4.
 

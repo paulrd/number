@@ -61,8 +61,10 @@ describe("default view copy", () => {
 describe("advanced child slot ids", () => {
   it("paints a shortened child id with the full key in the title", () => {
     expect(mainSource).toContain('"slot-id"');
+    expect(mainSource).toContain('"simple-child-id"');
     expect(mainSource).toContain("shorten(entry.contact)");
     expect(mainSource).toContain("slotView.id.title = entry ? entry.contact");
+    expect(mainSource).toContain("id.title = entry.contact");
   });
 });
 

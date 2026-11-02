@@ -564,6 +564,11 @@ test("shows only mutual children on the default surface", async ({ page }) => {
   await expect(children).toContainText("0.00");
   await expect(children).not.toContainText("Parent");
   await expect(children.locator("button")).toHaveCount(0);
+  const childId = children.locator(".simple-child-id");
+  await expect(childId).toHaveText(
+    `${MOCK_CHILD_ID.slice(0, 8)}…${MOCK_CHILD_ID.slice(-8)}`,
+  );
+  await expect(childId).toHaveAttribute("title", MOCK_CHILD_ID);
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });

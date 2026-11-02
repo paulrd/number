@@ -748,7 +748,9 @@ function renderSimpleChildren(): void {
       "simple-child-value",
       `${formatCents(entry.value)}${entry.unit ? ` ${entry.unit}` : ""}`,
     );
-    row.append(label, value);
+    const id = createElement("span", "simple-child-id", shorten(entry.contact));
+    id.title = entry.contact;
+    row.append(label, value, id);
     rows.push(row);
   });
 

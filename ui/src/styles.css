@@ -997,6 +997,18 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* The child's shortened user id sits on its own quiet line under the row. */
+.simple-child-id {
+  flex: 1 0 100%;
+  margin-top: 0.1rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
 /* The simple header: the zone's role, plus a quiet octal address. */
 .simple-head {
   display: flex;

@@ -266,8 +266,9 @@ Supersedes only the two id points below; Revision 3 otherwise stands.
   `#simple-owner-status` is the visible `role="status"` result (`Copied.`).
   The row is painted from `ownIdentity`: it starts as `Waiting…` and reads
   `Not available` when no identity exists.
-- **Child ids in Advanced:** each mutual `.slot` button also shows the child's
+- **Child ids:** each mutual `.slot` button in Advanced also shows the child's
   user id shortened the same way, in `.slot-id` with the full key in its
-  `title`. The name and value stay. Unconfirmed rows and the simple children
-  list show no id.
+  `title`; the name and value stay. The simple children list shows the same
+  shortened id under each child row in `.simple-child-id`, again with the full
+  key in its `title`. Unconfirmed rows show no id.
 - **Copy rule:** unchanged; the simple view still never says `slot`.
