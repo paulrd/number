@@ -315,6 +315,10 @@ account: anyone with it can sign updates as the owner.
   and loads the zone's signed state from Freenet, so it needs network access.
   A local-only node will show an empty zone even though the identity is
   correct (live deployment is #12).
+- **Transfer, not sync.** The backup is the only cross-device path for the
+  address book, and restore is offered only before this device creates an
+  identity. There is no live sync; re-export after contact changes and restore
+  onto a device that does not have a seed yet.
 - The code is never stored by the app: it is fetched only when you reveal it,
   kept in a readonly field, and cleared when you hide the code or close the
   dialog.

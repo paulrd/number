@@ -51,32 +51,34 @@ deployment.
    the repair only matters outside the sandboxed deployment, so a delegate
    re-key solely for this marker is not justified. Store the marker in the
    delegate when a delegate change is needed anyway.
-2. **No cross-device address book (#ours, design).** Contacts live in the
-   delegate; the exported identity (payload v2) carries them and restore brings
-   them back. That is the backup of record; there is no sync.
-3. **Contact rename does not re-sign `childNames` (#ours, documented).** The
+2. **Contact rename does not re-sign `childNames` (#ours, documented).** The
    child keeps seeing the name signed with the slot until the parent saves the
    slot again. Copy says so; do not let a future UI imply otherwise.
-4. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not
+3. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not
    (#ours, intentional).** State is strict so peers agree on bytes; a peer can
    still send ignored delta keys. Documented here, not in the design docs.
-5. **#22 — the node shell does not render the Background grant prompt
+4. **#22 — the node shell does not render the Background grant prompt
    (upstream, blocked).** App side is solved: unregister + reinstall from the app
    triggers the prompt, and `/permission/{nonce}/respond` with `index: 0` grants
    it without changing owner or zone. A headless install can still wait on an
    unrendered prompt and leave the component Configured-but-inert. Evidence:
    `reports/upstream-background-grant-prompt.md`; filed as freenet/freenet-core
    #6039.
-6. **freenet-stdlib#140 (upstream, workaround in place).** `SubscribeResponse`
+5. **freenet-stdlib#140 (upstream, workaround in place).** `SubscribeResponse`
    is serialised as `PutResponse`; the UI treats a subscribe timeout as
    "unconfirmed" and probes-then-PUTs. Remove the workaround when fixed.
-7. **#15 Atlas listing (blocked externally).** Atlas is a read-only crawler
+6. **#15 Atlas listing (blocked externally).** Atlas is a read-only crawler
    index with no publisher submission. The site is live and usable by a fresh
    node but unlisted. Revisit when self-submission ships, or ask the operator to
    crawl it.
 
 ### Accepted limitations (not defects)
 
+- **No cross-device address book.** Contacts live in the delegate; the exported
+  identity (payload v2) carries them and restore brings them back. That is the
+  transfer path and backup of record; there is no live sync. Decision
+  2026-11-02: keep it that way — there is no server or shared private store to
+  sync through.
 - **Issued, not delivered.** A stalled downward payment leaves the amount issued
   at the payer until they withdraw or overwrite the slot; the UI says so. This
   follows from allowing an LCA endpoint.
