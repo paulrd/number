@@ -4,6 +4,10 @@ Status: proposed, 2026-11-02. Source: `trie.db` (SQLite, ~13 GB, table
 `region`). This document covers the dataset only; it does not change the zone
 contract, delegate, or existing wire formats.
 
+Revision note: population is included as a `u32`; the shard target is fixed at
+**256 KiB**; the desired region picker is **Leaflet + `world-atlas`
+`countries-110m`, no tile layer**.
+
 ## 1. What the data actually is
 
 Measured from `trie.db`:
@@ -13,19 +17,25 @@ Measured from `trie.db`:
 | Rows | **74,179,600** |
 | Key | `region.materialized_path`, unique, alphabet `a`–`h` |
 | Path length | 1–17 digits (most rows are depth 9–11) |
-| Columns worth keeping | `materialized_path`, `min_lon`, `max_lon`, `min_lat`, `max_lat` |
-| Columns dropped | `id`, `population`, `binary_path`, and the `geo_index` R-tree |
+| Columns worth keeping | `materialized_path`, `min_lon`, `max_lon`, `min_lat`, `max_lat`, `population` |
+| Columns dropped | `id`, `binary_path`, and the `geo_index` R-tree |
 | Coordinate precision | every bound is an exact multiple of `2^-20` (verified for all rows) |
-| Packed row size | `1 + ceil(3 * len(path) / 8) + 16` bytes |
-| **Packed dataset** | **1,578,368,762 bytes (~1.47 GiB)** |
+| Population encoding | `u32`, whole people, rounded from the source’s fractional estimate |
+| Packed row size | `1 + ceil(3 * len(path) / 8) + 16 + 4` bytes |
+| **Packed dataset** | **1,875,087,162 bytes (~1.75 GiB)** |
 
 `materialized_path` is a trie address: a row is the parent of `path + digit` for
 digits `a`–`h` (octal `0`–`7`). Lexicographic order of the `a`–`h` strings is
 the trie's preorder, and every descendant of a path is a contiguous range
 immediately after it. That is the property the sharding relies on.
 
-Only paths and bounds are stored. Population is deliberately excluded; adding it
-later is a format-version change and changes every affected shard hash.
+Paths, bounds and population are stored. Population is a `u32` of whole people,
+rounded from the source's fractional estimate; the source maximum is
+2,144,729,716, comfortably inside `u32`. The `u32` choice adds only 4 bytes per
+row and keeps the total population (72.8B) inside JavaScript's safe integer
+range, so the UI can sum it without `BigInt`. If a future dataset needs
+fractional values or a row above 4,294,967,295, that is a new row format
+(`region-v3`) with a wider field, and every shard hash changes.
 
 ## 2. Why not one contract per region (or per trie node)
 
@@ -33,8 +43,8 @@ A contract per region would be **74,179,600 contracts**:
 
 - 74M PUTs, each with its own network and validation overhead.
 - A per-node contract with child pointers would store up to 8 × 32-byte child
-  ids (~256 bytes) to describe a ~24-byte row — metadata several times larger
-  than the data.
+  ids (~256 bytes) to describe a row that is typically ~25 bytes — metadata
+  several times larger than the data.
 - Freenet contract state is replicated and validated; 74M tiny contracts is a
   denial-of-service on the network's metadata budget, not a database.
 
@@ -75,7 +85,7 @@ Two contract WASMs, one family:
 This split gives the dataset the right trust model:
 
 - The publisher key is needed only for the small manifest. It is not needed to
-  serve or verify 1.5 GB of shards.
+  serve or verify ~1.75 GiB of shards.
 - A shard is self-verifying: `BLAKE3(state) == params.content_hash`. A peer
   cannot alter it without producing a different contract id.
 - An update is: publish new/changed shards (new content hashes → new contract
@@ -91,23 +101,35 @@ subtrees, with a target serialized size. They are not hash shards: hashing would
 destroy the descendant locality that lets a zone read itself and its children
 from one or two shards.
 
-Measured by running the §4 algorithm over the real tree (not a `total / target`
-estimate — subtree alignment leaves some shards under-filled):
+Measured with population included, running the boundary algorithm below over
+the real tree (not a `total / target` estimate — subtree alignment leaves some
+shards under-filled):
 
 | Target | Shards | Manifest (~46 B/entry) | Avg shard | Max shard |
 | --- | ---: | ---: | ---: | ---: |
-| 4 MiB | 515 | ~23 KiB | 2.9 MiB | 4.0 MiB |
-| 1 MiB | 2,034 | ~92 KiB | 776 KiB | 1.0 MiB |
-| **256 KiB** | **8,255** | **~371 KiB** | **191 KiB** | **256 KiB** |
-| 64 KiB | 33,073 | ~1.5 MiB | 48 KiB | 64 KiB |
+| 4 MiB | 603 | ~27 KiB | 3.0 MiB | 4.0 MiB |
+| 1 MiB | 2,409 | ~108 KiB | 760 KiB | 1.0 MiB |
+| **256 KiB** | **9,511** | **~427 KiB** | **193 KiB** | **256 KiB** |
 
-**Recommendation: 256 KiB.** It keeps each contract far below the 4 MB design
-target and the 50 MiB hard cap, keeps the manifest under 400 KB, and makes a
-single zone lookup fetch ~9,000 rows on average rather than ~140,000 at 4 MiB.
-If publish throughput and contract count matter more than read amplification,
-1 MiB gives 2,034 contracts and a 92 KiB manifest; if per-zone read cost
-dominates and a 33,000-contract publish is acceptable, 64 KiB is the floor.
-The format and manifest do not change with the target — only the boundaries do.
+**Decision: 256 KiB.** It is the best balance for this app:
+
+- each contract averages **193 KiB**, far below the 4 MiB design target and the
+  50 MiB hard cap;
+- the manifest is **~427 KiB**, well under 1 MiB and far below the 4 MiB point
+  where a hierarchical manifest becomes necessary;
+- a zone lookup fetches ~**7,800 rows**, rather than ~30,800 at 1 MiB or
+  ~123,000 at 4 MiB;
+- **9,511 contracts** is large but publishable, and far below the 74M contracts
+  of a per-region design;
+- the whole packed dataset is **1.75 GiB**, and unchanged shards keep their
+  content hash across updates.
+
+The documented alternatives are 1 MiB (2,409 contracts, 108 KiB manifest, but
+~1 MiB per zone GET) and 4 MiB (603 contracts, 27 KiB manifest, but ~3 MiB per
+zone GET). The format and manifest do not change with the target — only the
+boundaries do. The 256 KiB decision is revisited only if publishing 9,511
+contracts proves operationally painful; per-zone read cost is the reason not to
+go larger.
 
 ### Boundary algorithm
 
@@ -240,11 +262,11 @@ Freenet id: `BLAKE3(BLAKE3(wasm) || params)`.
 
 ## 6. Wire formats
 
-### 6.1 Shard payload (format `region-v1`)
+### 6.1 Shard payload (format `region-v2`)
 
 ```
 magic                4 bytes  "RGN1"
-format_version       1 byte   1
+format_version       1 byte   2
 row_count            4 bytes  little-endian
 rows                 row_count × Row, sorted by path
 ```
@@ -256,7 +278,14 @@ path_len             1 byte    1..=32
 path_packed          ceil(3 * path_len / 8) bytes
 min_lon, max_lon,
 min_lat, max_lat     4 × i32 little-endian
+population           1 × u32 little-endian
 ```
+
+`population` is whole people, rounded from the source estimate; `0` is valid.
+The current maximum (2,144,729,716) fits `u32`. A value that does not fit, or a
+need for fractional population, is a `region-v3` format with a wider field —
+never a silent clamp. With population, a row is
+`1 + ceil(3 * len(path) / 8) + 16 + 4` bytes (21 bytes plus the packed path).
 
 Path digits are `0`–`7` (the dataset's `a`–`h` mapped to `0`–`7`), packed three
 bits per digit, most-significant bit first. A path is compared digit by digit;
@@ -280,7 +309,7 @@ value   = encoded / 2^22
 magic                4 bytes  "RGM1"
 format_version       1 byte   1
 dataset_id           16 bytes
-row_format           1 byte   1 (region-v1)
+row_format           1 byte   2 (region-v2, includes population)
 code_hash_count      1 byte
 code_hashes          code_hash_count × 32 bytes BLAKE3(shard wasm)
 total_rows           8 bytes  little-endian
@@ -307,9 +336,9 @@ Entry `i` covers `[start_i, start_{i+1})`; the last entry covers
 2. derives the shard id from `code_hashes[entry.code_hash_id]` and
    `entry.content_hash`;
 3. GETs that shard and parses it;
-4. verifies `BLAKE3(state) == content_hash`, magic, row count, sorted paths,
-   `rows[0].path == start_i`, every path in the entry's range, and coordinate
-   bounds;
+4. verifies `BLAKE3(state) == content_hash`, magic, `format_version == 2`, row
+   count, sorted paths, `rows[0].path == start_i`, every path in the entry's
+   range, coordinate bounds, and the population field;
 5. looks up the exact path (linear scan is fine at ≤256 KiB; add a sparse
    every-256-row offset table only if profiling shows a need).
 
@@ -327,7 +356,9 @@ for `p`, and usually the rows for `p + "0"` … `p + "7"` (its child slots):
    expected; the summary is 40 bytes).
 2. For the set `{p, p0..p7}`, map each path to a manifest entry, deduplicate the
    shard ids, and GET each needed shard concurrently.
-3. Parse each shard once, index rows by path, and answer all nine lookups.
+3. Parse each shard once, index rows by path, and answer all nine lookups. Each
+   `RegionRow` now carries `population` (`u32`, whole people) alongside the four
+   bounds; display it with the region, or use it for ranking.
 4. If a child path is absent, it is not in the dataset; do not probe further.
 
 Because descendants are contiguous, the zone and most of its children land in
@@ -341,9 +372,59 @@ format cannot enforce that, because the zone's slot index is user-assigned. If
 slots are assigned by geography instead, translate through the dataset's child
 order before forming the address to look up.
 
-## 8. Generation and publishing pipeline
+## 8. Region picker visualization (desired)
 
-### 8.1 Export (offline, read-only)
+The app should let a user find the region/zone they belong to by selecting a
+point on a world map. This is a **shared vector viewport**, not stored imagery.
+
+**Desired implementation:** **Leaflet** with the **`world-atlas`
+`countries-110m.json`** geometry and **no tile layer**. Bundle the library, CSS
+and TopoJSON/GeoJSON in the UI (or a small asset contract). Leaflet supplies
+zoom/pan, `L.rectangle` for region bounds and `map.on("click", e => e.latlng)`
+for point selection.
+
+Why this choice:
+
+- ~50 KiB gzipped Leaflet JS/CSS plus ~30–100 KiB compressed country geometry;
+  negligible next to the portal and game bundles.
+- No external tile server, CDN, API key or network attribution request; the
+  gateway CSP blocks external tiles anyway.
+- The map is shared by every region/zone: one basemap, not 74M per-region
+  images.
+- `countries-110m` is enough context for picking a position. Use
+  `countries-50m` only if more coastline detail is needed.
+- Rectangles remain numeric: each region's lon/lat bbox is an `L.rectangle`;
+  no per-region graphic is stored.
+
+Interaction:
+
+1. Render the country geometry as a GeoJSON layer on an `L.map` with no
+   `L.tileLayer`.
+2. Overlay the active zone and its eight children as rectangles (optionally a
+   coarse world layer at depth ≤4, 3,616 rectangles).
+3. On click, read `e.latlng` (lon/lat).
+4. Find the containing region by descending the region trie: at each node,
+   choose the child whose bbox contains the point; if no child does, the
+   current node is the region. This is exact and uses the numeric dataset.
+5. Resolve that region path to the zone/contact the user belongs to using the
+   app's existing parent/child and contact lookup.
+
+**Projection:** default Leaflet EPSG:3857 clips at ±85.05°, so use
+`L.CRS.EPSG4326` (or D3 equirectangular) if the polar rows matter. A lon/lat
+bbox is axis-aligned in both EPSG:3857 and EPSG:4326.
+
+**Scale:** draw the selected zone and its children plus at most a coarse
+overview; do not draw all 74M rows. Fetch only the shards for the current
+subtree or viewport.
+
+**Fallback:** if Leaflet is too heavy or full drawing control is needed, the
+same design works with `d3-geo` + `d3-zoom` on Canvas at a smaller bundle. The
+data source and click-to-region algorithm are unchanged. `world-atlas` derives
+from Natural Earth; retain the required attribution/licence notice.
+
+## 9. Generation and publishing pipeline
+
+### 9.1 Export (offline, read-only)
 
 Use `sqlite3` read-only (`file:trie.db?mode=ro`, `PRAGMA query_only=ON`) inside
 one read transaction (or against a snapshot copy) so both passes see the same
@@ -352,21 +433,24 @@ rows even if the source is being regenerated. The existing unique index on
 
 1. Pass 1: stream `SELECT materialized_path FROM region ORDER BY
    materialized_path`; a forward stack pass computes `subtree_bytes` and emits
-   shard boundaries (§4). Only paths and lengths are needed.
-2. Pass 2: stream `SELECT materialized_path, min_lon, max_lon, min_lat, max_lat
-   FROM region ORDER BY materialized_path`; encode rows and write one file per
-   shard according to the boundaries.
+   shard boundaries (§4). Population contributes a fixed 4 bytes per row, so
+   paths and lengths are still enough for the boundary pass.
+2. Pass 2: stream `SELECT materialized_path, min_lon, max_lon, min_lat, max_lat,
+   population FROM region ORDER BY materialized_path`; encode rows and write
+   one file per shard according to the boundaries.
 3. Write `manifest.bin` with each shard's start, row count, byte count and
    BLAKE3 hash. Sign nothing here; the signing step is separate and needs the
    publisher key.
-4. Assert: row count 74,179,600; every coordinate quantizes exactly; shard
+4. Assert: row count 74,179,600; every coordinate quantizes exactly; every
+   population is finite, non-negative and fits `u32` after rounding; shard
    sizes ≤ target (except a single row larger than a tiny target); ranges are
-   contiguous and non-overlapping; the sum of shard rows equals `total_rows`.
+   contiguous and non-overlapping; the sum of shard rows equals `total_rows`;
+   the packed total is 1,875,087,162 bytes for this source.
 
 Default output: `.build/regions/` (already ignored). Never write shards or a
 database copy anywhere tracked by git.
 
-### 8.2 Publish (network)
+### 9.2 Publish (network)
 
 Publish shards first, manifest last, so no reader ever sees an index entry for a
 contract that was not published:
@@ -389,7 +473,7 @@ fdev --port 7510 publish \
 - For a first publish, verify a random sample (and optionally all shards) from a
   second node: GET, hash, parse, compare a few rows to SQLite.
 
-### 8.3 Availability
+### 9.3 Availability
 
 Freenet storage is demand-driven, not a permanent archive. Keep the publisher's
 node online as a seed and consider `--subscribe` for the manifest (tiny) and the
@@ -398,7 +482,7 @@ makes re-publishing safe and deduplicating. State this expectation in the app's
 docs: the dataset is available while interested peers hold it, not guaranteed
 forever by the network.
 
-## 9. Updates and versioning
+## 10. Updates and versioning
 
 - **Shard bytes are immutable.** A change produces a new content hash and a new
   contract id. Unchanged shards keep their ids, so an update only re-uploads the
@@ -408,10 +492,12 @@ forever by the network.
   reading old shards; subscribers cut over when the new manifest arrives.
 - **Do not change `row_format` in place.** Add a new format version or a new
   field with a version bump; old clients ignore unknown manifest versions.
-- **Population (if ever added)** is a new row field and a new `row_format`; it
-  changes every shard hash. Keep v1 path+coordinates clean.
+- **Population is part of `region-v2` as a `u32`.** Changing its width or
+  precision (for example to `u64` or a fractional value) is a new row format
+  and changes every shard hash. Do not silently clamp an out-of-range value;
+  fail the export and bump the format.
 
-## 10. Repository hygiene
+## 11. Repository hygiene
 
 Database files and generated shards must never be committed. `.gitignore`
 covers:
@@ -441,16 +527,24 @@ Generated manifests, shard files, ledgers and signing keys stay outside the
 repo. The signing key is never written by the tooling; read it from a path
 outside the repository or an environment variable.
 
-## 11. Open decisions
+## 12. Decisions and open items
 
-1. **Shard target.** Recommended 256 KiB (measured: 8,255 shards, ~371 KiB
-   manifest, 191 KiB average shard). Use 1 MiB (2,034 shards) if
-   publish/contract-count overhead dominates; 64 KiB (33,073 shards) if
-   per-zone read cost dominates.
-2. **Implement now?** The next deliverable is the exporter + manifest signer +
+Settled:
+
+- **Shard target: 256 KiB.** Measured with population: 9,511 shards, ~427 KiB
+  manifest, 193 KiB average shard, ~7,800 rows per zone lookup. See §4.
+- **Population: `u32` whole people.** Rounded from the source estimate; the
+  current maximum fits. See §1 and §6.1.
+- **Visualization: Leaflet + `world-atlas` `countries-110m`, no tile layer.**
+  A shared vector basemap for click-to-region selection. See §8.
+
+Open:
+
+1. **Implement now?** The next deliverable is the exporter + manifest signer +
    resumable publisher, with the two small contract crates. No network publish
    until the generated manifest and a local dry run are verified.
-3. **Population.** Explicitly out of v1. If it is needed for ranking or
-   display, add it as a versioned row field and re-publish affected shards.
-4. **Hierarchical manifest.** Not needed at this scale. Revisit only if the
+2. **Population precision.** `u32` is chosen. If exact fractional population or
+   a row above `u32` is ever required, define `region-v3` with a wider field and
+   republish all shards.
+3. **Hierarchical manifest.** Not needed at this scale. Revisit only if the
    shard count approaches ~90,000 (manifest >4 MB).
