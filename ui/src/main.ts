@@ -167,7 +167,7 @@ const advancedView = byId<HTMLElement>("advanced-view");
 const viewToggle = byId<HTMLButtonElement>("view-toggle");
 const advancedTitle = byId<HTMLHeadingElement>("advanced-title");
 const parentValueTitle = byId<HTMLElement>("parent-value-title");
-const parentValueRecorded = byId<HTMLElement>("parent-value-recorded");
+
 const simplePay = byId<HTMLButtonElement>("simple-pay");
 const simplePayReason = byId<HTMLElement>("simple-pay-reason");
 const simpleContacts = byId<HTMLButtonElement>("simple-contacts");
@@ -1112,8 +1112,6 @@ function resetParentValue(): void {
   parentValueAmount.classList.remove("is-long", "is-xlong");
   parentValueUnit.textContent = "";
   parentValueUnit.hidden = true;
-  parentValueRecorded.textContent = "";
-  parentValueRecorded.hidden = true;
   parentValueChange.hidden = true;
   parentValueChange.removeAttribute("title");
   parentValueNote.textContent = "";
@@ -1234,8 +1232,7 @@ function renderParentAdjustments(options: {
   parentAdjustmentsList.replaceChildren(...recent.map(adjustmentRow));
 }
 
-const RECORD_EYEBROW = "Recorded above";
-const RECORD_CAPTION = "You can't change it here.";
+const RECORD_EYEBROW = "Balance";
 
 /**
  * The record sheet holds the value recorded above and this zone's children.
@@ -1347,9 +1344,6 @@ function paintSimpleCard(own: BoardSnapshot, info: LinkInfo): void {
   const unit = value.entry.unit ?? "";
   parentValueUnit.textContent = unit;
   parentValueUnit.hidden = unit === "";
-
-  parentValueRecorded.textContent = RECORD_CAPTION;
-  parentValueRecorded.hidden = false;
 
   const note = value.entry.note ?? "";
   parentValueNote.textContent = note;

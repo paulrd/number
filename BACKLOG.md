@@ -183,7 +183,7 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
   are gone; `selfName` is dormant (never written, read or seeded), and
   `childNames` are the only live names.
 - Simple view: `Your zone` plus a quiet octal address; the record card is
-  labelled `Recorded above` and never names the parent; the parent prompt with
+  labelled `Balance` and never names the parent; the parent prompt with
   `Add a parent` appears only when the link is missing/broken. Children stay on
   the simple view. Changing/clearing a healthy parent lives in Advanced.
 - Receive links take `name=` from the parent-given child name, else omit it.

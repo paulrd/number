@@ -30,6 +30,10 @@ ui/public/number_delegate.wasm
 playwright-report
 test-results
 
+# Local scratch databases (e.g. a dev tool's trie store); never commit
+trie.db
+trie.db-*
+
 # Editors / OS
 .idea
 .DS_Store

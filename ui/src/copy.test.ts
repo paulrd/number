@@ -28,7 +28,8 @@ describe("default view copy", () => {
     expect(simple).toContain("Send payment");
     expect(simple).toContain("Address book");
     expect(simple).toContain("Copy receive-payment link");
-    expect(simple).toContain("Recorded above");
+    expect(simple).toContain(">Balance</p>");
+    expect(simple).not.toContain("You can't change it here.");
     expect(simple).toContain(">Your zone</h2>");
     expect(simple).toContain("simple-address");
     expect(simple).not.toContain("Your Board Name");

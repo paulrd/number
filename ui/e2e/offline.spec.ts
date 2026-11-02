@@ -487,10 +487,10 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await expect(page.locator("#board-title")).toHaveText("Your zone");
   await expect(page.locator("#simple-address-value")).toHaveText("0");
   await expect(page.locator("#simple-parent")).toBeHidden();
-  await expect(page.locator("#parent-value-title")).toContainText("Recorded above");
+  await expect(page.locator("#parent-value-title")).toHaveText("Balance");
   await expect(page.locator("#parent-value")).toContainText("8.50");
   await expect(page.locator("#parent-value")).toContainText("kg");
-  await expect(page.locator("#parent-value-recorded")).toContainText(
+  await expect(page.locator("#parent-value")).not.toContainText(
     "You can't change it here.",
   );
   await openAdvanced(page);
@@ -589,7 +589,7 @@ test("adds a parent from the default surface, then keeps it quiet", async ({
   await expect(page.locator("#parent-edit")).toBeHidden();
   await expect(page.locator("#parent-clear")).toBeHidden();
   expect(await page.locator("#simple-view").innerText()).not.toContain("Parent");
-  await expect(page.locator("#parent-value-title")).toHaveText("Recorded above");
+  await expect(page.locator("#parent-value-title")).toHaveText("Balance");
 
   // Advanced is where a healthy parent is changed or cleared.
   await openAdvanced(page);

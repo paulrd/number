@@ -226,8 +226,7 @@ Supersedes Revision 2's name, parent and address points.
      existing `octalAddress` walk and updates as the parent chain resolves; it is
      not the Advanced chip and never competes with the actions;
   2. the record card, present only when a mutual parent exists: neutral eyebrow
-     `Recorded above`, the parent's value and unit, and the caption
-     `You can't change it here.` It never names the parent;
+     `Balance`, then the parent's value and unit. It never names the parent;
   3. the mutual-only children list (slot-given name + value + unit), hidden when
      empty;
   4. a payment-waiting line when one exists (unchanged);

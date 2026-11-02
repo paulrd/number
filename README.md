@@ -252,9 +252,8 @@ header.
   neighbouring zones for values, links and payment routes; there is no
   breadcrumb or other-owner browsing.
 - **Parent value:** when a zone has a mutual parent, the value the parent holds
-  in the slot naming it is shown on the simple view as a record from above,
-  with its unit and note, captioned `You can't change it here.` The parent is
-  not named there. A root, a pending link, or a cleared parent slot has nothing
+  in the slot naming it is shown on the simple view under the label `Balance`,
+  with its unit and note. The parent is not named there. A root, a pending link, or a cleared parent slot has nothing
   to show, and the simple view instead offers the parent prompt when the link
   is missing.
 - **Octal address:** every zone shows an address made of zero-based slot digits

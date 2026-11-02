@@ -893,7 +893,6 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.record-recorded,
 .record-note,
 .record-empty {
   max-width: 48rem;
@@ -902,16 +901,6 @@ textarea:focus-visible {
   font-size: 0.85rem;
   line-height: 1.5;
   overflow-wrap: anywhere;
-}
-
-/* The provenance line is the receipt's stamp: separated from the figure so the
-   name and value read as one object above it. */
-.record-recorded {
-  margin-top: 0.85rem;
-  padding-top: 0.7rem;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 16%, var(--rule));
-  color: var(--text);
-  font-size: 0.8rem;
 }
 
 .record-note {
