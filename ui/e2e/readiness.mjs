@@ -31,7 +31,11 @@ async function grantState(port) {
 }
 
 async function boardFacts(app) {
-  await app.locator("#details-summary").click();
+  // <details> starts closed; only click when it is closed so a future default
+  // open state cannot toggle it shut and hide the refresh control.
+  if (!(await app.locator("#details").getAttribute("open"))) {
+    await app.locator("#details-summary").click();
+  }
   await app.locator("#auto-advance-refresh").click().catch(() => {});
   await sleep(1_500);
   const text = async (id) =>
@@ -39,7 +43,9 @@ async function boardFacts(app) {
   const scanText = await text("#auto-advance-scan");
   const scanMatch = /^pass\s+([\d,]+)$/i.exec(scanText);
   const subsText = await text("#auto-advance-subs");
-  const subsMatch = /^(\d+)\s+board/i.exec(subsText);
+  // The UI calls a board a zone now; accept the old wording too so this probe
+  // also works against a node still serving the previous bundle.
+  const subsMatch = /^(\d+)\s+(?:board|zone)/i.exec(subsText);
   return {
     owner: (await app.locator("#identity-short").getAttribute("title").catch(() => "")) ?? "",
     boardAddress: (await app.locator("#board-address-value").textContent().catch(() => "")).trim(),
@@ -66,8 +72,18 @@ try {
       await page.goto(`http://127.0.0.1:${port}/v1/contract/web/${WEBAPP}/`, {
         waitUntil: "domcontentloaded",
       });
-      await app.locator('#status-pill[data-status="ready"]').waitFor({ timeout: 180_000 });
+      // The status pill lives in Advanced, which is hidden on the default
+      // surface: wait for it to exist with the ready state, not to be visible.
+      await app
+        .locator('#status-pill[data-status="ready"]')
+        .waitFor({ state: "attached", timeout: 180_000 });
       await sleep(1_200);
+      // Every fact below is in Advanced; switch once so the details and the
+      // refresh control can be clicked.
+      if (!(await app.locator("#advanced-view").isVisible())) {
+        await app.locator("#view-toggle").click();
+      }
+      await app.locator("#advanced-view").waitFor({ state: "visible" });
       facts = await boardFacts(app);
     } finally {
       await context.close();

@@ -137,8 +137,8 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 74, UI 227,
-offline e2e 22, `verify-merge` 14 laws / 0 violations.
+Expected at the time of writing: contract 123 tests, delegate 74, UI 247,
+offline e2e 23, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -147,17 +147,21 @@ services running as `paul` from `~/.local/bin/freenet` (0.2.153).
 
 | Node | Unit | Ports | Role / owner |
 |---|---|---|---|
-| D | `freenet.service` | ws 7509, default network port (no flags; default data dir) | root, owner `3f84…` — the live zone above |
-| A | `freenet-node2` | ws 7511, net 31338 | root, owner `ea14…` |
-| B | `freenet-node3` | ws 7512, net 31339 | child `0` of A, owner `4e7a…` |
-| C | `freenet-node4` | ws 7513, net 31340 | child `03` of B, owner `06e6…` |
+| D | `freenet.service` | ws 7509, default network port (no flags; default data dir) | root, owner `3f84…` — the live zone above; slot 0 → A (address `root`) |
+| A | `freenet-node2` | ws 7511, net 31338 | child 0 of D, owner `ea14…`; slot 0 → B (address `0`) |
+| B | `freenet-node3` | ws 7512, net 31339 | child 0 of A, owner `4e7a…`; slot 3 → C, 90.00 (address `00`) |
+| C | `freenet-node4` | ws 7513, net 31340 | child 3 of B, owner `06e6…`; no children (address `003`) |
 
 A/B/C keep data, config and logs under `/var/lib/freenet-nodeN/`; D uses the
 default `~/.local/share/freenet`.
 
-Last full topology check 2026-10-29; re-run `readiness.mjs` before relying on it.
-All four previously held the Background grant and scanned; a delegate re-key
-means each zone must be opened once so the seed migrates and the prompt is
+Last full topology and readiness check 2026-11-02. A/B/C are READY (Background
+granted, scanning, subscribed). **D is Configured but inert:** the grant reads
+`granted`, but its delegate reports no code hash, no scans and no subscriptions,
+and the app shows "This zone can carry payments but won't auto-advance on this
+node. Reinstall the component…". Reinstall from the app origin (unregister +
+install) to arm wake-ups; this is the documented #22 workaround. A delegate
+re-key means each zone must be opened once so the seed migrates and the prompt is
 asked again.
 
 ## Publishing (manual)
@@ -191,6 +195,12 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
   caption is gone.
 - Receive links take `name=` from the parent-given child name, else omit it.
 - `DESIGN-views.md` Revision 3; `DESIGN*.md` carry a terminology note.
+
+**2026-11-02 — readiness probe fixed**
+- `ui/e2e/readiness.mjs` waits for the status pill to be *attached* (it lives on
+  the hidden Advanced surface), switches to Advanced before reading, opens
+  Details only when closed, and accepts the `zone` subscription wording. It now
+  reports 7511/7512/7513 READY; 7509 is Configured-but-inert (see the test bed).
 
 **2026-11-02 — contact validation consolidated (`9c26acb`, site `1793625118`)**
 - UI address-book rules live once in `ui/src/contact-rules.ts`; `delegate.ts`,
