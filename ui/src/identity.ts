@@ -13,9 +13,12 @@
  * import the UI shows the resulting identity, which is what the user compares
  * against the old device.
  */
-import type { ContactRecord, ExportedSecrets } from "./delegate";
-import { isOctalAddress } from "./payments";
-import { isLowerHex, utf8Length } from "./util";
+import type { ExportedSecrets } from "./delegate";
+import {
+  contactListProblem,
+  normalizeContactList,
+  type ContactRecord,
+} from "./contact-rules";
 
 export const IDENTITY_BACKUP_KIND = "number-identity";
 /**
@@ -27,8 +30,6 @@ export const IDENTITY_BACKUP_VERSION = 2;
 export const LEGACY_IDENTITY_BACKUP_VERSION = 1;
 
 const SEED_PATTERN = /^[0-9a-fA-F]{64}$/;
-const MAX_CONTACT_LABEL_BYTES = 64;
-const MAX_CONTACTS = 64;
 
 export interface IdentityBackup {
   v: typeof IDENTITY_BACKUP_VERSION;
@@ -133,67 +134,9 @@ export function encodeIdentityBackup(
 
 /** Validate the address book carried by a backup (same bounds as delegate). */
 function validateBackupContacts(raw: unknown): ContactRecord[] {
-  if (!Array.isArray(raw)) {
-    throw new IdentityBackupError(
-      "The backup contacts must be an array.",
-    );
-  }
-  if (raw.length > MAX_CONTACTS) {
-    throw new IdentityBackupError(
-      `The backup has ${raw.length} contacts; the maximum is ${MAX_CONTACTS}.`,
-    );
-  }
-  const userIds = new Set<string>();
-  const labels = new Set<string>();
-  return raw.map((value, index) => {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} must be an object.`,
-      );
-    }
-    const record = value as Record<string, unknown>;
-    const label = record.label;
-    if (typeof label !== "string" || label.length === 0) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} label must be a non-empty string.`,
-      );
-    }
-    if (utf8Length(label) > MAX_CONTACT_LABEL_BYTES) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} label exceeds ${MAX_CONTACT_LABEL_BYTES} bytes.`,
-      );
-    }
-    if (typeof record.userId !== "string" || !isLowerHex(record.userId, 64)) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} userId must be 64 lowercase hex characters.`,
-      );
-    }
-    let address: string | null = null;
-    if (record.address !== undefined && record.address !== null) {
-      if (
-        typeof record.address !== "string" ||
-        !isOctalAddress(record.address)
-      ) {
-        throw new IdentityBackupError(
-          `The backup contact ${index} address must be null or an octal address.`,
-        );
-      }
-      address = record.address;
-    }
-    if (userIds.has(record.userId)) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} duplicates a userId.`,
-      );
-    }
-    userIds.add(record.userId);
-    if (labels.has(label)) {
-      throw new IdentityBackupError(
-        `The backup contact ${index} duplicates a label.`,
-      );
-    }
-    labels.add(label);
-    return { label, userId: record.userId, address };
-  });
+  const problem = contactListProblem(raw, "contacts");
+  if (problem) throw new IdentityBackupError(`The backup ${problem}`);
+  return normalizeContactList(raw);
 }
 
 export function decodeIdentityBackup(text: string): DecodedIdentityBackup {

@@ -47,31 +47,30 @@ deployment.
    once-only marker is never written. Consequence is benign: the import happens
    during v5→v6 migration and the automatic repair never runs, so a deleted
    contact is never resurrected. The durable home is a delegate secret, which is
-   a v11 re-key.
+   a v11 re-key. **Decision 2026-11-02:** keep as a known limitation for now —
+   the repair only matters outside the sandboxed deployment, so a delegate
+   re-key solely for this marker is not justified. Store the marker in the
+   delegate when a delegate change is needed anyway.
 2. **No cross-device address book (#ours, design).** Contacts live in the
    delegate; the exported identity (payload v2) carries them and restore brings
    them back. That is the backup of record; there is no sync.
-3. **Contact validation duplicated (#ours, cleanup).** Rules exist in
-   `delegate/src/lib.rs`, `ui/src/delegate.ts`, `ui/src/identity.ts` and
-   `ui/src/mock.ts`. The delegate is the authority; consolidate before adding
-   rules.
-4. **Contact rename does not re-sign `childNames` (#ours, documented).** The
+3. **Contact rename does not re-sign `childNames` (#ours, documented).** The
    child keeps seeing the name signed with the slot until the parent saves the
    slot again. Copy says so; do not let a future UI imply otherwise.
-5. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not
+4. **`StateV6` is `deny_unknown_fields`; `Delta` and `Summary` are not
    (#ours, intentional).** State is strict so peers agree on bytes; a peer can
    still send ignored delta keys. Documented here, not in the design docs.
-6. **#22 — the node shell does not render the Background grant prompt
+5. **#22 — the node shell does not render the Background grant prompt
    (upstream, blocked).** App side is solved: unregister + reinstall from the app
    triggers the prompt, and `/permission/{nonce}/respond` with `index: 0` grants
    it without changing owner or zone. A headless install can still wait on an
    unrendered prompt and leave the component Configured-but-inert. Evidence:
    `reports/upstream-background-grant-prompt.md`; filed as freenet/freenet-core
    #6039.
-7. **freenet-stdlib#140 (upstream, workaround in place).** `SubscribeResponse`
+6. **freenet-stdlib#140 (upstream, workaround in place).** `SubscribeResponse`
    is serialised as `PutResponse`; the UI treats a subscribe timeout as
    "unconfirmed" and probes-then-PUTs. Remove the workaround when fixed.
-8. **#15 Atlas listing (blocked externally).** Atlas is a read-only crawler
+7. **#15 Atlas listing (blocked externally).** Atlas is a read-only crawler
    index with no publisher submission. The site is live and usable by a fresh
    node but unlisted. Revisit when self-submission ships, or ask the operator to
    crawl it.
@@ -190,6 +189,12 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
   caption is gone.
 - Receive links take `name=` from the parent-given child name, else omit it.
 - `DESIGN-views.md` Revision 3; `DESIGN*.md` carry a terminology note.
+
+**2026-11-02 — contact validation consolidated**
+- UI address-book rules live once in `ui/src/contact-rules.ts`; `delegate.ts`,
+  `mock.ts` and `identity.ts` are thin adapters that keep their own error
+  types. `delegate/src/lib.rs` remains the authority; no wire change. 18 new
+  unit tests.
 
 **2026-11-02 — owner id and child ids (`3e99567`/`5048d47`, site `1793623558`)**
 - Simple view: a quiet `Your id` row after the actions shows the shortened

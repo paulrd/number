@@ -11,7 +11,8 @@
  * dialog and hands the new contact back so the editor can select it.
  */
 import type { ContactRecord } from "./delegate";
-import { LIMITS, MAX_CONTACTS } from "./state";
+import { MAX_CONTACT_ADDRESS, MAX_CONTACTS } from "./contact-rules";
+import { LIMITS } from "./state";
 import { errorMessage, utf8Length } from "./util";
 
 export interface ContactsDialogDeps {
@@ -74,9 +75,6 @@ export interface ContactsDialog {
   /** Re-render the list and count from the current board state. */
   refresh(): void;
 }
-
-/** Bound on an octal address, matching the delegate and payment code. */
-export const MAX_CONTACT_ADDRESS = 32;
 
 /** The address shown in a row: the digits, `root`, or `not set`. */
 export function contactAddressLabel(address: string | null | undefined): string {

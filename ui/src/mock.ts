@@ -31,8 +31,15 @@ import {
   type Entry,
   type StateV3,
 } from "./state";
-import { isOctalAddress, paymentId, type PaymentEntry } from "./payments";
-import { bytesToHex, delay, isLowerHex, utf8Length } from "./util";
+import { paymentId, type PaymentEntry } from "./payments";
+import {
+  contactListProblem,
+  contactRecordProblem,
+  normalizeContactList,
+  normalizeContactRecord,
+  type ContactRecord,
+} from "./contact-rules";
+import { bytesToHex, delay, isLowerHex } from "./util";
 import {
   nextSettled,
   type BoardBackend,
@@ -40,7 +47,7 @@ import {
   type BoardSnapshot,
   type PaymentSlotWrite,
 } from "./board";
-import type { ContactRecord, DelegateIdentity, DelegateStatus } from "./delegate";
+import type { DelegateIdentity, DelegateStatus } from "./delegate";
 
 const encoder = new TextEncoder();
 
@@ -77,63 +84,20 @@ function mockChildNamesSignature(seq: number, entries: ChildName[]): string {
   return bytesToHex(bytes);
 }
 
-const MAX_CONTACT_LABEL_BYTES = 64;
-const MAX_CONTACTS = 64;
-
 /** Validate one private address-book entry, mirroring the delegate bounds. */
 function validateContactRecord(
   raw: unknown,
   path = "contact",
 ): ContactRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(`${path} must be an object.`);
-  }
-  const obj = raw as Record<string, unknown>;
-  const label = obj.label;
-  if (typeof label !== "string" || label.length === 0) {
-    throw new Error(`${path}.label must be a non-empty string.`);
-  }
-  if (utf8Length(label) > MAX_CONTACT_LABEL_BYTES) {
-    throw new Error(
-      `${path}.label is ${utf8Length(label)} bytes; maximum is ${MAX_CONTACT_LABEL_BYTES}.`,
-    );
-  }
-  if (typeof obj.userId !== "string" || !isLowerHex(obj.userId, 64)) {
-    throw new Error(`${path}.userId must be 64 lowercase hex characters.`);
-  }
-  let address: string | null = null;
-  if (obj.address !== undefined && obj.address !== null) {
-    if (typeof obj.address !== "string" || !isOctalAddress(obj.address)) {
-      throw new Error(
-        `${path}.address must be null or an octal address of at most 32 digits 0..7.`,
-      );
-    }
-    address = obj.address;
-  }
-  return { label, userId: obj.userId, address };
+  const problem = contactRecordProblem(raw, path);
+  if (problem) throw new Error(problem);
+  return normalizeContactRecord(raw);
 }
 
 function validateContactRecords(raw: unknown): ContactRecord[] {
-  if (!Array.isArray(raw)) throw new Error("contacts must be an array.");
-  if (raw.length > MAX_CONTACTS) {
-    throw new Error(`contacts has ${raw.length} entries; maximum is ${MAX_CONTACTS}.`);
-  }
-  const entries = raw.map((entry, index) =>
-    validateContactRecord(entry, `contacts[${index}]`),
-  );
-  const userIds = new Set<string>();
-  const labels = new Set<string>();
-  for (const [index, entry] of entries.entries()) {
-    if (userIds.has(entry.userId)) {
-      throw new Error(`contacts[${index}] duplicates a userId.`);
-    }
-    userIds.add(entry.userId);
-    if (labels.has(entry.label)) {
-      throw new Error(`contacts[${index}] duplicates a label.`);
-    }
-    labels.add(entry.label);
-  }
-  return entries;
+  const problem = contactListProblem(raw, "contacts");
+  if (problem) throw new Error(problem);
+  return normalizeContactList(raw);
 }
 
 function mockParentSignature(seq: number, userId: string | null): string {

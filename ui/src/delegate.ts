@@ -33,7 +33,6 @@ import {
   type ClientRequestT as ClientRequestTable,
 } from "@freenetorg/freenet-stdlib/client-request";
 import {
-  MAX_CONTACTS,
   validateAdjustmentList,
   validateChildNameList,
   validateEntry,
@@ -43,7 +42,17 @@ import {
   type ChildName,
   type Entry,
 } from "./state";
-import { isOctalAddress, type PaymentEntry } from "./payments";
+import {
+  MAX_CONTACT_LABEL_BYTES,
+  contactAddressValueProblem,
+  contactLabelProblem,
+  contactListProblem,
+  contactRecordProblem,
+  normalizeContactList,
+  normalizeContactRecord,
+  type ContactRecord,
+} from "./contact-rules";
+import type { PaymentEntry } from "./payments";
 import { delay, errorMessage, isLowerHex, utf8Length } from "./util";
 
 export type DelegateErrorCode =
@@ -72,44 +81,18 @@ export function isMissingDelegateError(error: unknown): error is DelegateError {
   return error instanceof DelegateError && error.code === "Missing";
 }
 
-/** One private address-book entry owned by the delegate (never replicated). */
-export interface ContactRecord {
-  /** 1–64 UTF-8 bytes; unique within the book. */
-  label: string;
-  /** 64 lowercase hex characters; unique within the book. */
-  userId: string;
-  /** Optional derived octal address used to route payments. */
-  address: string | null;
-}
-
-const MAX_CONTACT_LABEL_BYTES = 64;
+export type { ContactRecord } from "./contact-rules";
 
 function validateContactLabel(value: unknown, path: string): string {
-  if (typeof value !== "string") {
-    throw new DelegateError("Protocol", `${path} must be a string.`);
-  }
-  if (value.length === 0) {
-    throw new DelegateError("Protocol", `${path} must not be empty.`);
-  }
-  const length = utf8Length(value);
-  if (length > MAX_CONTACT_LABEL_BYTES) {
-    throw new DelegateError(
-      "Protocol",
-      `${path} is ${length} bytes; maximum is ${MAX_CONTACT_LABEL_BYTES}.`,
-    );
-  }
-  return value;
+  const problem = contactLabelProblem(value, path);
+  if (problem) throw new DelegateError("Protocol", problem);
+  return value as string;
 }
 
 function validateContactAddress(value: unknown, path: string): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string" || !isOctalAddress(value)) {
-    throw new DelegateError(
-      "Protocol",
-      `${path} must be null or an octal address of at most 32 digits 0..7.`,
-    );
-  }
-  return value;
+  const problem = contactAddressValueProblem(value, path);
+  if (problem) throw new DelegateError("Protocol", problem);
+  return value === undefined || value === null ? null : (value as string);
 }
 
 /** Validate one address-book entry, mirroring the delegate's invariants. */
@@ -117,59 +100,16 @@ function validateContactRecord(
   raw: unknown,
   path = "contact",
 ): ContactRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new DelegateError("Protocol", `${path} must be an object.`);
-  }
-  const obj = raw as Record<string, unknown>;
-  if (typeof obj.userId !== "string" || !isLowerHex(obj.userId, 64)) {
-    throw new DelegateError(
-      "Protocol",
-      `${path}.userId must be 64 lowercase hex characters.`,
-    );
-  }
-  return {
-    label: validateContactLabel(obj.label, `${path}.label`),
-    userId: obj.userId,
-    address: validateContactAddress(obj.address, `${path}.address`),
-  };
+  const problem = contactRecordProblem(raw, path);
+  if (problem) throw new DelegateError("Protocol", problem);
+  return normalizeContactRecord(raw);
 }
 
 /** Validate the whole address book the delegate returned. */
 function validateContactList(raw: unknown): ContactRecord[] {
-  if (!Array.isArray(raw)) {
-    throw new DelegateError(
-      "Protocol",
-      "Delegate contacts response is missing a contacts array.",
-    );
-  }
-  if (raw.length > MAX_CONTACTS) {
-    throw new DelegateError(
-      "Protocol",
-      `Delegate returned ${raw.length} contacts; maximum is ${MAX_CONTACTS}.`,
-    );
-  }
-  const entries = raw.map((entry, index) =>
-    validateContactRecord(entry, `contacts[${index}]`),
-  );
-  const userIds = new Set<string>();
-  const labels = new Set<string>();
-  for (const [index, entry] of entries.entries()) {
-    if (userIds.has(entry.userId)) {
-      throw new DelegateError(
-        "Protocol",
-        `Delegate contacts response duplicates userId at index ${index}.`,
-      );
-    }
-    userIds.add(entry.userId);
-    if (labels.has(entry.label)) {
-      throw new DelegateError(
-        "Protocol",
-        `Delegate contacts response duplicates label at index ${index}.`,
-      );
-    }
-    labels.add(entry.label);
-  }
-  return entries;
+  const problem = contactListProblem(raw, "contacts");
+  if (problem) throw new DelegateError("Protocol", problem);
+  return normalizeContactList(raw);
 }
 
 export interface DelegateIdentity {

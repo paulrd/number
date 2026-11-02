@@ -44,10 +44,10 @@ import {
   type PaymentEntry,
   type PaymentFailure,
 } from "./payments";
+import { MAX_CONTACTS } from "./contact-rules";
 import {
   formatCents,
   I64_MAX,
-  MAX_CONTACTS,
   parseCents,
   SLOT_COUNT,
   stateWarnings,
