@@ -53,6 +53,7 @@ import {
   type ContactRecord,
 } from "./contact-rules";
 import type { PaymentEntry } from "./payments";
+import type { RoomSecretV1 } from "./room-state";
 import { delay, errorMessage, isLowerHex, utf8Length } from "./util";
 
 export type DelegateErrorCode =
@@ -82,6 +83,85 @@ export function isMissingDelegateError(error: unknown): error is DelegateError {
 }
 
 export type { ContactRecord } from "./contact-rules";
+
+/** Request for the delegate's `signRoomMembership` command (v11). */
+export interface RoomMembershipSignRequest {
+  /** Base58 room instance id, 32 bytes. */
+  roomId: string;
+  /** Room owner verifying key, 64 lowercase hex characters. */
+  owner: string;
+  /** Room kind tag; only `"ZMR1"` (members room) is supported. */
+  tag: string;
+  seq: number;
+  /** Strictly ascending, duplicate-free member keys; includes the owner. */
+  members: string[];
+  secrets: RoomSecretV1[];
+}
+
+/** Request for the delegate's `signRoomMessage` command (v11). */
+export interface RoomMessageSignRequest {
+  roomId: string;
+  owner: string;
+  tag: string;
+  epoch: number;
+  time: number;
+  /** Message body, 1..=1024 decoded bytes as lowercase hex. */
+  body: string;
+}
+
+/** Delegate-assigned message signature and per-author sequence. */
+export interface SignedRoomMessage {
+  author: string;
+  seq: number;
+  sig: string;
+}
+
+const ROOM_TAG = "ZMR1";
+const ROOM_MAX_BODY_BYTES = 1024;
+const ROOM_MAX_SECRET_BLOB_BYTES = 256;
+
+function isBase58Key32(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    return bs58.decode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function isLowerHexBytes(
+  value: unknown,
+  minBytes: number,
+  maxBytes: number,
+): value is string {
+  if (typeof value !== "string" || value.length % 2 !== 0) return false;
+  const bytes = value.length / 2;
+  return bytes >= minBytes && bytes <= maxBytes && /^[0-9a-f]*$/.test(value);
+}
+
+function validateRoomId(roomId: unknown): asserts roomId is string {
+  if (!isBase58Key32(roomId)) {
+    throw new DelegateError(
+      "Protocol",
+      "roomId must be a base58-encoded 32-byte room instance id.",
+    );
+  }
+}
+
+function validateRoomOwner(owner: unknown): asserts owner is string {
+  if (typeof owner !== "string" || !isLowerHex(owner, 64)) {
+    throw new DelegateError(
+      "Protocol",
+      "room owner must be 64 lowercase hex characters.",
+    );
+  }
+}
+
+function validateRoomTag(tag: unknown): asserts tag is string {
+  if (tag !== ROOM_TAG) {
+    throw new DelegateError("Protocol", `room tag must be ${ROOM_TAG}.`);
+  }
+}
 
 function validateContactLabel(value: unknown, path: string): string {
   const problem = contactLabelProblem(value, path);
@@ -323,6 +403,7 @@ interface PendingRequest {
   kind:
     | "identity"
     | "sign"
+    | "roomMessage"
     | "contacts"
     | "status"
     | "export"
@@ -924,6 +1005,169 @@ export class DelegateClient {
     return { seq: returnedSeq, sig };
   }
 
+  /**
+   * Sign a members-room membership record (`DESIGN-rooms.md` §3). The delegate
+   * assigns the next per-room membership seq; the caller must pass the current
+   * record's seq. Returns the 128-hex owner signature.
+   */
+  async signRoomMembership(
+    request: RoomMembershipSignRequest,
+    timeoutMs = 15_000,
+  ): Promise<string> {
+    const { roomId, owner, tag, seq, members, secrets } = request;
+    validateRoomId(roomId);
+    validateRoomOwner(owner);
+    validateRoomTag(tag);
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        `room membership seq must be a positive integer, got ${String(seq)}.`,
+      );
+    }
+    if (!Array.isArray(members) || members.length < 1 || members.length > 9) {
+      throw new DelegateError(
+        "Protocol",
+        "room membership must contain 1..9 members.",
+      );
+    }
+    for (let index = 0; index < members.length; index++) {
+      const member = members[index];
+      if (typeof member !== "string" || !isLowerHex(member, 64)) {
+        throw new DelegateError(
+          "Protocol",
+          `room member ${index} must be 64 lowercase hex characters.`,
+        );
+      }
+      if (index > 0 && members[index - 1] >= member) {
+        throw new DelegateError(
+          "Protocol",
+          "room members must be strictly ascending and duplicate-free.",
+        );
+      }
+    }
+    if (!members.includes(owner)) {
+      throw new DelegateError(
+        "Protocol",
+        "room membership must include the room owner.",
+      );
+    }
+    if (!Array.isArray(secrets)) {
+      throw new DelegateError("Protocol", "room secrets must be an array.");
+    }
+    for (let index = 0; index < secrets.length; index++) {
+      const secret = secrets[index];
+      if (
+        typeof secret !== "object" ||
+        secret === null ||
+        typeof secret.recipient !== "string" ||
+        !isLowerHex(secret.recipient, 64)
+      ) {
+        throw new DelegateError(
+          "Protocol",
+          `room secret ${index} recipient must be 64 lowercase hex characters.`,
+        );
+      }
+      if (
+        !isLowerHexBytes(
+          secret.blob,
+          1,
+          ROOM_MAX_SECRET_BLOB_BYTES,
+        )
+      ) {
+        throw new DelegateError(
+          "Protocol",
+          `room secret ${index} blob must be 1..${ROOM_MAX_SECRET_BLOB_BYTES} decoded bytes as lowercase hex.`,
+        );
+      }
+    }
+
+    const payload = await this.request(
+      "sign",
+      {
+        cmd: "signRoomMembership",
+        roomId,
+        owner,
+        tag,
+        seq,
+        members: [...members],
+        secrets: secrets.map((secret) => ({
+          recipient: secret.recipient,
+          blob: secret.blob,
+        })),
+      },
+      timeoutMs,
+    );
+    return this.parseSignResponse(payload, "signRoomMembership");
+  }
+
+  /**
+   * Sign one members-room message. The delegate assigns the per-author `seq`;
+   * the reply is `{ok, author, seq, sig}` and uses the distinct `roomMessage`
+   * pending kind.
+   */
+  async signRoomMessage(
+    request: RoomMessageSignRequest,
+    timeoutMs = 15_000,
+  ): Promise<SignedRoomMessage> {
+    const { roomId, owner, tag, epoch, time, body } = request;
+    validateRoomId(roomId);
+    validateRoomOwner(owner);
+    validateRoomTag(tag);
+    if (!Number.isSafeInteger(epoch) || epoch <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        `room message epoch must be a positive integer, got ${String(epoch)}.`,
+      );
+    }
+    if (!Number.isSafeInteger(time)) {
+      throw new DelegateError(
+        "Protocol",
+        `room message time must be a safe integer, got ${String(time)}.`,
+      );
+    }
+    if (!isLowerHexBytes(body, 1, ROOM_MAX_BODY_BYTES)) {
+      throw new DelegateError(
+        "Protocol",
+        `room message body must be 1..${ROOM_MAX_BODY_BYTES} decoded bytes as lowercase hex.`,
+      );
+    }
+
+    const payload = await this.request(
+      "roomMessage",
+      { cmd: "signRoomMessage", roomId, owner, tag, epoch, time, body },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signRoomMessage was rejected",
+      );
+    }
+    const author = payload.author;
+    if (typeof author !== "string" || !isLowerHex(author, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed room message author.",
+      );
+    }
+    const seq = payload.seq;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned an invalid room message seq.",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed signature (expected 128 lowercase hex characters).",
+      );
+    }
+    return { author, seq, sig };
+  }
+
   /** Feed an outbound DelegateResponse into the waiting request queue. */
   handleResponse(response: DelegateResponse): void {
     const payloads = parseDelegatePayloads(response);
@@ -953,6 +1197,17 @@ export class DelegateClient {
         index = this.pending.findIndex((pending) => pending.kind === "contacts");
       } else if (typeof payload.pubkey === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "identity");
+      } else if (
+        payload.ok === true &&
+        typeof payload.author === "string" &&
+        typeof payload.seq === "number" &&
+        typeof payload.sig === "string"
+      ) {
+        // Must precede the generic `sig` branch: a room message reply also
+        // carries `sig`, but the author/seq fields identify it.
+        index = this.pending.findIndex(
+          (pending) => pending.kind === "roomMessage",
+        );
       } else if (typeof payload.sig === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "sign");
       } else if (

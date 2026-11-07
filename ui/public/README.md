@@ -19,6 +19,15 @@ The repository build script (`scripts/build.sh`) is expected to:
 The script also writes `contract_code_hash_bytes.json`, `delegate_key.txt`, and
 the artifacts under `ui/public/`; those are ignored by git.
 
+`number_room.wasm` is the raw members-room contract, copied verbatim from
+`.build/room/wasm32-unknown-unknown/release/number_room.wasm`. It is never the
+`fdev` packaged file: the code hash is `BLAKE3` of the raw bytes. The same
+script writes `room_code_hash.txt` (base58) and `room_code_hash_bytes.json`, and
+fails the build if the computed hash differs from
+`published/room/manifest.json` (`room.codeHash`). The client only fetches this
+WASM when a room instance is absent, and verifies it against the pinned hash
+before PUT.
+
 `vite.config.ts` also accepts `CONTRACT_CODE_HASH`, `DELEGATE_KEY_BYTES`, and
 `DELEGATE_CODE_HASH_BYTES` environment variables, which is useful for CI.
 

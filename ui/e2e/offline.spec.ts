@@ -1510,3 +1510,81 @@ test("region picker resolves a point from sample data", async ({ page }) => {
   expect(results.violations).toEqual([]);
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("opens the members room, shows the plaintext notice, and sends a message", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await expect(page.locator("#room-block")).toBeVisible();
+  await expect(page.locator("#room-block-summary")).toHaveText(
+    "Just you so far. Messages are public.",
+  );
+
+  await page.locator("#room-open").click();
+  await expect(page.locator("#room-dialog")).toBeVisible();
+  await expect(page.locator("#room-plaintext-notice")).toBeVisible();
+  await expect(page.locator("#room-membership-state")).toBeVisible();
+  await expect(page.locator("#room-membership-state")).toHaveAttribute(
+    "data-state",
+    "match",
+  );
+  await expect(page.locator(".room-message")).toHaveCount(1);
+
+  await page.locator("#room-message-input").fill("Hello from the offline room.");
+  await page.locator("#room-send").click();
+  await expect(page.locator(".room-message")).toHaveCount(2);
+  await expect(
+    page.locator(".room-message").filter({ hasText: "Hello from the offline room." }),
+  ).toBeVisible();
+
+  // Let the dialog entrance settle before axe reads computed colours.
+  await page.waitForTimeout(250);
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("offers a membership update after adding a child and keeps old messages as history", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await addContact(page, "Child", MOCK_CHILD_ID);
+  await saveDetails(page, 0, MOCK_CHILD_ID);
+
+  await expect(page.locator("#room-block-summary")).toHaveText(
+    "Owner and 1 child zone. Messages are public.",
+  );
+  await page.locator("#room-open").click();
+  await expect(page.locator("#room-dialog")).toBeVisible();
+  await expect(page.locator("#room-membership-state")).toHaveAttribute(
+    "data-state",
+    "mismatch",
+  );
+  await expect(page.locator("#room-mismatch")).toBeVisible();
+
+  await page.locator("#room-update-membership").click();
+  await expect(page.locator("#room-membership-confirm-update")).toBeVisible();
+  await page.locator("#room-membership-confirm-update").click();
+  await expect(page.locator("#room-membership-state")).toHaveAttribute(
+    "data-state",
+    "match",
+  );
+
+  // The seeded epoch-1 message survives the seq-2 membership as history.
+  await expect(page.locator(".room-message").first()).toHaveAttribute(
+    "data-history",
+    "true",
+  );
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

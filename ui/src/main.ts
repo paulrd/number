@@ -28,6 +28,7 @@ import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
+import { createRoomPanel } from "./room-panel";
 import {
   advancePayment,
   createPaymentIntent,
@@ -130,6 +131,12 @@ const parentAdvancedEdit = byId<HTMLButtonElement>("parent-advanced-edit");
 const parentAdvancedClear = byId<HTMLButtonElement>("parent-advanced-clear");
 const contactsOpen = byId<HTMLButtonElement>("contacts-open");
 const contactsCount = byId<HTMLElement>("contacts-count");
+const roomBlock = byId<HTMLElement>("room-block");
+const roomBlockSummary = byId<HTMLParagraphElement>("room-block-summary");
+const roomOpen = byId<HTMLButtonElement>("room-open");
+// The room log is an ordered list; role="log" on an <ol> also invalidates the
+// native list-item role for axe. Keep the live region and drop the role.
+byId<HTMLOListElement>("room-messages").removeAttribute("role");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
 
 const notice = byId<HTMLDivElement>("notice");
@@ -451,6 +458,31 @@ function ownerLabel(ownerId: string): string {
   return contactLabel(ownerId) ?? `Owner ${shortUserId(ownerId)}`;
 }
 
+/** Occupied child contacts on the viewed board, deduped and without the owner. */
+function zoneRoomContacts(): string[] {
+  const current = view;
+  if (current === null) return [];
+  const owner = ownIdentity?.pubkey ?? null;
+  const contacts = new Set<string>();
+  for (const slot of current.state.slots) {
+    const contact = slot.entry?.contact;
+    if (!contact || contact === owner) continue;
+    contacts.add(contact);
+  }
+  return [...contacts];
+}
+
+/** The room block exists only with a zone, and its summary says who is in it. */
+function renderRoomBlock(): void {
+  roomBlock.hidden = view === null;
+  if (view === null) return;
+  const count = zoneRoomContacts().length;
+  roomBlockSummary.textContent =
+    count === 0
+      ? "Just you so far. Messages are public."
+      : `Owner and ${count} child zone${count === 1 ? "" : "s"}. Messages are public.`;
+}
+
 /**
  * The backend's issue/burn method, or null when this build cannot sign
  * adjustments (the offline preview). Callers turn null into an explained state
@@ -604,6 +636,7 @@ function countMutualSlots(
 }
 
 function renderBoard(): void {
+  renderRoomBlock();
   const current = view;
   const loading =
     current === null &&
@@ -4030,6 +4063,16 @@ const callbacks: BoardCallbacks = {
 const backend: BoardBackend = isOffline
   ? new OfflineBoard(callbacks)
   : new OnlineBoard(BOARD_CONFIG, callbacks);
+
+const roomPanel = createRoomPanel({
+  ownerId: () => ownIdentity?.pubkey ?? null,
+  zoneContacts: zoneRoomContacts,
+  nameFor: (userId) =>
+    (view === null ? null : parentGivenName(view, userId)) ?? ownerLabel(userId),
+  transport: backend.roomTransport,
+  announce,
+});
+roomOpen.addEventListener("click", () => roomPanel.open());
 
 const delegateControls = createDelegateControls(backend);
 

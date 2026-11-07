@@ -470,6 +470,28 @@
           </details>
           </section>
 
+          <section
+            id="room-block"
+            class="advanced-block room-block"
+            aria-labelledby="room-block-title"
+          >
+            <h3 id="room-block-title" class="advanced-block-title">Members room</h3>
+            <p id="room-block-summary" class="advanced-hint">
+              Messages shared with the contacts in your occupied slots. Not
+              private yet.
+            </p>
+            <button
+              id="room-open"
+              class="button button--small"
+              type="button"
+              aria-haspopup="dialog"
+              aria-controls="room-dialog"
+              aria-describedby="room-block-summary"
+            >
+              Open room
+            </button>
+          </section>
+
           <section class="advanced-block" aria-labelledby="advanced-location-title">
             <h3 id="advanced-location-title" class="advanced-block-title">
               Where this zone sits
@@ -1723,6 +1745,179 @@
           </div>
         </div>
         <p id="region-source" class="region-source"></p>
+      </dialog>
+
+      <dialog
+        id="room-dialog"
+        class="editor room-dialog"
+        aria-labelledby="room-title"
+        aria-describedby="room-plaintext-notice"
+      >
+        <div class="room-shell">
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Members room</p>
+              <h2 id="room-title" tabindex="-1">Members room</h2>
+              <p id="room-waiting" class="room-intro" hidden>
+                Waiting for your identity. The room opens when your zone key is
+                ready.
+              </p>
+            </div>
+            <button
+              id="room-close"
+              class="icon-button"
+              type="button"
+              aria-label="Close members room"
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="editor-body room-body">
+            <p id="room-plaintext-notice" class="room-plaintext" role="note">
+              Not private yet. Messages are sent as plaintext, and anyone who
+              can read this room's state can read them. Don't put anything
+              private here.
+            </p>
+
+            <section class="room-section" aria-labelledby="room-membership-title">
+              <div class="room-section-head">
+                <h3 id="room-membership-title">Membership</h3>
+                <span
+                  id="room-membership-state"
+                  class="state-badge room-membership-state"
+                  data-state="none"
+                  role="status"
+                  aria-live="polite"
+                >
+                  No membership
+                </span>
+              </div>
+              <p id="room-membership-detail" class="room-membership-detail"></p>
+              <p id="room-mismatch" class="room-warning" role="status" hidden></p>
+
+              <div id="room-membership-confirm" class="room-confirm" role="alert" hidden>
+                <p id="room-membership-confirm-text"></p>
+                <div class="room-confirm-actions">
+                  <button
+                    id="room-membership-cancel"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="room-membership-confirm-update"
+                    class="button button--small button--primary"
+                    type="button"
+                  >
+                    Update membership
+                  </button>
+                </div>
+              </div>
+
+              <button
+                id="room-update-membership"
+                class="button button--small room-update-membership"
+                type="button"
+                aria-describedby="room-membership-detail room-mismatch"
+                hidden
+              >
+                Update membership
+              </button>
+              <p
+                id="room-membership-error"
+                class="form-error room-inline-error"
+                role="alert"
+                hidden
+              ></p>
+
+              <ul
+                id="room-members"
+                class="room-members"
+                aria-labelledby="room-membership-title"
+              ></ul>
+              <p id="room-members-empty" class="advanced-empty" hidden>
+                Waiting for your identity.
+              </p>
+            </section>
+
+            <section
+              class="room-section room-messages-section"
+              aria-labelledby="room-messages-title"
+            >
+              <div class="room-section-head">
+                <h3 id="room-messages-title">Messages</h3>
+                <span id="room-message-count" class="room-count">No messages</span>
+              </div>
+
+              <p id="room-loading" class="room-loading" hidden>
+                Reading the room…
+              </p>
+              <p id="room-offline" class="room-offline" hidden>
+                You're offline. The room can't be read or changed right now.
+                Check your connection, then choose Refresh.
+              </p>
+              <p id="room-error" class="form-error room-error" role="alert" hidden></p>
+              <p id="room-empty" class="advanced-empty room-empty" hidden>
+                No messages yet. Messages here go to everyone in the room.
+              </p>
+
+              <ol
+                id="room-messages"
+                class="room-messages"
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
+                aria-labelledby="room-messages-title"
+              ></ol>
+            </section>
+
+            <form id="room-composer" class="room-composer" novalidate>
+              <label class="field">
+                <span>Message</span>
+                <textarea
+                  id="room-message-input"
+                  name="room-message"
+                  rows="3"
+                  placeholder="Write to the room…"
+                  aria-describedby="room-message-hint room-composer-error"
+                  spellcheck="true"
+                ></textarea>
+              </label>
+              <div class="room-composer-foot">
+                <p id="room-message-hint" class="field-hint">
+                  0 / 1024 bytes. Enter sends; Shift+Enter adds a line.
+                </p>
+                <button
+                  id="room-send"
+                  class="button button--primary"
+                  type="submit"
+                  disabled
+                >
+                  Send
+                </button>
+              </div>
+              <p
+                id="room-composer-error"
+                class="form-error room-composer-error"
+                role="alert"
+                hidden
+              ></p>
+            </form>
+
+            <p id="room-status" class="sr-only" role="status" aria-live="polite"></p>
+          </div>
+
+          <footer class="editor-actions room-actions">
+            <button id="room-refresh" class="button button--small button--quiet" type="button">
+              Refresh
+            </button>
+            <button id="room-done" class="button button--small" type="button">
+              Done
+            </button>
+          </footer>
+        </div>
       </dialog>
 
       <p id="sr-status" class="sr-only" aria-live="polite"></p>

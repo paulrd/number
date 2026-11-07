@@ -26,8 +26,11 @@ ui/delegate_code_hash_bytes.json
 ui/delegate_key.txt
 ui/delegate_key_bytes.json
 ui/webapp_contract_id_bytes.json
+ui/room_code_hash.txt
+ui/room_code_hash_bytes.json
 ui/public/number_contract.wasm
 ui/public/number_delegate.wasm
+ui/public/number_room.wasm
 
 # Test/Playwright output
 playwright-report

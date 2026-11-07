@@ -47,6 +47,7 @@ import {
   type BoardSnapshot,
   type PaymentSlotWrite,
 } from "./board";
+import { OfflineRoomTransport } from "./room-offline";
 import type { DelegateIdentity, DelegateStatus } from "./delegate";
 
 const encoder = new TextEncoder();
@@ -174,6 +175,7 @@ export class OfflineBoard implements BoardBackend {
   readonly mode = "offline" as const;
   readonly identity: DelegateIdentity;
   readonly contractKeyBase58: string;
+  readonly roomTransport: OfflineRoomTransport;
   currentState: StateV3 | null = null;
   /** A seeded delegate status, for offline tests of the background lane. */
   delegateStatus?: DelegateStatus;
@@ -207,6 +209,7 @@ export class OfflineBoard implements BoardBackend {
       this.codeHashBytes,
       this.pubkeyBytes,
     ).base58;
+    this.roomTransport = new OfflineRoomTransport(this.identity.pubkey);
     // `addInitScript` can seed a delegate fixture before the module loads.
     const seeded = (
       globalThis as { __TALLY_MOCK_DELEGATE__?: DelegateStatus }

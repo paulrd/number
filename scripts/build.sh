@@ -163,13 +163,21 @@ if [ "$WITH_UI" -eq 1 ]; then
   node --input-type=module - \
     "$TARGET_ROOT/contract/wasm32-unknown-unknown/release/number_contract.wasm" \
     "$TARGET_ROOT/delegate/wasm32-unknown-unknown/release/number_delegate.wasm" \
-    "$WEBAPP_ID" "$ROOT/delegate/webapp_contract_id.bin" <<'NODE'
+    "$TARGET_ROOT/room/wasm32-unknown-unknown/release/number_room.wasm" \
+    "$WEBAPP_ID" "$ROOT/delegate/webapp_contract_id.bin" \
+    "$ROOT/published/room/manifest.json" <<'NODE'
 import { readFileSync, writeFileSync } from "node:fs";
 import { blake3 } from "@noble/hashes/blake3";
 import bs58 from "bs58";
 
-const [contractWasm, delegateWasm, webappIdB58, paramsPath] =
-  process.argv.slice(2);
+const [
+  contractWasm,
+  delegateWasm,
+  roomWasm,
+  webappIdB58,
+  paramsPath,
+  roomManifestPath,
+] = process.argv.slice(2);
 const bytes = (b58, what) => {
   const b = bs58.decode(b58);
   if (b.length !== 32) throw new Error(`${what} is not 32 bytes`);
@@ -181,6 +189,20 @@ const codeHash = (path) => blake3(readFileSync(path));
 const webappId = bytes(webappIdB58, "webapp contract id");
 const contractCodeHash = codeHash(contractWasm);
 const delegateCodeHash = codeHash(delegateWasm);
+const roomCodeHash = codeHash(roomWasm);
+
+// The room is pinned to the published raw-WASM hash. Never hash the fdev
+// packaged file: its container bytes are not the contract id.
+const roomManifest = JSON.parse(readFileSync(roomManifestPath, "utf-8"));
+const pinnedRoomCodeHash = roomManifest?.room?.codeHash;
+const builtRoomCodeHash = bs58.encode(roomCodeHash);
+if (builtRoomCodeHash !== pinnedRoomCodeHash) {
+  throw new Error(
+    `room code hash ${builtRoomCodeHash} does not match the published ` +
+      `manifest ${pinnedRoomCodeHash}; run \`make room-record\` only after ` +
+      "reviewing the new artifact",
+  );
+}
 
 // Delegate key = BLAKE3(code_hash || params), exactly as the node computes it.
 const delegateKey = blake3(
@@ -195,8 +217,11 @@ writeFileSync("delegate_code_hash.txt", bs58.encode(delegateCodeHash));
 writeFileSync("delegate_code_hash_bytes.json", json(delegateCodeHash));
 writeFileSync("delegate_key.txt", bs58.encode(delegateKey));
 writeFileSync("delegate_key_bytes.json", json(delegateKey));
+writeFileSync("room_code_hash.txt", builtRoomCodeHash);
+writeFileSync("room_code_hash_bytes.json", json(roomCodeHash));
 
 console.log(`contract code hash: ${bs58.encode(contractCodeHash)}`);
+console.log(`room code hash:     ${builtRoomCodeHash}`);
 console.log(`webapp contract id: ${webappIdB58}`);
 console.log(`delegate params:    ${paramsPath}`);
 console.log(`delegate key:       ${bs58.encode(delegateKey)}`);
@@ -209,6 +234,10 @@ NODE
   # delegate prompt) instead of asking the user to run fdev.
   cp "$TARGET_ROOT/delegate/wasm32-unknown-unknown/release/number_delegate.wasm" \
      "$ROOT/ui/public/number_delegate.wasm"
+  # The raw room WASM is fetched by the client only when a room instance is
+  # absent; its BLAKE3 must equal the pinned hash above.
+  cp "$TARGET_ROOT/room/wasm32-unknown-unknown/release/number_room.wasm" \
+     "$ROOT/ui/public/number_room.wasm"
 fi
 
 echo "==> done"

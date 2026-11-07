@@ -126,6 +126,13 @@ const webappContractIdBytes = readJsonArrayOrDefault(
   "webapp_contract_id_bytes.json",
   process.env.WEBAPP_CONTRACT_ID_BYTES,
 );
+const roomCodeHash =
+  process.env.ROOM_CODE_HASH?.trim() ||
+  readFileOrDefault("room_code_hash.txt", "");
+const roomCodeHashBytes = readJsonArrayOrDefault(
+  "room_code_hash_bytes.json",
+  process.env.ROOM_CODE_HASH_BYTES,
+);
 
 export default defineConfig(async ({ command, isPreview }) => {
   const proxy = await devProxy(command, isPreview === true);
@@ -137,6 +144,11 @@ export default defineConfig(async ({ command, isPreview }) => {
       __DELEGATE_KEY_BYTES__: delegateKeyBytes,
       __DELEGATE_CODE_HASH_BYTES__: delegateCodeHashBytes,
       __WEBAPP_CONTRACT_ID_BYTES__: webappContractIdBytes,
+      __ROOM_CODE_HASH__: JSON.stringify(roomCodeHash),
+      __ROOM_CODE_HASH_BYTES__: roomCodeHashBytes,
+      __ROOM_WASM_URL__: JSON.stringify(
+        process.env.ROOM_WASM_URL?.trim() || "./number_room.wasm",
+      ),
       __CONTRACT_WASM_URL__: JSON.stringify(
         process.env.CONTRACT_WASM_URL?.trim() || "./number_contract.wasm",
       ),

@@ -6331,3 +6331,528 @@ body:has(#payment-dialog[open]) {
     width: 100%;
   }
 }
+
+/* Members room (P3b2) ----------------------------------------------------- */
+
+.room-block .advanced-hint {
+  max-width: 44rem;
+}
+
+.room-block > .button {
+  margin-top: 0.15rem;
+  justify-self: start;
+}
+
+html:has(#room-dialog[open]),
+body:has(#room-dialog[open]) {
+  overflow: hidden;
+}
+
+.room-dialog {
+  width: min(44rem, calc(100vw - 2rem));
+}
+
+.room-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.room-dialog h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
+.room-intro {
+  max-width: 34rem;
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.room-body {
+  gap: 1rem;
+}
+
+.room-plaintext {
+  position: relative;
+  margin: 0;
+  padding: 0.7rem 0.8rem 0.72rem 0.9rem;
+  border: 1px dashed color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: var(--radius-sm);
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 0.55rem,
+      color-mix(in srgb, var(--warning) 5%, transparent) 0.55rem 0.62rem
+    ),
+    var(--warning-soft);
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.room-plaintext::before {
+  content: "Plaintext";
+  display: block;
+  margin-bottom: 0.18rem;
+  color: var(--warning);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.room-section {
+  display: grid;
+  padding-top: 0.85rem;
+  gap: 0.5rem;
+  border-top: 1px solid var(--rule);
+}
+
+.room-section-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.room-section-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.room-membership-state[data-state="none"] {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
+.room-membership-state[data-state="match"] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.room-membership-state[data-state="mismatch"] {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.room-membership-state[data-state="error"] {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.room-membership-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.room-warning {
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.room-confirm {
+  display: grid;
+  padding: 0.6rem 0.68rem;
+  gap: 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+}
+
+.room-confirm p {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.room-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.room-inline-error,
+.room-composer-error {
+  margin: 0;
+}
+
+.room-members {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.room-member-row {
+  display: flex;
+  min-width: 0;
+  padding: 0.42rem 0.15rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.room-member-row:last-child {
+  border-bottom: 0;
+}
+
+.room-member-row[data-state="stale"] {
+  border-bottom-style: dashed;
+}
+
+.room-member-main {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+}
+
+.room-member-name {
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.room-member-row[data-kind="owner"] .room-member-name {
+  font-weight: 600;
+}
+
+.room-member-row[data-state="stale"] .room-member-name {
+  color: var(--muted);
+}
+
+.room-member-id {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+}
+
+.room-member-tag {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.room-member-state {
+  display: inline-flex;
+  min-height: 1.35rem;
+  padding: 0.08rem 0.42rem;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.room-member-state[data-state="in-room"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.room-member-state[data-state="not-in-room"] {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
+.room-member-state[data-state="stale"] {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.room-count {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.room-loading {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.room-loading::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: room-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes room-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.room-offline {
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px dashed color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.room-error {
+  width: auto;
+  margin: 0;
+}
+
+.room-empty {
+  margin: 0;
+}
+
+.room-messages {
+  display: grid;
+  margin: 0;
+  padding: 0.1rem 0;
+  gap: 0.5rem;
+  list-style: none;
+}
+
+.room-message {
+  display: grid;
+  width: fit-content;
+  max-width: min(88%, 34rem);
+  padding: 0.48rem 0.68rem 0.55rem;
+  gap: 0.18rem;
+  justify-self: start;
+  border: 1px solid var(--border);
+  border-radius: 4px 12px 12px 12px;
+  background: var(--surface-raised);
+}
+
+.room-message[data-self="true"] {
+  justify-self: end;
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 12px 4px 12px 12px;
+  background: var(--accent-soft);
+}
+
+.room-message[data-history="true"] {
+  border-style: dashed;
+  background: var(--surface-muted);
+  opacity: 0.82;
+}
+
+.room-message-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.room-message-author {
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.room-message-time {
+  margin-left: auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.room-message-badge {
+  padding: 0.04rem 0.32rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.room-message-body {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.room-message[data-history="true"] .room-message-body {
+  color: var(--muted);
+}
+
+.room-divider {
+  display: flex;
+  width: 100%;
+  margin: 0.15rem 0;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.room-divider::before,
+.room-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--rule);
+}
+
+.room-divider span {
+  white-space: nowrap;
+}
+
+.room-composer {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  padding: 0.75rem 0.8rem 0.8rem;
+  gap: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.room-composer[aria-busy="true"]::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.room-composer .field textarea {
+  min-height: 4.6rem;
+}
+
+.room-composer-foot {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.room-composer-foot .field-hint {
+  flex: 1 1 14rem;
+}
+
+.room-composer-foot .button {
+  min-height: 2.75rem;
+  white-space: nowrap;
+}
+
+.room-actions {
+  justify-content: space-between;
+}
+
+@media (max-width: 560px) {
+  .room-dialog {
+    width: calc(100vw - 1rem);
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .room-body {
+    padding-inline: 0.9rem;
+  }
+
+  .room-message {
+    max-width: 100%;
+  }
+
+  .room-composer-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .room-composer-foot .button {
+    width: 100%;
+  }
+
+  .room-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .room-actions {
+    justify-content: flex-end;
+  }
+}

@@ -54,6 +54,7 @@ import {
   type StateV5,
 } from "./state";
 import { paymentId, type PaymentEntry, type PaymentsRecord } from "./payments";
+import { OnlineRoomTransport, type RoomTransport } from "./room-client";
 import { errorMessage, hexToBytes, isLowerHex } from "./util";
 
 export { entryFromInputs };
@@ -256,6 +257,8 @@ export interface BoardBackend {
   readonly mode: "online" | "offline";
   readonly identity: DelegateIdentity | null;
   readonly contractKeyBase58: string | null;
+  /** Members-room transport; it opens its own connection only when used. */
+  readonly roomTransport: RoomTransport;
   readonly currentState: StateV3 | null;
   /** The owner's private address book, as last read from the delegate. */
   readonly contacts: ContactRecord[];
@@ -350,8 +353,20 @@ export class OnlineBoard implements BoardBackend {
     return this.contactsCache.map((entry) => ({ ...entry }));
   }
 
+  /**
+   * The members room uses its own WebSocket. Creating the transport is inert;
+   * the connection is opened on the first read or write from the panel.
+   */
+  get roomTransport(): RoomTransport {
+    if (this.roomTransportValue === null) {
+      this.roomTransportValue = new OnlineRoomTransport(this.delegate);
+    }
+    return this.roomTransportValue;
+  }
+
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
+  private roomTransportValue: OnlineRoomTransport | null = null;
   private readonly delegateClients: DelegateClient[] = [];
   /** Read-only viewers for other owners' boards, keyed by code hash. */
   private readonly viewers = new Map<string, NumberContract>();
@@ -1944,6 +1959,8 @@ export class OnlineBoard implements BoardBackend {
     this.delegate.failAll();
     for (const viewer of this.viewers.values()) viewer.close();
     this.viewers.clear();
+    this.roomTransportValue?.close();
+    this.roomTransportValue = null;
     this.contract?.close();
     this.contract = null;
   }

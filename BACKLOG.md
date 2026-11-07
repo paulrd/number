@@ -21,7 +21,7 @@ changes the compiled bytes and re-keys every zone.
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
 | Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (live on all four nodes) |
-| Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM` (not pinned in the UI yet) |
+| Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the local UI build, not published |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
 | Live site | version `1794073317`, bundle `assets/index-B6sOsgQr.js` + lazy `assets/picker-CjhRHu9C.js`, identical on `7509`/`7511`/`7512`/`7513` |
@@ -101,8 +101,8 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **83
-delegate**, **299 UI**, **26 offline e2e** (the region tests are Axe-clean and
-make no external requests).
+delegate**, **345 UI**, **28 offline e2e** (the region/room tests are Axe-clean
+and make no external requests).
 
 ### P2 implemented (2026-11-07); next is P3/P4 (no contract change)
 
@@ -225,11 +225,23 @@ Deployed 2026-11-07: site `1794073317`; each zone was opened once, seeds
 migrated, and all four nodes re-armed (D needed the #22 unregister + app-origin
 reinstall). Readiness is green.
 
-**Next (P3b2):** the room client with 36-byte parameters and the pinned room
-code hash (`published/room/manifest.json`), membership recomputed from zone
-slots with a mismatch warning, the Advanced room panel, and a plaintext
-send/render path. Then P3c adds client-side ECIES; do not present plaintext as
-private.
+**P3b2 implemented (2026-11-07, not deployed):** room data layer and panel.
+`ui/src/room-state.ts` (v1 codec, digest, merge, member derivation),
+`ui/src/room-client.ts` (36-byte `ZMR1` params, derived instance id, own WS,
+PUT/GET/update, WASM hash check, delegate-backed membership/message signing),
+`ui/src/room-panel.ts` + Advanced block/dialog, and an offline in-memory
+transport. Build pinning: `make build` copies the raw room WASM to
+`ui/public/number_room.wasm`, writes the hash constants, and fails if the
+build differs from `published/room/manifest.json`.
+UI: 345 tests, 28 offline e2e; the two new e2e flows cover open/send and
+child-slot → mismatch → update → history. The **online** transport is only
+type-checked; no live two-identity room smoke has run yet.
+
+**Next (P3c / live verification):** deploy the room UI when ready and run a
+two-identity live smoke (7511 + 7512): owner signs membership, the other node
+posts, both converge, an outsider is rejected. Then P3c adds client-side ECIES
+and the epoch-secret UI; rooms must not be called private before that. P4 is
+the candidate room + `?root=` onboarding.
 
 ### Gotchas worth remembering
 
@@ -372,7 +384,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 83, room 21, UI
-299, offline e2e 26, `verify-merge` 14 laws / 0 violations.
+345, offline e2e 28, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -411,6 +423,17 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-07 — P3b2: members-room client and panel**
+- Room codec/merge/digest with golden parity; 36-byte `ZMR1` derivation and a
+  sibling WS transport (PUT initial state, GET, update, WASM hash pinning).
+- Delegate room membership/message commands wired into `DelegateClient`.
+- Advanced members-room panel: plaintext notice, derived member rows,
+  none/match/mismatch, owner-only membership update, message log with history,
+  composer and 1024-byte cap.
+- Offline in-memory transport seeded with a room; two new e2e flows.
+- 345 UI tests, 28 offline e2e. Not deployed; the online path still needs a
+  live two-identity smoke.
 
 **2026-11-07 — deployed P2 + delegate v11**
 - Push `63ef861`; `fdev publish` registered delegate v11 on 7509;
