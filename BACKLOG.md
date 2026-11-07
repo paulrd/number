@@ -20,15 +20,15 @@ changes the compiled bytes and re-keys every zone.
 | Live URL | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
-| Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (recorded; live nodes still v10 until published) |
+| Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (live on all four nodes) |
 | Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM` (not pinned in the UI yet) |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794067282`, bundle `assets/index-BFPNfg9F.js` + lazy `assets/picker-B-_fJI4b.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1794073317`, bundle `assets/index-B6sOsgQr.js` + lazy `assets/picker-CjhRHu9C.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-07; site `1794067282`, no WASM change, contract/delegate generations unchanged |
+| Last UI publish | 2026-11-07; site `1794073317`, P2 UI + delegate v11 published; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -58,10 +58,9 @@ missing, and everything else behind Advanced.
 - **Live browser smoke passed** through the dev proxy against 7509:
   `(69,179)` resolves to `aacbea` (octal `002140`, depth 6, eight child rows,
   no console errors). Real manifest and shards, not the fixture.
-- **The website is republished.** Live site `1794067282` serves
-  `assets/index-BFPNfg9F.js` and the lazy picker
-  `assets/picker-B-_fJI4b.js` (which carries both live constants) from all
-  four nodes; hashes match the local build. The picker is now live for users.
+- **The website is republished.** Live site `1794073317` serves the P2 UI
+  (`assets/index-B6sOsgQr.js` + lazy picker `assets/picker-CjhRHu9C.js`) and
+  delegate v11 from all four nodes; hashes match the local build.
   Note: the manifest ids live in the lazy `picker-*.js` chunk, not
   `index-*.js`; `npm run test:e2e:offline` builds `dist-offline`, not `dist`,
   so build with `npm run build` before publishing.
@@ -218,12 +217,13 @@ The implementation spec is `DESIGN-rooms.md`. Decisions taken there:
   verifies the sibling manifest and still proves the zone/delegate bytes
   unchanged. Not pinned in the UI yet; P3b2 adds the constant/client.
 
-**P3b1 shipped (delegate v11):** `signRoomMembership` and `signRoomMessage`
-with canonical bytes built in the delegate, per-room membership/message
-counters, golden-fixture parity with the room crate, and the delegate recorded
-as v11 (`3CPsh…` / `BRXS…`). v10 is in `LEGACY_DELEGATES`. No deploy: live
-nodes still run v10; when v11 ships, open each zone once so the seed migrates
-and the Background prompt is asked again.
+**P3b1 shipped and deployed (delegate v11):** `signRoomMembership` and
+`signRoomMessage` with canonical bytes built in the delegate, per-room
+membership/message counters, golden-fixture parity with the room crate, and the
+delegate recorded as v11 (`3CPsh…` / `BRXS…`). v10 is in `LEGACY_DELEGATES`.
+Deployed 2026-11-07: site `1794073317`; each zone was opened once, seeds
+migrated, and all four nodes re-armed (D needed the #22 unregister + app-origin
+reinstall). Readiness is green.
 
 **Next (P3b2):** the room client with 36-byte parameters and the pinned room
 code hash (`published/room/manifest.json`), membership recomputed from zone
@@ -389,14 +389,11 @@ services running as `paul` from `~/.local/bin/freenet` (0.2.153).
 A/B/C keep data, config and logs under `/var/lib/freenet-nodeN/`; D uses the
 default `~/.local/share/freenet`.
 
-Last full topology and readiness check 2026-11-02. A/B/C are READY (Background
-granted, scanning, subscribed). **D is Configured but inert:** the grant reads
-`granted`, but its delegate reports no code hash, no scans and no subscriptions,
-and the app shows "This zone can carry payments but won't auto-advance on this
-node. Reinstall the component…". Reinstall from the app origin (unregister +
-install) to arm wake-ups; this is the documented #22 workaround. A delegate
-re-key means each zone must be opened once so the seed migrates and the prompt is
-asked again.
+Last full topology and readiness check **2026-11-07: all four READY** (v11
+delegate, Background granted, scanning, subscribed; 7509 re-armed with the #22
+unregister + app-origin reinstall workaround). Earlier, D was Configured but
+inert. A delegate re-key means each zone must be opened once so the seed
+migrates; v10→v11 was done on 2026-11-07 without changing owners or addresses.
 
 ## Publishing (manual)
 
@@ -414,6 +411,16 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-07 — deployed P2 + delegate v11**
+- Push `63ef861`; `fdev publish` registered delegate v11 on 7509;
+  `website update` published site `1794073317` (9 files).
+- All four nodes serve identical `index-B6sOsgQr.js` / lazy
+  `picker-CjhRHu9C.js`. Each zone opened once; seeds migrated v10→v11 with the
+  same owners and addresses.
+- D (7509) needed the #22 unregister + app-origin reinstall to arm wake-ups;
+  after one 300 s cycle all four nodes report READY (scans + subscriptions).
+- Room artifact `published/room/` is committed but not used by the UI yet.
 
 **2026-11-07 — P3b1: delegate v11 room signing**
 - New `signRoomMembership` / `signRoomMessage` commands, strict validation,
@@ -540,7 +547,7 @@ Newest first. **Never remove an entry**; the record gate and
   (pre-remap build), `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` (first v1).
 - Delegate **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd` /
   `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` — members-room signing;
-  current in the repo, not deployed.
+  current and live.
 - Delegate v10 `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV` /
   `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` — LCA payments; superseded by
   v11, registered.
