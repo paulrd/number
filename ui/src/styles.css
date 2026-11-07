@@ -6454,6 +6454,23 @@ body:has(#room-dialog[open]) {
   color: var(--danger);
 }
 
+.room-encryption-state[data-state="encrypted"] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.room-encryption-state[data-state="plaintext"] {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
+.room-encryption-action {
+  margin-top: 0.55rem;
+}
+
 .room-membership-detail {
   margin: 0;
   color: var(--muted);
@@ -6745,6 +6762,25 @@ body:has(#room-dialog[open]) {
   line-height: 1.5;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.room-message-badge.room-message-encryption[data-state="encrypted"] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.room-message-badge.room-message-encryption[data-state="plaintext"] {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
+.room-message-badge.room-message-encryption[data-state="unreadable"] {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .room-message[data-history="true"] .room-message-body {

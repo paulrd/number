@@ -37,6 +37,14 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v11: members-room membership and message signing. Superseded by v12,
+    // which adds delegated epoch encryption (`sealRoomEpoch`/`openRoomSecret`).
+    // Its seed and all counters carry forward; epoch keys are never persisted.
+    key: "3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd",
+    codeHash: "BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v10: payments may route through the LCA (source or destination).
     // Superseded by v11, which adds members-room membership and message
     // signing. Its seed and counters carry forward.

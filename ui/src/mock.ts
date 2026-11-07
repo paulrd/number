@@ -210,6 +210,14 @@ export class OfflineBoard implements BoardBackend {
       this.pubkeyBytes,
     ).base58;
     this.roomTransport = new OfflineRoomTransport(this.identity.pubkey);
+    // Offline e2e uses this to prove stored bodies are ciphertext, not text.
+    (
+      globalThis as {
+        __TALLY_OFFLINE_ROOM_STATE__?: (ownerId: string) => unknown;
+      }
+    ).__TALLY_OFFLINE_ROOM_STATE__ = (ownerId: string) =>
+      this.roomTransport.snapshot(ownerId);
+
     // `addInitScript` can seed a delegate fixture before the module loads.
     const seeded = (
       globalThis as { __TALLY_MOCK_DELEGATE__?: DelegateStatus }

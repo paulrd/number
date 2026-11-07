@@ -76,6 +76,12 @@ pub fn validate_key(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate and decode a 64-lowercase-hex Ed25519 point to its 32 raw bytes.
+pub fn decode_key(field: &str, value: &str) -> Result<[u8; 32], String> {
+    validate_key(field, value)?;
+    decode_exact::<32>(field, value)
+}
+
 /// Validate the membership invariants before signing. The caller separately
 /// checks that `owner` is the local delegate key (the owner-only rule).
 pub fn membership_error(

@@ -46,6 +46,18 @@ import {
   type RoomSecretV1,
   type RoomStateV1,
 } from "./room-state";
+import {
+  ROOM_ENCRYPTED_BODY_BYTE_LIMIT,
+  ROOM_LEGACY_BODY_BYTE_LIMIT,
+  encryptRoomBody,
+  roomEpochKeyCache,
+} from "./room-crypto";
+import type {
+  OpenedRoomSecret,
+  RoomEpochOpenRequest,
+  RoomEpochSealRequest,
+  SealedRoomEpoch,
+} from "./delegate";
 import { bytesToHex, errorMessage, hexToBytes, isLowerHex, withTimeout } from "./util";
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -56,7 +68,6 @@ const UPDATE_TIMEOUT_MS = 30_000;
 const ROOM_TAG = "ZMR1";
 const ROOM_TAG_BYTES = new Uint8Array([0x5a, 0x4d, 0x52, 0x31]);
 const ROOM_PARAMETERS_LEN = 36;
-const ROOM_MAX_BODY_BYTES = 1024;
 const SIGNATURE_HEX_LEN = 128;
 
 export type RoomErrorCode =
@@ -65,6 +76,7 @@ export type RoomErrorCode =
   | "read"
   | "write"
   | "sign"
+  | "crypto"
   | "not-member"
   | "wasm";
 
@@ -134,6 +146,29 @@ export interface RoomSigner {
   signRoomMessage(
     req: RoomSignMessageRequest,
   ): Promise<{ author: string; seq: number; sig: string }>;
+  /** Delegate protocol version, when known. v12+ enables encryption. */
+  delegateVersion?(): number | null;
+  /** The local delegate key that signs messages (the author). */
+  authorId?(): string | null;
+  /** v12 `sealRoomEpoch`; absent on a plaintext-only signer. */
+  sealRoomEpoch?(req: RoomEpochSealRequest): Promise<SealedRoomEpoch>;
+  /** v12 `openRoomSecret`; absent on a plaintext-only signer. */
+  openRoomSecret?(req: RoomEpochOpenRequest): Promise<OpenedRoomSecret>;
+}
+
+/** Options for a membership write. */
+export interface RoomMembershipUpdateOptions {
+  /**
+   * Seal fresh epoch secrets for the new membership. Defaults to true when the
+   * latest membership is already encrypted, false for a plaintext room.
+   */
+  encrypt?: boolean;
+}
+
+export interface RoomEpochKey {
+  epochKey: Uint8Array;
+  secrets: RoomSecretV1[];
+  nextMembershipSeq: number;
 }
 
 /** b"ZMR1" || owner_vk (36 bytes). */
@@ -199,8 +234,34 @@ export interface RoomConnection {
 
 export interface RoomTransport {
   read(ownerId: string): Promise<RoomStateV1 | null>;
-  updateMembership(ownerId: string, members: string[]): Promise<RoomStateV1>;
+  updateMembership(
+    ownerId: string,
+    members: string[],
+    options?: RoomMembershipUpdateOptions,
+  ): Promise<RoomStateV1>;
   sendMessage(ownerId: string, body: Uint8Array): Promise<RoomStateV1>;
+  /** Seal a fresh epoch key for `members` (delegate v12). */
+  sealEpoch(
+    ownerId: string,
+    epoch: number,
+    members: string[],
+  ): Promise<RoomEpochKey>;
+  /** Open one owner-signed secret blob for the local viewer. */
+  openEpoch(
+    ownerId: string,
+    epoch: number,
+    blob: string,
+  ): Promise<Uint8Array>;
+  /**
+   * Cached epoch key for `membership`, opening the viewer's own blob on demand.
+   * Null when the membership is plaintext or has no blob for the viewer.
+   */
+  epochKeyFor(
+    ownerId: string,
+    membership: RoomMembershipV1,
+  ): Promise<Uint8Array | null>;
+  /** Base58 room id used in body/secret AAD (32 decoded bytes). */
+  roomIdFor(ownerId: string): string;
 }
 
 export interface OnlineRoomTransportOptions {
@@ -312,12 +373,16 @@ export class OnlineRoomTransport implements RoomTransport {
   }
 
   /**
-   * Publish membership `latest.seq + 1`. The contract skips invalid deltas, so
-   * an accepted UPDATE is not proof: read back and require the exact record.
+   * Publish membership `max(latest.seq + 1, nextMembershipSeq)`. When the epoch
+   * is encrypted (or `encrypt` is requested) the delegate seals a fresh key
+   * first; the signature covers exactly the same members and secrets. The
+   * contract skips invalid deltas, so an accepted UPDATE is not proof: read
+   * back and require the exact record.
    */
   async updateMembership(
     ownerId: string,
     members: string[],
+    options: RoomMembershipUpdateOptions = {},
   ): Promise<RoomStateV1> {
     const normalized = this.normalizeMembers(ownerId, members);
     await this.ensure(ownerId);
@@ -327,8 +392,25 @@ export class OnlineRoomTransport implements RoomTransport {
     }
 
     const latest = latestMembership(current);
-    const seq = (latest?.seq ?? 0) + 1;
+    const encrypt = options.encrypt ?? (latest?.secrets.length ?? 0) > 0;
     const roomId = this.instanceId(ownerId);
+    const provisionalSeq = (latest?.seq ?? 0) + 1;
+
+    let seq = provisionalSeq;
+    let secrets: RoomSecretV1[] = [];
+
+    if (encrypt) {
+      let sealed = await this.sealEpoch(ownerId, provisionalSeq, normalized);
+      seq = Math.max(provisionalSeq, sealed.nextMembershipSeq);
+      if (seq !== provisionalSeq) {
+        // A previous sign advanced the delegate counter past the state seq.
+        // The blob is bound to the epoch, so reseal at the seq we will sign.
+        sealed = await this.sealEpoch(ownerId, seq, normalized);
+        seq = Math.max(seq, sealed.nextMembershipSeq);
+      }
+      secrets = sealed.secrets;
+      roomEpochKeyCache.set(this.instanceId(ownerId), seq, sealed.epochKey);
+    }
 
     let sig: string;
     try {
@@ -338,7 +420,7 @@ export class OnlineRoomTransport implements RoomTransport {
         tag: ROOM_TAG,
         seq,
         members: normalized,
-        secrets: [],
+        secrets,
       });
     } catch (error) {
       throw wrapRoomError("sign", error);
@@ -353,7 +435,7 @@ export class OnlineRoomTransport implements RoomTransport {
     const record: RoomMembershipV1 = {
       seq,
       members: normalized,
-      secrets: [],
+      secrets,
       sig,
     };
     await this.sendDelta(ownerId, { v: 1, memberships: [record] });
@@ -372,17 +454,15 @@ export class OnlineRoomTransport implements RoomTransport {
     return after;
   }
 
-  /** Publish one message at the latest membership epoch. */
+  /**
+   * Publish one message at the latest membership epoch. In an encrypted epoch
+   * the body is AES-GCM sealed with the cached epoch key; the transport never
+   * decrypts on read.
+   */
   async sendMessage(
     ownerId: string,
     body: Uint8Array,
   ): Promise<RoomStateV1> {
-    if (body.length < 1 || body.length > ROOM_MAX_BODY_BYTES) {
-      throw new RoomError(
-        "write",
-        `room message body must be 1..${ROOM_MAX_BODY_BYTES} bytes`,
-      );
-    }
     await this.ensure(ownerId);
     const current = await this.read(ownerId);
     if (!current) {
@@ -397,9 +477,63 @@ export class OnlineRoomTransport implements RoomTransport {
     }
 
     const epoch = latest.seq;
-    const time = Date.now();
-    const bodyHex = bytesToHex(body);
+    const encrypted = latest.secrets.length > 0;
     const roomId = this.instanceId(ownerId);
+    let author = ownerId;
+    let bodyHex: string;
+
+    if (encrypted) {
+      if (!this.canEncrypt()) {
+        throw new RoomError(
+          "crypto",
+          "this delegate cannot send encrypted room messages; update the delegate to v12",
+        );
+      }
+      if (body.length < 1 || body.length > ROOM_ENCRYPTED_BODY_BYTE_LIMIT) {
+        throw new RoomError(
+          "write",
+          `encrypted room plaintext must be 1..${ROOM_ENCRYPTED_BODY_BYTE_LIMIT} bytes`,
+        );
+      }
+      const signedIn = this.signer.authorId?.() ?? null;
+      if (signedIn === null) {
+        throw new RoomError(
+          "crypto",
+          "the local delegate identity is unavailable before sending",
+        );
+      }
+      author = signedIn;
+      const key =
+        roomEpochKeyCache.get(roomId, epoch) ??
+        (await this.epochKeyFor(ownerId, latest));
+      if (key === null) {
+        throw new RoomError(
+          "crypto",
+          "this key has no epoch secret for the current membership",
+        );
+      }
+      let envelope: Uint8Array;
+      try {
+        envelope = await encryptRoomBody(
+          key,
+          { roomId, owner: ownerId, author, epoch },
+          new TextDecoder("utf-8", { fatal: false }).decode(body),
+        );
+      } catch (error) {
+        throw wrapRoomError("crypto", error);
+      }
+      bodyHex = bytesToHex(envelope);
+    } else {
+      if (body.length < 1 || body.length > ROOM_LEGACY_BODY_BYTE_LIMIT) {
+        throw new RoomError(
+          "write",
+          `room message body must be 1..${ROOM_LEGACY_BODY_BYTE_LIMIT} bytes`,
+        );
+      }
+      bodyHex = bytesToHex(body);
+    }
+
+    const time = Date.now();
 
     let signed: { author: string; seq: number; sig: string };
     try {
@@ -418,6 +552,12 @@ export class OnlineRoomTransport implements RoomTransport {
       throw new RoomError(
         "sign",
         "delegate returned a malformed room message author",
+      );
+    }
+    if (encrypted && signed.author !== author) {
+      throw new RoomError(
+        "sign",
+        "the delegate signed as a different key than the epoch secret's recipient",
       );
     }
     if (!Number.isSafeInteger(signed.seq) || signed.seq <= 0) {
@@ -451,6 +591,98 @@ export class OnlineRoomTransport implements RoomTransport {
       );
     }
     return after;
+  }
+
+  /** Delegate v12+: sealed epochs are available on this signer. */
+  private canEncrypt(): boolean {
+    const version = this.signer.delegateVersion?.() ?? 0;
+    return (
+      version >= 12 &&
+      typeof this.signer.sealRoomEpoch === "function" &&
+      typeof this.signer.openRoomSecret === "function"
+    );
+  }
+
+  async sealEpoch(
+    ownerId: string,
+    epoch: number,
+    members: string[],
+  ): Promise<RoomEpochKey> {
+    if (!this.canEncrypt()) {
+      throw new RoomError(
+        "crypto",
+        "this delegate cannot seal room epochs; update the delegate to v12",
+      );
+    }
+    const roomId = this.instanceId(ownerId);
+    let sealed: SealedRoomEpoch;
+    try {
+      sealed = await this.signer.sealRoomEpoch!({
+        roomId,
+        owner: ownerId,
+        tag: ROOM_TAG,
+        epoch,
+        members,
+      });
+    } catch (error) {
+      throw wrapRoomError("sign", error);
+    }
+    roomEpochKeyCache.set(roomId, epoch, sealed.epochKey);
+    return {
+      epochKey: sealed.epochKey,
+      secrets: sealed.secrets,
+      nextMembershipSeq: sealed.nextMembershipSeq,
+    };
+  }
+
+  async openEpoch(
+    ownerId: string,
+    epoch: number,
+    blob: string,
+  ): Promise<Uint8Array> {
+    if (!this.canEncrypt()) {
+      throw new RoomError(
+        "crypto",
+        "this delegate cannot open room epochs; update the delegate to v12",
+      );
+    }
+    const roomId = this.instanceId(ownerId);
+    let opened: OpenedRoomSecret;
+    try {
+      opened = await this.signer.openRoomSecret!({
+        roomId,
+        owner: ownerId,
+        tag: ROOM_TAG,
+        epoch,
+        blob,
+      });
+    } catch (error) {
+      throw wrapRoomError("sign", error);
+    }
+    roomEpochKeyCache.set(roomId, epoch, opened.epochKey);
+    return opened.epochKey;
+  }
+
+  async epochKeyFor(
+    ownerId: string,
+    membership: RoomMembershipV1,
+  ): Promise<Uint8Array | null> {
+    const roomId = this.instanceId(ownerId);
+    const cached = roomEpochKeyCache.get(roomId, membership.seq);
+    if (cached !== null) return cached;
+    if (membership.secrets.length === 0) return null;
+
+    const author = this.signer.authorId?.() ?? null;
+    if (author === null) return null;
+    const secret = membership.secrets.find(
+      (entry) => entry.recipient === author,
+    );
+    if (!secret) return null;
+    return this.openEpoch(ownerId, membership.seq, secret.blob);
+  }
+
+  roomIdFor(ownerId: string): string {
+    return this.instanceId(ownerId);
   }
 
   close(): void {

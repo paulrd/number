@@ -20,15 +20,15 @@ changes the compiled bytes and re-keys every zone.
 | Live URL | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
-| Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (live on all four nodes) |
+| Delegate | **v12** `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb`, code `zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd` (live on all four nodes) |
 | Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the live UI |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794078151`, bundle `assets/index-SCqJUF8C.js` + lazy `assets/picker-Df5iena3.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1794080195`, bundle `assets/index-DDEsV89s.js` + lazy `assets/picker-DWQuKAZX.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-07; site `1794078151`, P3b2 room UI (foreign rooms + `?room=`), delegate v11; contract unchanged |
+| Last UI publish | 2026-11-07; site `1794080195`, P3c encrypted rooms, delegate v12; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -100,9 +100,9 @@ no re-key.
 - `ui/e2e/live-region.mjs`: manual live manifest read (no CI).
 - CI has a `regions` job; `make check` runs `regions-check`.
 
-Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **83
-delegate**, **349 UI**, **29 offline e2e** (the region/room tests are Axe-clean
-and make no external requests), plus the manual `live-room.mjs`.
+Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **95
+delegate**, **366 UI**, **30 offline e2e** (the region/room tests are
+Axe-clean and make no external requests), plus the manual live-room smokes.
 
 ### P2 implemented (2026-11-07); next is P3/P4 (no contract change)
 
@@ -249,7 +249,55 @@ UI: 349 tests, 29 offline e2e.
 Rooms must not be called private before that. P4 is the candidate room +
 `?root=` onboarding.
 
+### P3c implemented and verified live (2026-11-07): encrypted rooms
+
+`DESIGN-rooms.md` §7 is the frozen spec. Decisions:
+
+- **Ed25519→X25519 conversion**, not a second key (a separate key would be a
+  zone/room re-key). The delegate derives both directions from the seed.
+- **Delegate v12** adds stateless `sealRoomEpoch` (owner-only; generates the
+  epoch key) and `openRoomSecret`. Epoch keys are never persisted; the UI
+  caches them in memory for the session. Maintainer approved this re-key.
+- **AES-256-GCM** for both the 93-byte secret blob and the body; HKDF-SHA256
+  with room/owner/epoch/recipient context. ChaCha20-Poly1305 blob version
+  0x02 is the fallback if wasm size demands it.
+- Body envelope `0x01 || nonce || ciphertext || tag`; fail-closed. Legacy
+  plaintext stays readable with an "Unencrypted" badge. Encrypted composer cap
+  is 995 bytes (contract cap 1024).
+- **Rotate on every membership change**; removal re-seals to the remaining
+  members. The composer is hard-locked while the zone-derived member set
+  differs from the signed membership (not just warned).
+- No forward secrecy against key compromise; rotation-based revocation only.
+  UI copy must not claim more.
+- v12 re-key: register v11, record artifacts, open each live zone once; then
+  deploy and run an encrypted two-node smoke (encrypt, rotate, remove,
+  re-admit, history).
+
+**Shipped:** delegate v12 `C669…` / `zpYa…` (95 tests) with
+`sealRoomEpoch`/`openRoomSecret` (93-byte AES-256-GCM blobs, HKDF-SHA256,
+Ed25519→X25519), recorded artifacts, and v11 in `LEGACY_DELEGATES`. UI:
+AES-GCM body envelopes (0x01), in-memory epoch cache, encrypted/plaintext/
+unreadable badges, owner **Enable encryption**/**Rotate key**, 995-byte
+composer cap, and the hard composer lock on membership mismatch.
+
+Deployed as site `1794080195`. All four nodes re-armed on v12 (7509 and 7512
+needed the #22 unregister + app-origin reinstall). `ui/e2e/live-room-crypto.mjs`
+passes on 7511/7512/7513: A enables encryption, the raw body is `0x01`
+ciphertext with no plaintext, B decrypts, and C (non-member) sees
+"Not readable" with the composer disabled. Removal/re-admission/history remain
+covered by offline/unit tests to avoid disturbing the test-bed tree.
+
+Tests: delegate 95, UI 366, offline e2e 30, plus the live plaintext and
+encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
+
 ### Gotchas worth remembering
+
+- **The epoch secret is bound to the epoch it was sealed for.** If the delegate
+  membership counter is ahead of room state, reseal at the seq you will sign;
+  never store a blob sealed for a different epoch.
+- **Delegate v11→v12 (and any future re-key) needs an app-origin install.**
+  `fdev publish` alone arms nothing; inert nodes need the #22 unregister +
+  reinstall and one wake-up cycle.
 
 - **A room message is signed by its author, not the room owner.** The delegate
   always signs as the local key; the room contract checks the author against
@@ -397,8 +445,8 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 83, room 21, UI
-349, offline e2e 29, `verify-merge` 14 laws / 0 violations.
+Expected at the time of writing: contract 123 tests, delegate 95, room 21, UI
+366, offline e2e 30, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -437,6 +485,18 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-07 — P3c: encrypted members rooms**
+- Delegate v12 `C669…` / `zpYa…`: Ed25519→X25519 conversion, HKDF-SHA256,
+  AES-256-GCM 93-byte epoch blobs, `sealRoomEpoch` (owner-only) and
+  `openRoomSecret`; 95 delegate tests, golden vector.
+- UI AES-GCM body envelope (0x01), in-memory epoch cache, encrypted/plaintext/
+  unreadable badges, Enable encryption/Rotate key, 995-byte cap, hard composer
+  lock on membership mismatch; 366 UI tests, 30 offline e2e.
+- Re-key deployed: v11 registered, artifacts recorded; site `1794080195`.
+- All four nodes re-armed on v12 (7509/7512 via #22 unregister + reinstall).
+- `live-room-crypto.mjs` passes: raw body is ciphertext, B decrypts, C sees
+  only "Not readable". Removal/re-admission/history covered offline.
 
 **2026-11-07 — P3b2: members-room client and panel**
 - Room codec/merge/digest with golden parity; 36-byte `ZMR1` derivation and a
@@ -584,9 +644,12 @@ Newest first. **Never remove an entry**; the record gate and
 - Unmigratable: `6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57` (unsettled v4),
   `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` (v1), `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd`
   (pre-remap build), `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` (first v1).
-- Delegate **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd` /
+- Delegate **v12** `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb` /
+  `zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd` — encrypted rooms
+  (X25519/HKDF/AES-GCM seal/open); current and live.
+- Delegate v11 `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd` /
   `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` — members-room signing;
-  current and live.
+  superseded by v12, registered.
 - Delegate v10 `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV` /
   `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` — LCA payments; superseded by
   v11, registered.

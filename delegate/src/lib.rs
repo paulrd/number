@@ -22,9 +22,11 @@ use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub mod advance;
+pub mod crypto;
 pub mod room;
 
 use advance::{AdvanceError, BoardState, LegPlan, OwnBoard, audit_slots};
+use crypto::RngSource;
 use room::RoomSecret;
 
 /// Number of slots on a board.
@@ -44,9 +46,10 @@ pub const USER_ID_HEX_LEN: usize = 64;
 /// Length of the webapp contract instance id carried in the delegate params.
 pub const WEBAPP_ID_LEN: usize = 32;
 
-/// The delegate protocol version; v11 adds members-room membership and message
-/// signing (`DESIGN-rooms.md` §3) alongside the v10 payment routing.
-pub const DELEGATE_VERSION: u32 = 11;
+/// The delegate protocol version; v12 adds delegated members-room epoch
+/// encryption (`DESIGN-rooms.md` §7) alongside the v11 membership and message
+/// signing and the v10 payment routing.
+pub const DELEGATE_VERSION: u32 = 12;
 
 /// Version of the export/import payload shape (independent of the wire state
 /// version). Version 1 payloads are accepted by `import`.
@@ -834,6 +837,26 @@ enum Request {
         time: i64,
         body: String,
     },
+    /// Generate a fresh epoch key and seal it to every room member (owner only).
+    #[serde(rename = "sealRoomEpoch")]
+    SealRoomEpoch {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        owner: String,
+        tag: String,
+        epoch: u64,
+        members: Vec<String>,
+    },
+    /// Open the epoch-secret blob addressed to this delegate.
+    #[serde(rename = "openRoomSecret")]
+    OpenRoomSecret {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        owner: String,
+        tag: String,
+        epoch: u64,
+        blob: String,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
@@ -959,6 +982,32 @@ pub struct RoomMessageResponse {
     pub sig: String,
 }
 
+/// `{"ok":true,"version":1,"epoch":N,"epochKey":"<64 hex>",
+/// "nextMembershipSeq":M,"secrets":[{...}]}` from `sealRoomEpoch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealRoomEpochResponse {
+    pub ok: bool,
+    pub version: u32,
+    pub epoch: u64,
+    #[serde(rename = "epochKey")]
+    pub epoch_key: String,
+    #[serde(rename = "nextMembershipSeq")]
+    pub next_membership_seq: u64,
+    pub secrets: Vec<RoomSecret>,
+}
+
+/// `{"ok":true,"version":1,"epoch":N,"recipient":"<64 hex>",
+/// "epochKey":"<64 hex>"}` from `openRoomSecret`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenRoomSecretResponse {
+    pub ok: bool,
+    pub version: u32,
+    pub epoch: u64,
+    pub recipient: String,
+    #[serde(rename = "epochKey")]
+    pub epoch_key: String,
+}
+
 /// `{"ok":true,"hasSeed":false}` before first use, or
 /// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1064,6 +1113,8 @@ pub enum Response {
     Sign(SignResponse),
     Adjustment(AdjustmentResponse),
     RoomMessage(RoomMessageResponse),
+    SealRoomEpoch(SealRoomEpochResponse),
+    OpenRoomSecret(OpenRoomSecretResponse),
     Contacts(ContactsResponse),
     Status(Box<StatusResponse>),
     Export(ExportResponse),
@@ -1340,6 +1391,49 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 author,
                 seq,
                 sig,
+            }),
+            Err(error) => Response::error(error),
+        },
+        Request::SealRoomEpoch {
+            room_id,
+            owner,
+            tag,
+            epoch,
+            members,
+        } => match seal_room_epoch_with(
+            store,
+            &room_id,
+            &owner,
+            &tag,
+            epoch,
+            &members,
+            &mut crypto::DelegateRng,
+        ) {
+            Ok((epoch_key, next_membership_seq, secrets)) => {
+                Response::SealRoomEpoch(SealRoomEpochResponse {
+                    ok: true,
+                    version: 1,
+                    epoch,
+                    epoch_key: hex::encode(epoch_key),
+                    next_membership_seq,
+                    secrets,
+                })
+            }
+            Err(error) => Response::error(error),
+        },
+        Request::OpenRoomSecret {
+            room_id,
+            owner,
+            tag,
+            epoch,
+            blob,
+        } => match open_room_secret_with(store, &room_id, &owner, &tag, epoch, &blob) {
+            Ok((recipient, epoch_key)) => Response::OpenRoomSecret(OpenRoomSecretResponse {
+                ok: true,
+                version: 1,
+                epoch,
+                recipient,
+                epoch_key: hex::encode(epoch_key),
             }),
             Err(error) => Response::error(error),
         },
@@ -2042,6 +2136,110 @@ pub fn sign_room_message_with(
     }
 
     Ok((author, seq, hex::encode(signature.to_bytes())))
+}
+
+/// Generate a fresh epoch key and seal it to every member (`DESIGN-rooms.md`
+/// §7.2). The local delegate must be the room owner.
+///
+/// The epoch key is generated inside the delegate and never accepted from the
+/// caller. Sealing is stateless: the per-room membership counter is read (to
+/// report `nextMembershipSeq`) but not advanced.
+pub fn seal_room_epoch_with(
+    store: &impl SecretStore,
+    room_id: &str,
+    owner: &str,
+    tag: &str,
+    epoch: u64,
+    members: &[String],
+    rng: &mut impl RngSource,
+) -> Result<([u8; 32], u64, Vec<RoomSecret>), String> {
+    room::validate_tag(tag)?;
+    let room_bytes = room::decode_room_id(room_id)?;
+    let owner_bytes = room::decode_key("owner", owner)?;
+    if epoch == 0 {
+        return Err("room epoch must be greater than 0".into());
+    }
+    room::membership_error(owner, epoch, members, &[])?;
+
+    let seed = load_seed(store)?;
+    let local = hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    if local != owner {
+        return Err(format!(
+            "refused room epoch for owner {owner}: this delegate's key is {local}"
+        ));
+    }
+
+    let next_membership_seq = read_room_next_seq(store, room_id, "membershipSeq")?;
+
+    let mut epoch_key = [0u8; crypto::EPOCH_KEY_LEN];
+    rng.fill_bytes(&mut epoch_key);
+
+    let mut secrets = Vec::with_capacity(members.len());
+    for member in members {
+        let recipient = room::decode_key("room epoch member", member)?;
+        let blob = crypto::seal_with_rng(
+            &room_bytes,
+            &owner_bytes,
+            epoch,
+            &recipient,
+            &epoch_key,
+            rng,
+        )?;
+        secrets.push(RoomSecret {
+            recipient: member.clone(),
+            blob: hex::encode(blob),
+        });
+    }
+
+    Ok((epoch_key, next_membership_seq, secrets))
+}
+
+/// Open the epoch-secret blob addressed to this delegate (`DESIGN-rooms.md`
+/// §7.2). Stateless and repeatable: no counters are read or written.
+///
+/// Returns the local Ed25519 verifying key (the recipient recorded in the room
+/// record) and the 32-byte epoch key.
+pub fn open_room_secret_with(
+    store: &impl SecretStore,
+    room_id: &str,
+    owner: &str,
+    tag: &str,
+    epoch: u64,
+    blob_hex: &str,
+) -> Result<(String, [u8; 32]), String> {
+    room::validate_tag(tag)?;
+    let room_bytes = room::decode_room_id(room_id)?;
+    let owner_bytes = room::decode_key("owner", owner)?;
+    if epoch == 0 {
+        return Err("room epoch must be greater than 0".into());
+    }
+    let blob = decode_blob("room secret blob", blob_hex)?;
+
+    let seed = load_seed(store)?;
+    let local = hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let epoch_key = crypto::open(&room_bytes, &owner_bytes, epoch, &seed, &blob)?;
+    Ok((local, epoch_key))
+}
+
+/// Decode a lowercase-hex room secret blob and enforce the exact 93-byte
+/// length from `DESIGN-rooms.md` §7.3.
+fn decode_blob(field: &str, value: &str) -> Result<[u8; crypto::SECRET_BLOB_LEN], String> {
+    if value.len() % 2 != 0
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{field} must be lowercase hex"));
+    }
+    let decoded =
+        hex::decode(value).map_err(|error| format!("{field} is not valid hex: {error}"))?;
+    decoded.as_slice().try_into().map_err(|_| {
+        format!(
+            "{field} must be exactly {} bytes, got {}",
+            crypto::SECRET_BLOB_LEN,
+            decoded.len()
+        )
+    })
 }
 
 /// Build the canonical v5 adjustments signing bytes (`DESIGN-v4.1-v5.md`).
@@ -6292,5 +6490,522 @@ mod tests {
             failing.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
             None
         );
+    }
+
+    // --- v12 delegated room encryption -------------------------------------
+
+    const ROOM_P3C_GOLDEN_JSON: &str = include_str!("../../fixtures/rooms/golden_p3c.json");
+    const P3C_OWNER_SEED: [u8; 32] = [7u8; 32];
+    const P3C_EPOCH: u64 = 5;
+
+    fn p3c_golden() -> Value {
+        serde_json::from_str(ROOM_P3C_GOLDEN_JSON).expect("golden P3c fixture is valid JSON")
+    }
+
+    fn seal_payload(
+        room_id: &str,
+        owner: &str,
+        tag: &str,
+        epoch: u64,
+        members: &[String],
+    ) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "sealRoomEpoch",
+            "roomId": room_id,
+            "owner": owner,
+            "tag": tag,
+            "epoch": epoch,
+            "members": members,
+        }))
+        .expect("seal request serializes")
+    }
+
+    fn open_payload(room_id: &str, owner: &str, tag: &str, epoch: u64, blob: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "openRoomSecret",
+            "roomId": room_id,
+            "owner": owner,
+            "tag": tag,
+            "epoch": epoch,
+            "blob": blob,
+        }))
+        .expect("open request serializes")
+    }
+
+    /// Seeds sorted by their Ed25519 public key. Seed 7 (the owner in the
+    /// golden fixtures) is always included; the rest start at seed 1.
+    fn sorted_member_keys(count: u8) -> (Vec<(SigningKey, String)>, Vec<String>) {
+        let mut seeds = vec![7u8];
+        let mut candidate = 1u8;
+        while seeds.len() < count as usize {
+            if candidate != 7 {
+                seeds.push(candidate);
+            }
+            candidate += 1;
+        }
+        let mut keys: Vec<(SigningKey, String)> = seeds
+            .into_iter()
+            .map(|seed| {
+                let key = SigningKey::from_bytes(&[seed; 32]);
+                let hex = hex::encode(key.verifying_key().to_bytes());
+                (key, hex)
+            })
+            .collect();
+        keys.sort_by(|a, b| a.1.cmp(&b.1));
+        let members = keys.iter().map(|(_, hex)| hex.clone()).collect();
+        (keys, members)
+    }
+
+    fn owner_store(seed: [u8; 32]) -> MemoryStore {
+        store_with_seed(seed)
+    }
+
+    #[test]
+    fn seal_open_round_trip_for_one_two_and_nine_members() {
+        let owner_key = SigningKey::from_bytes(&P3C_OWNER_SEED);
+        let owner_hex = hex::encode(owner_key.verifying_key().to_bytes());
+
+        for count in [1u8, 2, 9] {
+            let (keys, members) = sorted_member_keys(count);
+            assert!(members.iter().any(|member| member == &owner_hex));
+
+            let store = owner_store(P3C_OWNER_SEED);
+            let (epoch_key, next_seq, secrets) = seal_room_epoch_with(
+                &store,
+                ROOM_ID,
+                &owner_hex,
+                "ZMR1",
+                P3C_EPOCH,
+                &members,
+                &mut crypto::SequenceRng::new(1),
+            )
+            .expect("seal succeeds");
+
+            assert_eq!(next_seq, 1, "sealing must not advance the counter");
+            assert_eq!(secrets.len(), count as usize);
+            for (index, (_, recipient)) in keys.iter().enumerate() {
+                assert_eq!(secrets[index].recipient, *recipient);
+                assert_eq!(secrets[index].blob.len(), 93 * 2);
+                assert_eq!(hex::decode(&secrets[index].blob).unwrap().len(), 93);
+            }
+
+            for (index, (key, recipient)) in keys.iter().enumerate() {
+                let member_store = store_with_seed(key.to_bytes());
+                let (local, opened) = open_room_secret_with(
+                    &member_store,
+                    ROOM_ID,
+                    &owner_hex,
+                    "ZMR1",
+                    P3C_EPOCH,
+                    &secrets[index].blob,
+                )
+                .expect("member opens their own blob");
+                assert_eq!(&local, recipient);
+                assert_eq!(opened, epoch_key);
+
+                // A different member's key cannot open this blob.
+                if count > 1 {
+                    let other = &keys[(index + 1) % keys.len()];
+                    let other_store = store_with_seed(other.0.to_bytes());
+                    assert!(
+                        open_room_secret_with(
+                            &other_store,
+                            ROOM_ID,
+                            &owner_hex,
+                            "ZMR1",
+                            P3C_EPOCH,
+                            &secrets[index].blob,
+                        )
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seal_room_epoch_command_marshals_and_non_owner_is_refused() {
+        let owner_hex = ROOM_OWNER;
+        let mut members = vec![ROOM_AUTHOR.to_string(), ROOM_OWNER.to_string()];
+        members.sort();
+
+        // A non-owner local key is refused before any sealing happens.
+        let mut other = store_with_seed([11u8; 32]);
+        let response = call(
+            &mut other,
+            &seal_payload(ROOM_ID, owner_hex, "ZMR1", P3C_EPOCH, &members),
+        );
+        assert!(!is_ok(&response));
+        assert!(
+            error_text(&response).contains("refused room epoch"),
+            "{response}"
+        );
+        assert!(
+            other
+                .get_secret(&room_counter_key(ROOM_ID, "membershipSeq"))
+                .is_none()
+        );
+
+        // The owner's command succeeds through the JSON dispatcher.
+        let mut store = store_with_seed(P3C_OWNER_SEED);
+        let response = call(
+            &mut store,
+            &seal_payload(ROOM_ID, owner_hex, "ZMR1", P3C_EPOCH, &members),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["version"], 1);
+        assert_eq!(response["epoch"], P3C_EPOCH);
+        assert_eq!(response["nextMembershipSeq"], 1);
+        let secrets = response["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 2);
+        assert_eq!(response["epochKey"].as_str().unwrap().len(), 64);
+        for (index, member) in members.iter().enumerate() {
+            assert_eq!(secrets[index]["recipient"], *member);
+            assert_eq!(secrets[index]["blob"].as_str().unwrap().len(), 93 * 2);
+        }
+
+        // A non-owner member opens the blob through the JSON dispatcher.
+        let mut member_store = store_with_seed([11u8; 32]);
+        let blob = secrets[0]["blob"].as_str().unwrap();
+        let response = call(
+            &mut member_store,
+            &open_payload(ROOM_ID, owner_hex, "ZMR1", P3C_EPOCH, blob),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["version"], 1);
+        assert_eq!(response["epoch"], P3C_EPOCH);
+        assert_eq!(response["recipient"], ROOM_AUTHOR);
+        assert_eq!(response["epochKey"], response["epochKey"]);
+        assert_eq!(response["epochKey"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn open_room_secret_rejects_wrong_bindings_and_bad_lengths() {
+        let owner_hex = ROOM_OWNER;
+        let mut members = vec![ROOM_AUTHOR.to_string(), ROOM_OWNER.to_string()];
+        members.sort();
+
+        let store = store_with_seed(P3C_OWNER_SEED);
+        let (_, _, secrets) = seal_room_epoch_with(
+            &store,
+            ROOM_ID,
+            owner_hex,
+            "ZMR1",
+            P3C_EPOCH,
+            &members,
+            &mut crypto::SequenceRng::new(7),
+        )
+        .unwrap();
+        let blob = &secrets[0].blob;
+        let author_store = store_with_seed([11u8; 32]);
+
+        // Correct binding opens.
+        assert!(
+            open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZMR1", P3C_EPOCH, blob)
+                .is_ok()
+        );
+
+        let wrong_room = bs58::encode([0x99u8; 32]).into_string();
+        for result in [
+            open_room_secret_with(
+                &author_store,
+                &wrong_room,
+                owner_hex,
+                "ZMR1",
+                P3C_EPOCH,
+                blob,
+            ),
+            open_room_secret_with(&author_store, ROOM_ID, ROOM_AUTHOR, "ZMR1", P3C_EPOCH, blob),
+            open_room_secret_with(
+                &author_store,
+                ROOM_ID,
+                owner_hex,
+                "ZMR1",
+                P3C_EPOCH + 1,
+                blob,
+            ),
+            open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZMR1", 0, blob),
+            open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZCR1", P3C_EPOCH, blob),
+        ] {
+            assert!(result.is_err());
+        }
+
+        // Case and length are strict; 92 and 94 bytes are rejected.
+        let decoded = hex::decode(blob).unwrap();
+        let short = hex::encode(&decoded[..92]);
+        let long = format!("{blob}00");
+        let upper = blob.to_ascii_uppercase();
+        for candidate in [short.as_str(), long.as_str(), upper.as_str(), "00", "zz"] {
+            assert!(
+                open_room_secret_with(
+                    &author_store,
+                    ROOM_ID,
+                    owner_hex,
+                    "ZMR1",
+                    P3C_EPOCH,
+                    candidate,
+                )
+                .is_err()
+            );
+        }
+
+        // Every single-byte tamper fails authentication.
+        for index in 0..decoded.len() {
+            let mut tampered = decoded.clone();
+            tampered[index] ^= 0x01;
+            assert!(
+                open_room_secret_with(
+                    &author_store,
+                    ROOM_ID,
+                    owner_hex,
+                    "ZMR1",
+                    P3C_EPOCH,
+                    &hex::encode(&tampered),
+                )
+                .is_err(),
+                "tampered byte {index} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn seal_room_epoch_validates_inputs_and_weak_recipients() {
+        let owner_hex = ROOM_OWNER;
+        let mut valid = vec![ROOM_AUTHOR.to_string(), ROOM_OWNER.to_string()];
+        valid.sort();
+        let store = store_with_seed(P3C_OWNER_SEED);
+
+        // Tag, room id, owner and epoch bounds.
+        let mut rng = crypto::SequenceRng::new(1);
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZCR1", 1, &valid, &mut rng).is_err()
+        );
+        assert!(
+            seal_room_epoch_with(
+                &store,
+                "not base58!",
+                owner_hex,
+                "ZMR1",
+                1,
+                &valid,
+                &mut rng
+            )
+            .is_err()
+        );
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, ROOM_AUTHOR, "ZMR1", 1, &valid, &mut rng)
+                .is_err()
+        );
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 0, &valid, &mut rng).is_err()
+        );
+
+        // Member list shape.
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 1, &empty, &mut rng).is_err()
+        );
+        let unsorted = vec![ROOM_OWNER.to_string(), ROOM_AUTHOR.to_string()];
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 1, &unsorted, &mut rng)
+                .is_err()
+        );
+        let duplicate = vec![ROOM_AUTHOR.to_string(), ROOM_AUTHOR.to_string()];
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 1, &duplicate, &mut rng)
+                .is_err()
+        );
+        let missing_owner = vec![ROOM_AUTHOR.to_string()];
+        assert!(
+            seal_room_epoch_with(
+                &store,
+                ROOM_ID,
+                owner_hex,
+                "ZMR1",
+                1,
+                &missing_owner,
+                &mut rng
+            )
+            .is_err()
+        );
+        let too_many: Vec<String> = (1..=10u8)
+            .map(|seed| {
+                hex::encode(
+                    SigningKey::from_bytes(&[seed; 32])
+                        .verifying_key()
+                        .to_bytes(),
+                )
+            })
+            .collect();
+        let mut too_many = too_many;
+        too_many.sort();
+        too_many.push(ROOM_OWNER.to_string());
+        too_many.sort();
+        assert!(
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 1, &too_many, &mut rng)
+                .is_err()
+        );
+
+        // The identity/low-order Ed25519 point is a syntactically valid key but
+        // cannot be a recipient.
+        let identity = format!("01{}", "00".repeat(31));
+        let mut weak = vec![identity, ROOM_OWNER.to_string()];
+        weak.sort();
+        let error = seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZMR1", 1, &weak, &mut rng)
+            .unwrap_err();
+        assert!(error.contains("weak"), "{error}");
+    }
+
+    #[test]
+    fn next_membership_seq_matches_the_signed_counter_and_is_not_advanced() {
+        let owner_hex = ROOM_OWNER;
+        let mut members = vec![ROOM_AUTHOR.to_string(), ROOM_OWNER.to_string()];
+        members.sort();
+        let mut store = store_with_seed(P3C_OWNER_SEED);
+
+        // A prior membership signature at seq 3 leaves the counter at 4.
+        let sig =
+            sign_room_membership_with(&mut store, ROOM_ID, owner_hex, "ZMR1", 3, &members, &[])
+                .unwrap();
+        assert_eq!(sig.len(), 128);
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+            Some(4u64.to_le_bytes().to_vec())
+        );
+
+        for _ in 0..2 {
+            let (_, next_seq, _) = seal_room_epoch_with(
+                &store,
+                ROOM_ID,
+                owner_hex,
+                "ZMR1",
+                P3C_EPOCH,
+                &members,
+                &mut crypto::SequenceRng::new(1),
+            )
+            .unwrap();
+            assert_eq!(next_seq, 4);
+            assert_eq!(
+                store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+                Some(4u64.to_le_bytes().to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn golden_p3c_vector_is_stable() {
+        let golden = p3c_golden();
+        let owner_seed = seed_from_hex(golden["owner_seed_hex"].as_str().unwrap());
+        let owner_hex = golden["owner_vk_hex"].as_str().unwrap().to_string();
+        let epoch = golden["epoch"].as_u64().unwrap();
+        let members: Vec<String> = golden["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+
+        let expected_key = golden["epoch_key_hex"].as_str().unwrap();
+        let expected_secrets: Vec<RoomSecret> = golden["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| RoomSecret {
+                recipient: value["recipient"].as_str().unwrap().into(),
+                blob: value["blob"].as_str().unwrap().into(),
+            })
+            .collect();
+
+        let store = store_with_seed(owner_seed);
+        let (epoch_key, next_seq, secrets) = seal_room_epoch_with(
+            &store,
+            golden["room_id"].as_str().unwrap(),
+            &owner_hex,
+            golden["tag"].as_str().unwrap(),
+            epoch,
+            &members,
+            &mut crypto::SequenceRng::new(1),
+        )
+        .expect("golden seal succeeds");
+
+        assert_eq!(hex::encode(epoch_key), expected_key);
+        assert_eq!(secrets, expected_secrets);
+        assert_eq!(next_seq, golden["next_membership_seq"].as_u64().unwrap());
+        assert_eq!(
+            golden["rng"]["start"].as_u64().unwrap(),
+            1,
+            "SequenceRng start is pinned"
+        );
+
+        // Both fixture members can open their own blob; nobody else can.
+        let author_seed = seed_from_hex(golden["author_seed_hex"].as_str().unwrap());
+        let author_hex = golden["author_vk_hex"].as_str().unwrap().to_string();
+        for secret in &secrets {
+            let seed = if secret.recipient == owner_hex {
+                owner_seed
+            } else if secret.recipient == author_hex {
+                author_seed
+            } else {
+                panic!("unexpected fixture recipient {}", secret.recipient);
+            };
+            let member_store = store_with_seed(seed);
+            let (local, opened) = open_room_secret_with(
+                &member_store,
+                golden["room_id"].as_str().unwrap(),
+                &owner_hex,
+                golden["tag"].as_str().unwrap(),
+                epoch,
+                &secret.blob,
+            )
+            .unwrap();
+            assert_eq!(local, secret.recipient);
+            assert_eq!(hex::encode(opened), expected_key);
+        }
+    }
+
+    #[test]
+    fn membership_signing_bytes_with_secrets_match_the_room_encoder() {
+        // The room crate generated `membership` at fixture creation; this pins
+        // the delegate's duplicate encoder to the same bytes and signature.
+        let golden = p3c_golden();
+        let owner_seed = seed_from_hex(golden["owner_seed_hex"].as_str().unwrap());
+        let owner_hex = golden["owner_vk_hex"].as_str().unwrap();
+        let members: Vec<String> = golden["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let secrets: Vec<RoomSecret> = golden["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| RoomSecret {
+                recipient: value["recipient"].as_str().unwrap().into(),
+                blob: value["blob"].as_str().unwrap().into(),
+            })
+            .collect();
+
+        let bytes = room::membership_signing_bytes(
+            golden["tag"].as_str().unwrap(),
+            owner_hex,
+            golden["membership_seq"].as_u64().unwrap(),
+            &members,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            golden["membership"]["signing_bytes_hex"].as_str().unwrap()
+        );
+
+        let verifying = SigningKey::from_bytes(&owner_seed).verifying_key();
+        let signature: [u8; 64] = hex::decode(golden["membership"]["sig_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        verifying
+            .verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("room-crate membership signature verifies");
     }
 }

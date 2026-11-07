@@ -54,7 +54,7 @@ import {
 } from "./contact-rules";
 import type { PaymentEntry } from "./payments";
 import type { RoomSecretV1 } from "./room-state";
-import { delay, errorMessage, isLowerHex, utf8Length } from "./util";
+import { delay, errorMessage, hexToBytes, isLowerHex, utf8Length } from "./util";
 
 export type DelegateErrorCode =
   | "Missing"
@@ -109,6 +109,46 @@ export interface RoomMessageSignRequest {
   body: string;
 }
 
+/** Request for the delegate's `sealRoomEpoch` command (v12). */
+export interface RoomEpochSealRequest {
+  /** Base58 room instance id, 32 bytes. */
+  roomId: string;
+  /** Room owner and local delegate key, 64 lowercase hex characters. */
+  owner: string;
+  /** Room kind tag; only `"ZMR1"` (members room) is supported. */
+  tag: string;
+  epoch: number;
+  /** Strictly ascending, duplicate-free member keys; includes the owner. */
+  members: string[];
+}
+
+/** Request for the delegate's `openRoomSecret` command (v12). */
+export interface RoomEpochOpenRequest {
+  roomId: string;
+  owner: string;
+  tag: string;
+  epoch: number;
+  /** Owner-signed secret blob, lowercase hex. */
+  blob: string;
+}
+
+/** Parsed `sealRoomEpoch` response. */
+export interface SealedRoomEpoch {
+  version: 1;
+  epoch: number;
+  epochKey: Uint8Array;
+  nextMembershipSeq: number;
+  secrets: RoomSecretV1[];
+}
+
+/** Parsed `openRoomSecret` response. */
+export interface OpenedRoomSecret {
+  version: 1;
+  epoch: number;
+  recipient: string;
+  epochKey: Uint8Array;
+}
+
 /** Delegate-assigned message signature and per-author sequence. */
 export interface SignedRoomMessage {
   author: string;
@@ -160,6 +200,39 @@ function validateRoomOwner(owner: unknown): asserts owner is string {
 function validateRoomTag(tag: unknown): asserts tag is string {
   if (tag !== ROOM_TAG) {
     throw new DelegateError("Protocol", `room tag must be ${ROOM_TAG}.`);
+  }
+}
+
+function validateRoomMembers(
+  owner: string,
+  members: unknown,
+): asserts members is string[] {
+  if (!Array.isArray(members) || members.length < 1 || members.length > 9) {
+    throw new DelegateError(
+      "Protocol",
+      "room membership must contain 1..9 members.",
+    );
+  }
+  for (let index = 0; index < members.length; index++) {
+    const member = members[index];
+    if (typeof member !== "string" || !isLowerHex(member, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        `room member ${index} must be 64 lowercase hex characters.`,
+      );
+    }
+    if (index > 0 && members[index - 1] >= member) {
+      throw new DelegateError(
+        "Protocol",
+        "room members must be strictly ascending and duplicate-free.",
+      );
+    }
+  }
+  if (!members.includes(owner)) {
+    throw new DelegateError(
+      "Protocol",
+      "room membership must include the room owner.",
+    );
   }
 }
 
@@ -239,6 +312,11 @@ export interface DelegateAuditEntry {
 
 export interface DelegateStatus {
   hasSeed: boolean;
+  /**
+   * Delegate protocol version. v12 adds `sealRoomEpoch` / `openRoomSecret`;
+   * a predecessor that omits the field is treated as v11 (plaintext rooms).
+   */
+  version: number;
   /** Present only when `hasSeed` is true. */
   identity: DelegateIdentity | null;
   /**
@@ -404,6 +482,8 @@ interface PendingRequest {
     | "identity"
     | "sign"
     | "roomMessage"
+    | "roomSeal"
+    | "roomOpen"
     | "contacts"
     | "status"
     | "export"
@@ -421,6 +501,10 @@ export class DelegateClient {
   private readonly paramsBytes: number[];
   private pending: PendingRequest[] = [];
   private readonly configError: DelegateError | null;
+  /** Local delegate key from the last identity/status reply. */
+  private cachedPubkey: string | null = null;
+  /** Delegate protocol version from the last status reply. */
+  private cachedVersion: number | null = null;
 
   constructor(
     private readonly send: (request: ClientRequestTable) => void,
@@ -459,6 +543,16 @@ export class DelegateClient {
     return this.request("status", { cmd: "status" }, timeoutMs).then((payload) =>
       this.parseStatus(payload),
     );
+  }
+
+  /** The local delegate's public key, once `identity`/`status` has answered. */
+  authorId(): string | null {
+    return this.cachedPubkey;
+  }
+
+  /** The delegate protocol version, once `status` has answered. */
+  delegateVersion(): number | null {
+    return this.cachedVersion;
   }
 
   /**
@@ -1168,6 +1262,215 @@ export class DelegateClient {
     return { author, seq, sig };
   }
 
+  /**
+   * Seal a fresh epoch key to every member (`DESIGN-rooms.md` §7.2, v12).
+   * Owner-only. The delegate generates the key; callers never supply one.
+   */
+  async sealRoomEpoch(
+    request: RoomEpochSealRequest,
+    timeoutMs = 15_000,
+  ): Promise<SealedRoomEpoch> {
+    const { roomId, owner, tag, epoch, members } = request;
+    validateRoomId(roomId);
+    validateRoomOwner(owner);
+    validateRoomTag(tag);
+    if (!Number.isSafeInteger(epoch) || epoch <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        `room epoch must be a positive integer, got ${String(epoch)}.`,
+      );
+    }
+    validateRoomMembers(owner, members);
+
+    const payload = await this.request(
+      "roomSeal",
+      {
+        cmd: "sealRoomEpoch",
+        roomId,
+        owner,
+        tag,
+        epoch,
+        members: [...members],
+      },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "sealRoomEpoch was rejected",
+      );
+    }
+    if (payload.version !== 1) {
+      throw new DelegateError(
+        "Protocol",
+        "sealRoomEpoch returned an unsupported payload version.",
+      );
+    }
+    const returnedEpoch = payload.epoch;
+    if (
+      typeof returnedEpoch !== "number" ||
+      !Number.isSafeInteger(returnedEpoch) ||
+      returnedEpoch !== epoch
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        `sealRoomEpoch returned epoch ${String(returnedEpoch)}, expected ${epoch}.`,
+      );
+    }
+    const epochKeyHex = payload.epochKey;
+    if (typeof epochKeyHex !== "string" || !isLowerHex(epochKeyHex, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "sealRoomEpoch returned a malformed epoch key.",
+      );
+    }
+    const nextMembershipSeq = payload.nextMembershipSeq;
+    if (
+      typeof nextMembershipSeq !== "number" ||
+      !Number.isSafeInteger(nextMembershipSeq) ||
+      nextMembershipSeq <= 0
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "sealRoomEpoch returned an invalid nextMembershipSeq.",
+      );
+    }
+    if (!Array.isArray(payload.secrets)) {
+      throw new DelegateError(
+        "Protocol",
+        "sealRoomEpoch returned malformed secrets.",
+      );
+    }
+    if (payload.secrets.length !== members.length) {
+      throw new DelegateError(
+        "Protocol",
+        "sealRoomEpoch must return exactly one secret per member.",
+      );
+    }
+    const secrets: RoomSecretV1[] = payload.secrets.map((raw, index) => {
+      if (
+        typeof raw !== "object" ||
+        raw === null ||
+        typeof (raw as ResponseRecord).recipient !== "string" ||
+        !isLowerHex((raw as ResponseRecord).recipient as string, 64)
+      ) {
+        throw new DelegateError(
+          "Protocol",
+          `sealRoomEpoch secret ${index} has a malformed recipient.`,
+        );
+      }
+      if (
+        !isLowerHexBytes(
+          (raw as ResponseRecord).blob,
+          1,
+          ROOM_MAX_SECRET_BLOB_BYTES,
+        )
+      ) {
+        throw new DelegateError(
+          "Protocol",
+          `sealRoomEpoch secret ${index} has a malformed blob.`,
+        );
+      }
+      return {
+        recipient: (raw as ResponseRecord).recipient as string,
+        blob: (raw as ResponseRecord).blob as string,
+      };
+    });
+    for (let index = 0; index < secrets.length; index++) {
+      if (secrets[index].recipient !== members[index]) {
+        throw new DelegateError(
+          "Protocol",
+          "sealRoomEpoch secrets must follow the member order.",
+        );
+      }
+    }
+
+    return {
+      version: 1,
+      epoch,
+      epochKey: hexToBytes(epochKeyHex),
+      nextMembershipSeq,
+      secrets,
+    };
+  }
+
+  /**
+   * Open one owner-signed epoch blob for the local delegate key (v12).
+   * Stateless; a blob sealed to a different member is rejected by the delegate.
+   */
+  async openRoomSecret(
+    request: RoomEpochOpenRequest,
+    timeoutMs = 15_000,
+  ): Promise<OpenedRoomSecret> {
+    const { roomId, owner, tag, epoch, blob } = request;
+    validateRoomId(roomId);
+    validateRoomOwner(owner);
+    validateRoomTag(tag);
+    if (!Number.isSafeInteger(epoch) || epoch <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        `room epoch must be a positive integer, got ${String(epoch)}.`,
+      );
+    }
+    if (!isLowerHexBytes(blob, 1, ROOM_MAX_SECRET_BLOB_BYTES)) {
+      throw new DelegateError(
+        "Protocol",
+        `room secret blob must be 1..${ROOM_MAX_SECRET_BLOB_BYTES} decoded bytes as lowercase hex.`,
+      );
+    }
+
+    const payload = await this.request(
+      "roomOpen",
+      { cmd: "openRoomSecret", roomId, owner, tag, epoch, blob },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "openRoomSecret was rejected",
+      );
+    }
+    if (payload.version !== 1) {
+      throw new DelegateError(
+        "Protocol",
+        "openRoomSecret returned an unsupported payload version.",
+      );
+    }
+    const returnedEpoch = payload.epoch;
+    if (
+      typeof returnedEpoch !== "number" ||
+      !Number.isSafeInteger(returnedEpoch) ||
+      returnedEpoch !== epoch
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        `openRoomSecret returned epoch ${String(returnedEpoch)}, expected ${epoch}.`,
+      );
+    }
+    const recipient = payload.recipient;
+    if (typeof recipient !== "string" || !isLowerHex(recipient, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "openRoomSecret returned a malformed recipient.",
+      );
+    }
+    const epochKeyHex = payload.epochKey;
+    if (typeof epochKeyHex !== "string" || !isLowerHex(epochKeyHex, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "openRoomSecret returned a malformed epoch key.",
+      );
+    }
+    return {
+      version: 1,
+      epoch,
+      recipient,
+      epochKey: hexToBytes(epochKeyHex),
+    };
+  }
+
   /** Feed an outbound DelegateResponse into the waiting request queue. */
   handleResponse(response: DelegateResponse): void {
     const payloads = parseDelegatePayloads(response);
@@ -1191,6 +1494,17 @@ export class DelegateClient {
         index = 0; // error responses carry no command discriminator
       } else if (typeof payload.hasSeed === "boolean") {
         index = this.pending.findIndex((pending) => pending.kind === "status");
+      } else if (
+        typeof payload.recipient === "string" &&
+        typeof payload.epochKey === "string"
+      ) {
+        // openRoomSecret: recipient + epochKey, no counters.
+        index = this.pending.findIndex((pending) => pending.kind === "roomOpen");
+      } else if (
+        Array.isArray(payload.secrets) &&
+        typeof payload.nextMembershipSeq === "number"
+      ) {
+        index = this.pending.findIndex((pending) => pending.kind === "roomSeal");
       } else if (typeof payload.seed === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "export");
       } else if (Array.isArray(payload.contacts)) {
@@ -1363,8 +1677,9 @@ export class DelegateClient {
       );
     }
 
+    this.cachedPubkey = pubkey.toLowerCase();
     return {
-      pubkey: pubkey.toLowerCase(),
+      pubkey: this.cachedPubkey,
       nextSeq: this.validateNextSeq(payload.nextSeq),
       contactsNextSeq: this.parseContactsNextSeq(payload.contactsNextSeq),
       parentNextSeq: this.parseParentNextSeq(payload.parentNextSeq),
@@ -1390,11 +1705,29 @@ export class DelegateClient {
       );
     }
 
+    const version = this.parseVersion(payload.version);
+    this.cachedVersion = version;
     return {
       hasSeed: payload.hasSeed,
+      version,
       identity: payload.hasSeed ? this.parseIdentity(payload) : null,
       ...this.parseAutomationStatus(payload),
     };
+  }
+
+  /**
+   * `version` is the delegate protocol version. A predecessor that omits it is
+   * pre-v12; treating it as v11 keeps encrypted commands off that delegate.
+   */
+  private parseVersion(value: unknown): number {
+    if (value === undefined) return 11;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate status response has a malformed version.",
+      );
+    }
+    return value;
   }
 
   /**
@@ -1403,7 +1736,7 @@ export class DelegateClient {
    */
   private parseAutomationStatus(
     payload: ResponseRecord,
-  ): Omit<DelegateStatus, "hasSeed" | "identity"> {
+  ): Omit<DelegateStatus, "hasSeed" | "identity" | "version"> {
     return {
       configured: this.parseOptionalBoolean(payload.configured, "configured"),
       codeHashes:

@@ -17,6 +17,13 @@ import {
   type RoomStateV1,
 } from "./room-state";
 import {
+  ROOM_ENCRYPTED_BODY_BYTE_LIMIT,
+  isEncryptedRoomBody,
+  readRoomBody,
+  roomEpochKeyCache,
+  type RoomBodyView,
+} from "./room-crypto";
+import {
   RoomError,
   type RoomErrorCode,
   type RoomTransport,
@@ -45,6 +52,16 @@ export interface RoomPanel {
 /** Contract bounds (DESIGN-rooms.md §2). */
 export const ROOM_MESSAGE_LIMIT = 200;
 export const ROOM_BODY_BYTE_LIMIT = 1024;
+/** Composer cap in an encrypted epoch (contract cap minus the 29-byte envelope). */
+export const ROOM_ENCRYPTED_BYTE_LIMIT = ROOM_ENCRYPTED_BODY_BYTE_LIMIT;
+
+const PLAINTEXT_NOTICE =
+  "Not private yet. Messages are sent as plaintext, and anyone who can read " +
+  "this room's state can read them. Don't put anything private here.";
+const ENCRYPTED_NOTICE =
+  "Messages in this room are encrypted for its current members. There is no " +
+  "forward secrecy: anyone who kept an old epoch key can read that epoch. " +
+  "Don't post anything you would not share with every current member.";
 
 export type RoomMembershipState = "none" | "match" | "mismatch" | "error";
 export type RoomMemberKind = "owner" | "child" | "stale";
@@ -214,12 +231,15 @@ export function roomByteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-/** Composer validation: non-empty and within the 1024-byte body cap. */
-export function roomComposerProblem(text: string): string | null {
+/** Composer validation: non-empty and within the current epoch's byte cap. */
+export function roomComposerProblem(
+  text: string,
+  limit = ROOM_BODY_BYTE_LIMIT,
+): string | null {
   if (text.trim() === "") return "Write a message first.";
   const bytes = roomByteLength(text);
-  if (bytes > ROOM_BODY_BYTE_LIMIT) {
-    return `Keep the message to ${ROOM_BODY_BYTE_LIMIT} bytes or fewer. This one is ${bytes} bytes.`;
+  if (bytes > limit) {
+    return `Keep the message to ${limit} bytes or fewer. This one is ${bytes} bytes.`;
   }
   return null;
 }
@@ -257,6 +277,7 @@ const ROOM_ERROR_CODES: readonly RoomErrorCode[] = [
   "read",
   "write",
   "sign",
+  "crypto",
   "not-member",
   "wasm",
 ];
@@ -288,6 +309,8 @@ function actionErrorText(
       return `${prefix} This build has no room configuration. Publish the room contract and reload.`;
     case "sign":
       return `${prefix} The delegate could not sign it. Make sure it is installed and ready.`;
+    case "crypto":
+      return `${prefix} The room's encryption key is unavailable. Update the delegate or rotate the key.`;
     case "not-member":
       return `${prefix} This key is not a member of the room's current membership.`;
     case "write":
@@ -311,9 +334,12 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   const waiting = byId<HTMLParagraphElement>("room-waiting");
 
   const membershipStateElement = byId<HTMLSpanElement>("room-membership-state");
+  const encryptionStateElement = byId<HTMLSpanElement>("room-encryption-state");
   const membershipDetail = byId<HTMLParagraphElement>("room-membership-detail");
   const mismatch = byId<HTMLParagraphElement>("room-mismatch");
   const updateButton = byId<HTMLButtonElement>("room-update-membership");
+  const encryptionButton = byId<HTMLButtonElement>("room-encryption-action");
+  const plaintextNotice = byId<HTMLParagraphElement>("room-plaintext-notice");
   const confirmBox = byId<HTMLDivElement>("room-membership-confirm");
   const confirmText = byId<HTMLParagraphElement>("room-membership-confirm-text");
   const confirmCancel = byId<HTMLButtonElement>("room-membership-cancel");
@@ -351,6 +377,19 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   let composerErrorText: string | null = null;
   let confirmPending = false;
   let readToken = 0;
+  /** Decrypted/rendered bodies keyed by message id; epoch keys stay in crypto. */
+  let messageViews = new Map<string, RoomBodyView>();
+  let decrypting = false;
+  /** Invalidates in-flight decryption when the room/identity changes or closes. */
+  let decryptGeneration = 0;
+  let lastSelfId: string | null = null;
+
+  function clearDecryption(): void {
+    messageViews = new Map();
+    decrypting = false;
+    decryptGeneration += 1;
+    roomEpochKeyCache.clear();
+  }
 
   function setStatus(message: string): void {
     statusLine.textContent = message;
@@ -412,9 +451,16 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     const busy = loading || sending || updating;
     const text = input.value;
     const bytes = roomByteLength(text);
-    const over = bytes > ROOM_BODY_BYTE_LIMIT;
+    const latest = latestSigned();
+    const encrypted = (latest?.secrets.length ?? 0) > 0;
+    const limit = encrypted ? ROOM_ENCRYPTED_BYTE_LIMIT : ROOM_BODY_BYTE_LIMIT;
+    const over = bytes > limit;
+    // Hard lock: an own-room composer only opens while the slot-derived set
+    // equals the signed membership. A mismatch means a removal (or addition)
+    // was not followed by a rotation, which would leave the epoch readable to
+    // the removed key.
     const membershipAllowsSend = self
-      ? state === "match" || state === "mismatch"
+      ? state === "match"
       : selfInMembership();
     const canSend =
       !waitingForOwner &&
@@ -428,7 +474,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     composer.classList.toggle("is-over", over);
     composer.setAttribute("aria-busy", String(sending));
     sendButton.disabled =
-      !canSend || sending || roomComposerProblem(text) !== null;
+      !canSend || sending || roomComposerProblem(text, limit) !== null;
     sendButton.textContent = sending ? "Sending…" : "Send";
     sendButton.setAttribute("aria-busy", String(sending));
 
@@ -446,20 +492,25 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
         hint.textContent =
           "This key is not a member of the room's current membership.";
       } else if (over) {
-        hint.textContent = `Too long: ${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes.`;
+        hint.textContent = `Too long: ${bytes} / ${limit} bytes.`;
       } else {
-        hint.textContent = `${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes. Enter sends; Shift+Enter adds a line.`;
+        hint.textContent = `${bytes} / ${limit} bytes${
+          encrypted ? " (encrypted)" : ""
+        }. Enter sends; Shift+Enter adds a line.`;
       }
     } else if (state === "none") {
       hint.textContent = "Create a membership before sending.";
     } else if (state === "error") {
       hint.textContent = "The membership could not be checked.";
-    } else if (over) {
-      hint.textContent = `Too long: ${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes.`;
     } else if (state === "mismatch") {
-      hint.textContent = `${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes. Membership is out of date; update it to include new contacts.`;
+      hint.textContent =
+        "Membership is out of date. Update it before sending.";
+    } else if (over) {
+      hint.textContent = `Too long: ${bytes} / ${limit} bytes.`;
     } else {
-      hint.textContent = `${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes. Enter sends; Shift+Enter adds a line.`;
+      hint.textContent = `${bytes} / ${limit} bytes${
+        encrypted ? " (encrypted)" : ""
+      }. Enter sends; Shift+Enter adds a line.`;
     }
 
     composerError.hidden = composerErrorText === null;
@@ -519,6 +570,87 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
   }
 
+  function legacyBodyView(bodyHex: string): RoomBodyView {
+    try {
+      return { kind: "plaintext", text: roomBodyToText(bodyHex) };
+    } catch {
+      return { kind: "unreadable" };
+    }
+  }
+
+  function bodyViewFor(message: RoomMessageV1): RoomBodyView | null {
+    const cached = messageViews.get(roomMessageId(message));
+    if (cached !== undefined) return cached;
+    if (!isEncryptedRoomBody(message.body)) return legacyBodyView(message.body);
+    // A 0x01 body is never shown as plaintext while its key is being fetched.
+    return null;
+  }
+
+  /**
+   * Fetch the epoch key for every encrypted message that has no cached body
+   * view, decrypt, then repaint. Read-only: the transport only recovers keys,
+   * the panel owns body decryption.
+   */
+  async function ensureDecryption(): Promise<void> {
+    if (decrypting) return;
+    const state = current;
+    const owner = currentOwner;
+    if (state === null || owner === null) return;
+
+    const latest = latestMembership(state);
+    const rows = roomMessageRows(state.messages, latest?.seq ?? 0);
+    const pendingByEpoch = new Map<number, RoomMessageV1[]>();
+    for (const row of rows) {
+      const message = row.message;
+      if (!isEncryptedRoomBody(message.body)) continue;
+      if (messageViews.has(roomMessageId(message))) continue;
+      const group = pendingByEpoch.get(message.epoch);
+      if (group === undefined) pendingByEpoch.set(message.epoch, [message]);
+      else group.push(message);
+    }
+    if (pendingByEpoch.size === 0) return;
+
+    const generation = decryptGeneration;
+    const roomId = deps.transport.roomIdFor(owner);
+    decrypting = true;
+    try {
+      for (const [epoch, messages] of pendingByEpoch) {
+        const membership =
+          state.memberships.find((record) => record.seq === epoch) ?? null;
+        let key: Uint8Array | null = null;
+        if (membership !== null) {
+          try {
+            key = await deps.transport.epochKeyFor(owner, membership);
+          } catch {
+            // A missing/foreign blob is "not readable", not plaintext.
+            key = null;
+          }
+        }
+        if (generation !== decryptGeneration) return;
+
+        for (const message of messages) {
+          const view = await readRoomBody(
+            key,
+            { roomId, owner, author: message.author, epoch },
+            message.body,
+          );
+          if (generation !== decryptGeneration) return;
+          messageViews.set(roomMessageId(message), view);
+        }
+      }
+    } finally {
+      decrypting = false;
+    }
+
+    if (
+      generation === decryptGeneration &&
+      current === state &&
+      currentOwner === owner
+    ) {
+      renderMessages();
+    }
+  }
+
   function renderMessages(): void {
     const messages = current?.messages ?? [];
     if (current === null) {
@@ -567,6 +699,23 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
         head.append(badge);
       }
 
+      const view = bodyViewFor(row.message);
+      const encryption = view === null ? "pending" : view.kind;
+      item.dataset.encryption = encryption;
+
+      const encryptionBadge = document.createElement("span");
+      encryptionBadge.className = "room-message-badge room-message-encryption";
+      encryptionBadge.dataset.state = encryption;
+      encryptionBadge.textContent =
+        encryption === "encrypted"
+          ? "Encrypted"
+          : encryption === "plaintext"
+            ? "Unencrypted"
+            : encryption === "unreadable"
+              ? "Not readable"
+              : "Decrypting";
+      head.append(encryptionBadge);
+
       const time = document.createElement("time");
       time.className = "room-message-time";
       const iso = roomTimeIso(row.message.time);
@@ -577,10 +726,12 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
 
       const body = document.createElement("p");
       body.className = "room-message-body";
-      try {
-        body.textContent = roomBodyToText(row.message.body);
-      } catch {
-        body.textContent = "This message could not be read.";
+      if (view === null) {
+        body.textContent = "Reading encrypted message…";
+      } else if (view.kind === "unreadable") {
+        body.textContent = "Not readable for this epoch";
+      } else {
+        body.textContent = view.text;
       }
 
       item.append(head, body);
@@ -591,9 +742,16 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       messages.length,
       rows.length,
     );
+
+    void ensureDecryption();
   }
 
   function render(): void {
+    const selfId = deps.selfId();
+    if (selfId !== lastSelfId) {
+      clearDecryption();
+      lastSelfId = selfId;
+    }
     const owner = currentTarget();
     const self = isOwnRoom(owner);
     if (current !== null && currentOwner !== owner) {
@@ -653,6 +811,14 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
               ? "Couldn't check"
               : "No membership";
     }
+
+    const encrypted = (signed?.secrets.length ?? 0) > 0;
+    encryptionStateElement.hidden =
+      waitingForOwner || signed === null || (loading && current === null);
+    encryptionStateElement.dataset.state = encrypted ? "encrypted" : "plaintext";
+    encryptionStateElement.textContent = encrypted
+      ? "Encrypted"
+      : "Not encrypted";
 
     if (waitingForOwner) {
       membershipDetail.textContent =
@@ -722,6 +888,21 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     updateButton.disabled = !canUpdate || busy;
     updateButton.textContent =
       state === "none" ? "Create membership" : "Update membership";
+
+    const canEncryptAction =
+      self &&
+      signed !== null &&
+      state === "match" &&
+      !loading &&
+      !offline &&
+      loadError === null;
+    encryptionButton.hidden = !canEncryptAction;
+    encryptionButton.disabled = !canEncryptAction || busy;
+    encryptionButton.textContent = encrypted ? "Rotate key" : "Enable encryption";
+
+    plaintextNotice.textContent = encrypted
+      ? ENCRYPTED_NOTICE
+      : PLAINTEXT_NOTICE;
 
     confirmBox.hidden = !showConfirm;
     confirmUpdate.disabled = !showConfirm || busy;
@@ -835,6 +1016,8 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     if (currentOwner !== owner) {
       current = null;
       currentOwner = null;
+      messageViews = new Map();
+      decryptGeneration += 1;
     }
     loading = true;
     offline = false;
@@ -905,13 +1088,59 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
   }
 
+  /**
+   * Owner-only "Enable encryption" (plaintext membership) or "Rotate key"
+   * (encrypted membership). Writes `seq + 1` with the same members and fresh
+   * secrets; a membership change rotates automatically in the transport.
+   */
+  async function rotateKey(): Promise<void> {
+    const owner = currentTarget();
+    const signed = latestSigned();
+    if (owner === null || signed === null || !isOwnRoom(owner)) return;
+    if (updating || sending || loading) return;
+    if (membershipStateFor(owner) !== "match") return;
+
+    const wasEncrypted = signed.secrets.length > 0;
+    updating = true;
+    membershipActionError = null;
+    setStatus(wasEncrypted ? "Rotating the epoch key…" : "Enabling encryption…");
+    render();
+
+    try {
+      const state = await deps.transport.updateMembership(owner, signed.members, {
+        encrypt: true,
+      });
+      if (currentTarget() !== owner) return;
+      current = state;
+      currentOwner = owner;
+      offline = false;
+      loadError = null;
+      membershipActionError = null;
+      confirmPending = false;
+      const message = wasEncrypted
+        ? "Encryption key rotated."
+        : "Encryption enabled.";
+      deps.announce(message);
+      setStatus(message);
+    } catch (error) {
+      if (currentTarget() !== owner) return;
+      handleActionError(error, "membership");
+    } finally {
+      updating = false;
+      render();
+    }
+  }
+
   async function sendMessage(): Promise<void> {
     const owner = currentTarget();
     if (owner === null || sending || updating || loading) return;
     if (offline || loadError !== null) return;
 
     const text = input.value;
-    const problem = roomComposerProblem(text);
+    const latest = latestSigned();
+    const encrypted = (latest?.secrets.length ?? 0) > 0;
+    const limit = encrypted ? ROOM_ENCRYPTED_BYTE_LIMIT : ROOM_BODY_BYTE_LIMIT;
+    const problem = roomComposerProblem(text, limit);
     if (problem !== null) {
       composerErrorText = problem;
       renderComposer(owner, membershipStateFor(owner));
@@ -937,6 +1166,12 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       }
     } else if (state === "none") {
       composerErrorText = "Create a membership before sending.";
+      renderComposer(owner, state);
+      input.focus({ preventScroll: true });
+      return;
+    } else if (state !== "match") {
+      composerErrorText =
+        "Update the membership before sending; it no longer matches your slots.";
       renderComposer(owner, state);
       input.focus({ preventScroll: true });
       return;
@@ -978,6 +1213,8 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     if (currentOwner !== owner) {
       current = null;
       currentOwner = null;
+      messageViews = new Map();
+      decryptGeneration += 1;
     }
     confirmPending = false;
     membershipActionError = null;
@@ -998,6 +1235,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     readToken += 1;
     loading = false;
     confirmPending = false;
+    clearDecryption();
     if (dialog.open) dialog.close();
   }
 
@@ -1018,6 +1256,10 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
 
   confirmUpdate.addEventListener("click", () => {
     void updateMembership();
+  });
+
+  encryptionButton.addEventListener("click", () => {
+    void rotateKey();
   });
 
   composer.addEventListener("submit", (event) => {

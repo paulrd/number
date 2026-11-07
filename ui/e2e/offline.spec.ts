@@ -1551,6 +1551,76 @@ test("opens the members room, shows the plaintext notice, and sends a message", 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
+test("enables encryption, sends a ciphertext body, and decrypts it in the DOM", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  const plaintext = "encrypted offline hello";
+  const plaintextHex = Buffer.from(plaintext, "utf8").toString("hex");
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#room-open").click();
+  await expect(page.locator("#room-dialog")).toBeVisible();
+  await expect(page.locator("#room-membership-state")).toHaveAttribute(
+    "data-state",
+    "match",
+  );
+
+  await expect(page.locator("#room-encryption-state")).toHaveAttribute(
+    "data-state",
+    "plaintext",
+  );
+  await expect(page.locator("#room-encryption-state")).toHaveText(
+    "Not encrypted",
+  );
+  await expect(page.locator("#room-plaintext-notice")).toContainText(
+    "plaintext",
+  );
+
+  await expect(page.locator("#room-encryption-action")).toHaveText(
+    "Enable encryption",
+  );
+  await page.locator("#room-encryption-action").click();
+  await expect(page.locator("#room-encryption-state")).toHaveAttribute(
+    "data-state",
+    "encrypted",
+    { timeout: 10_000 },
+  );
+  await expect(page.locator("#room-encryption-action")).toHaveText("Rotate key");
+  await expect(page.locator("#room-plaintext-notice")).toContainText(
+    "encrypted for its current members",
+  );
+
+  await page.locator("#room-message-input").fill(plaintext);
+  await page.locator("#room-send").click();
+  const sent = page.locator(".room-message").filter({ hasText: plaintext });
+  await expect(sent).toBeVisible();
+  await expect(sent).toHaveAttribute("data-encryption", "encrypted");
+  await expect(
+    sent.locator(".room-message-encryption"),
+  ).toHaveAttribute("data-state", "encrypted");
+
+  const ownId = await page.locator("#identity-short").getAttribute("title");
+  const stored = await page.evaluate((owner) => {
+    const hook = (window as unknown as {
+      __TALLY_OFFLINE_ROOM_STATE__?: (ownerId: string) => {
+        messages?: Array<{ body?: string }>;
+      } | null;
+    }).__TALLY_OFFLINE_ROOM_STATE__;
+    const state = hook ? hook(owner) : null;
+    const messages = state?.messages ?? [];
+    return messages.length === 0 ? null : (messages[messages.length - 1].body ?? null);
+  }, ownId ?? "");
+
+  expect(stored).not.toBeNull();
+  expect(stored!.startsWith("01")).toBe(true);
+  expect(stored).not.toContain(plaintextHex);
+  expect(stored).not.toContain(plaintext);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
 test("offers a membership update after adding a child and keeps old messages as history", async ({
   page,
 }) => {
@@ -1572,6 +1642,13 @@ test("offers a membership update after adding a child and keeps old messages as 
   );
   await expect(page.locator("#room-mismatch")).toBeVisible();
 
+  // Hard lock: a slot/membership mismatch disables the composer, not warns.
+  await expect(page.locator("#room-message-input")).toBeDisabled();
+  await expect(page.locator("#room-send")).toBeDisabled();
+  await expect(page.locator("#room-message-hint")).toContainText(
+    "Membership is out of date. Update it before sending",
+  );
+
   await page.locator("#room-update-membership").click();
   await expect(page.locator("#room-membership-confirm-update")).toBeVisible();
   await page.locator("#room-membership-confirm-update").click();
@@ -1579,6 +1656,7 @@ test("offers a membership update after adding a child and keeps old messages as 
     "data-state",
     "match",
   );
+  await expect(page.locator("#room-message-input")).toBeEnabled();
 
   // The seeded epoch-1 message survives the seq-2 membership as history.
   await expect(page.locator(".room-message").first()).toHaveAttribute(

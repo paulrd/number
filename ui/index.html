@@ -1793,6 +1793,16 @@
                 >
                   No membership
                 </span>
+                <span
+                  id="room-encryption-state"
+                  class="state-badge room-encryption-state"
+                  data-state="plaintext"
+                  role="status"
+                  aria-live="polite"
+                  hidden
+                >
+                  Not encrypted
+                </span>
               </div>
               <p id="room-membership-detail" class="room-membership-detail"></p>
               <p id="room-mismatch" class="room-warning" role="status" hidden></p>
@@ -1825,6 +1835,15 @@
                 hidden
               >
                 Update membership
+              </button>
+              <button
+                id="room-encryption-action"
+                class="button button--small button--quiet room-encryption-action"
+                type="button"
+                aria-describedby="room-membership-detail room-plaintext-notice"
+                hidden
+              >
+                Enable encryption
               </button>
               <p
                 id="room-membership-error"

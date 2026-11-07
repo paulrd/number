@@ -10,6 +10,8 @@ import type { DelegateResponse } from "@freenetorg/freenet-stdlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DelegateClient,
+  type RoomEpochOpenRequest,
+  type RoomEpochSealRequest,
   type RoomMembershipSignRequest,
 } from "./delegate";
 import {
@@ -29,6 +31,7 @@ import {
   type RoomDeltaV1,
   type RoomStateV1,
 } from "./room-state";
+import { roomEpochKeyCache, readRoomBody } from "./room-crypto";
 import { bytesToHex } from "./util";
 
 // The published room artifact from `published/room/manifest.json`.
@@ -104,6 +107,48 @@ class FakeSigner implements RoomSigner {
   ): Promise<{ author: string; seq: number; sig: string }> {
     this.messageRequests.push(request);
     return { author: this.author, seq: this.messageSeq, sig: MESSAGE_SIG };
+  }
+}
+
+const EPOCH_KEY = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+
+/** v12 signer: deterministic epoch key, structurally valid secret blobs. */
+class EncryptingSigner extends FakeSigner implements RoomSigner {
+  readonly sealRequests: RoomEpochSealRequest[] = [];
+  readonly openRequests: RoomEpochOpenRequest[] = [];
+  nextMembershipSeq: number | null = null;
+  version = 12;
+
+  delegateVersion(): number {
+    return this.version;
+  }
+
+  authorId(): string {
+    return this.author;
+  }
+
+  async sealRoomEpoch(request: RoomEpochSealRequest) {
+    this.sealRequests.push(request);
+    return {
+      version: 1 as const,
+      epoch: request.epoch,
+      epochKey: EPOCH_KEY,
+      nextMembershipSeq: this.nextMembershipSeq ?? request.epoch,
+      secrets: request.members.map((recipient) => ({
+        recipient,
+        blob: "bb".repeat(93),
+      })),
+    };
+  }
+
+  async openRoomSecret(request: RoomEpochOpenRequest) {
+    this.openRequests.push(request);
+    return {
+      version: 1 as const,
+      epoch: request.epoch,
+      recipient: this.author,
+      epochKey: EPOCH_KEY,
+    };
   }
 }
 
@@ -282,6 +327,105 @@ describe("online room transport", () => {
     });
   });
 
+  it("seals membership, signs the same seq, and caches the epoch key", async () => {
+    const connection = new FakeConnection({ v: 1, memberships: [], messages: [] });
+    const signer = new EncryptingSigner();
+    signer.nextMembershipSeq = 5;
+    roomEpochKeyCache.clear();
+    const transport = new OnlineRoomTransport(signer, {
+      connection,
+      codeHashBase58: PINNED_CODE_HASH,
+    });
+
+    const first = await transport.updateMembership(
+      OWNER,
+      [OWNER, OTHER],
+      { encrypt: true },
+    );
+
+    expect(signer.sealRequests[0]).toMatchObject({
+      roomId: GOLDEN_INSTANCE,
+      owner: OWNER,
+      tag: "ZMR1",
+      epoch: 1,
+      members: [OTHER, OWNER],
+    });
+    // seq = max(latest.seq + 1, nextMembershipSeq)
+    expect(first.memberships[0].seq).toBe(5);
+    expect(signer.membershipRequests[0].seq).toBe(5);
+    expect(signer.membershipRequests[0].secrets).toHaveLength(2);
+    expect(signer.membershipRequests[0].secrets[0].recipient).toBe(OTHER);
+    expect(roomEpochKeyCache.get(GOLDEN_INSTANCE, 5)).toEqual(EPOCH_KEY);
+  });
+
+  it("encrypts a message body with the epoch key and author context", async () => {
+    const connection = new FakeConnection({
+      v: 1,
+      memberships: [membership([OWNER], 2)],
+      messages: [],
+    });
+    const signer = new EncryptingSigner();
+    const transport = new OnlineRoomTransport(signer, {
+      connection,
+      codeHashBase58: PINNED_CODE_HASH,
+    });
+
+    // No secrets in this fixture: explicitly encrypt when writing membership.
+    const sealed = await transport.updateMembership(
+      OWNER,
+      [OWNER],
+      { encrypt: true },
+    );
+    const epoch = sealed.memberships[sealed.memberships.length - 1].seq;
+    const after = await transport.sendMessage(
+      OWNER,
+      new TextEncoder().encode("secret hello"),
+    );
+
+    const sent = after.messages[0];
+    expect(sent.epoch).toBe(epoch);
+    expect(sent.body.startsWith("01")).toBe(true);
+    expect(sent.body).not.toContain(
+      bytesToHex(new TextEncoder().encode("secret hello")),
+    );
+    await expect(
+      readRoomBody(EPOCH_KEY, {
+        roomId: GOLDEN_INSTANCE,
+        owner: OWNER,
+        author: OWNER,
+        epoch,
+      }, sent.body),
+    ).resolves.toEqual({ kind: "encrypted", text: "secret hello" });
+  });
+
+  it("keeps the v11 plaintext path and never calls the new commands", async () => {
+    const connection = new FakeConnection({ v: 1, memberships: [], messages: [] });
+    let sealed = 0;
+    const signer = Object.assign(new FakeSigner(), {
+      delegateVersion: () => 11,
+      sealRoomEpoch: async () => {
+        sealed += 1;
+        throw new Error("v11 delegate must not be asked to seal");
+      },
+    });
+    const transport = new OnlineRoomTransport(signer, {
+      connection,
+      codeHashBase58: PINNED_CODE_HASH,
+    });
+
+    const state = await transport.updateMembership(OWNER, [OWNER]);
+    expect(state.memberships[0].secrets).toEqual([]);
+    expect(sealed).toBe(0);
+
+    const after = await transport.sendMessage(
+      OWNER,
+      new TextEncoder().encode("plain hello"),
+    );
+    expect(after.messages[0].body).toBe(
+      bytesToHex(new TextEncoder().encode("plain hello")),
+    );
+  });
+
   it("wraps signer failures as RoomError sign", async () => {
     const connection = new FakeConnection({ v: 1, memberships: [], messages: [] });
     const transport = new OnlineRoomTransport(
@@ -401,5 +545,75 @@ describe("delegate room request shapes", () => {
       time: 1_762_500_000_000,
       body: bytesToHex(new TextEncoder().encode("hi")),
     });
+  });
+
+  it("sends sealRoomEpoch and parses the epoch key and secrets", async () => {
+    const { client, sent } = makeClient({
+      ok: true,
+      version: 1,
+      epoch: 3,
+      epochKey: "ab".repeat(32),
+      nextMembershipSeq: 4,
+      secrets: [
+        { recipient: OTHER, blob: "cd".repeat(93) },
+        { recipient: OWNER, blob: "ef".repeat(93) },
+      ],
+    });
+
+    const sealed = await client.sealRoomEpoch({
+      roomId: GOLDEN_INSTANCE,
+      owner: OWNER,
+      tag: "ZMR1",
+      epoch: 3,
+      members: [OTHER, OWNER],
+    });
+
+    expect(sentPayload(sent)).toEqual({
+      cmd: "sealRoomEpoch",
+      roomId: GOLDEN_INSTANCE,
+      owner: OWNER,
+      tag: "ZMR1",
+      epoch: 3,
+      members: [OTHER, OWNER],
+    });
+    expect(sealed).toMatchObject({
+      version: 1,
+      epoch: 3,
+      nextMembershipSeq: 4,
+      secrets: [
+        { recipient: OTHER, blob: "cd".repeat(93) },
+        { recipient: OWNER, blob: "ef".repeat(93) },
+      ],
+    });
+    expect(bytesToHex(sealed.epochKey)).toBe("ab".repeat(32));
+  });
+
+  it("sends openRoomSecret and parses the epoch key", async () => {
+    const { client, sent } = makeClient({
+      ok: true,
+      version: 1,
+      epoch: 3,
+      recipient: OWNER,
+      epochKey: "ab".repeat(32),
+    });
+
+    const opened = await client.openRoomSecret({
+      roomId: GOLDEN_INSTANCE,
+      owner: OWNER,
+      tag: "ZMR1",
+      epoch: 3,
+      blob: "cd".repeat(93),
+    });
+
+    expect(sentPayload(sent)).toEqual({
+      cmd: "openRoomSecret",
+      roomId: GOLDEN_INSTANCE,
+      owner: OWNER,
+      tag: "ZMR1",
+      epoch: 3,
+      blob: "cd".repeat(93),
+    });
+    expect(opened.recipient).toBe(OWNER);
+    expect(bytesToHex(opened.epochKey)).toBe("ab".repeat(32));
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ROOM_BODY_BYTE_LIMIT,
+  ROOM_ENCRYPTED_BYTE_LIMIT,
   ROOM_MESSAGE_LIMIT,
   formatRoomTime,
   roomComposerProblem,
@@ -169,6 +170,19 @@ describe("roomComposerProblem", () => {
     ).not.toBeNull();
     expect(roomComposerProblem("é".repeat(512))).toBeNull();
     expect(roomComposerProblem("é".repeat(513))).not.toBeNull();
+  });
+
+  it("uses the 995-byte plaintext cap in an encrypted epoch", () => {
+    expect(ROOM_ENCRYPTED_BYTE_LIMIT).toBe(995);
+    expect(
+      roomComposerProblem("a".repeat(ROOM_ENCRYPTED_BYTE_LIMIT), ROOM_ENCRYPTED_BYTE_LIMIT),
+    ).toBeNull();
+    expect(
+      roomComposerProblem(
+        "a".repeat(ROOM_ENCRYPTED_BYTE_LIMIT + 1),
+        ROOM_ENCRYPTED_BYTE_LIMIT,
+      ),
+    ).not.toBeNull();
   });
 });
 

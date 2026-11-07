@@ -208,20 +208,106 @@ order-dependence. The UI renders old epochs as history, never as current
 activity. Re-admission at a new epoch is natural; old messages stay valid under
 their old epoch.
 
-## 7. Encryption boundary (P3c)
+## 7. Encryption (P3c)
 
-The contract never interprets `body` or `secrets`. P3c adds:
+The contract never interprets `body` or `secrets`. Encryption is client-side and
+delegate-assisted; **there is no forward secrecy against key compromise**, only
+rotation-based revocation. UI copy must not claim otherwise.
 
-- a per-epoch symmetric key, wrapped once per member with ECIES and stored in
-  `secrets`;
-- `body` becomes ciphertext;
-- the delegate holds the unwrapped epoch key and rotates it when membership
-  changes.
+### 7.1 Keys
 
-Open for P3c: Ed25519→X25519 conversion (no zone state change, conversion
-caveats) versus a separate X25519 key (cleaner, but needs zone state and a
-re-key). P3a/P3b must not ship as "private": state is public and bodies may be
-plaintext.
+- Ed25519→X25519 **conversion**, not a separate key (a separate key would be a
+  zone or room re-key).
+- Public: `u = (1 + y) / (1 − y)`; reject weak/identity/low-order keys and
+  `u = 0`.
+- Private: `clamp(SHA-512(seed)[0..32])` (libsodium-compatible).
+- The delegate holds the seed; the UI never sees it. The delegate seals and
+  opens epoch keys; the UI caches decrypted epoch keys **in memory only** for
+  the session. Epoch keys are never persisted or exported.
+
+### 7.2 Delegate v12 commands
+
+`sealRoomEpoch` (owner only): validates tag/roomId/owner/epoch/ascending
+members (1..=9, includes owner), generates a fresh 32-byte epoch key inside the
+delegate, seals it to every member, returns
+`{version:1, epoch, epochKey, nextMembershipSeq, secrets:[{recipient,blob}]}`.
+
+`openRoomSecret` (any member): derives the local X25519 key, opens the blob,
+returns `{version:1, epoch, recipient, epochKey}`. Stateless and repeatable; no
+counters. A blob sealed to another member fails.
+
+Both are gated on delegate v12; a v11 delegate keeps the plaintext path and the
+room is labelled "not encrypted".
+
+### 7.3 Secret blob (93 bytes)
+
+| off | len | field |
+|---|---|---|
+| 0 | 1 | version `0x01` |
+| 1 | 32 | ephemeral X25519 public |
+| 33 | 12 | nonce |
+| 45 | 32 | AES-256-GCM ciphertext of the epoch key |
+| 77 | 16 | tag |
+
+```
+ikm  = X25519(eph_sk, recipient_u)            // reject all-zero
+salt = eph_pk || recipient_u
+info = "number:v1:room:secret" || "ZMR1" || roomId || owner || epoch_le
+       || recipient
+key  = HKDF-SHA256(ikm, salt, info, 32)
+aad  = version || eph_pk || nonce
+```
+
+### 7.4 Body envelope (UI, WebCrypto AES-256-GCM)
+
+| off | len | field |
+|---|---|---|
+| 0 | 1 | version `0x01` |
+| 1 | 12 | nonce |
+| 13 | n | ciphertext |
+| 13+n | 16 | tag |
+
+```
+key = epochKey
+aad = "number:v1:room:body" || "ZMR1" || roomId || owner || author || epoch_le
+```
+
+The contract cap stays 1024 bytes, so the plaintext composer cap is **995
+bytes** in an encrypted epoch. A body whose first byte is not `0x01` is legacy
+plaintext and renders with an "unencrypted" badge. A `0x01` body that fails to
+open renders "could not be read" and never falls back to plaintext.
+
+### 7.5 Rotation
+
+- Exactly one key per membership record. Rotate on every membership change
+  (add, remove, rebind, enable encryption). Never on messages.
+- Migration: a plaintext room writes `seq N+1` with the same members and fresh
+  secrets ("Enable encryption").
+- Seal and sign the same `members` array and the same `seq`; use
+  `max(latest.seq + 1, nextMembershipSeq)` to recover from a failed publish.
+- Removal is atomic: clear/rebind the slot, write the new membership with
+  fresh secrets for the remaining members. The removed member has no blob for
+  the new epoch and cannot read new messages; old epochs stay history.
+- **Hard lock:** while the zone-derived member set differs from the signed
+  membership, the composer is disabled (not merely warned). Otherwise a
+  removal that skips rotation leaves the epoch readable to the removed member.
+- History is decrypted on demand from each retained epoch's blob and cached in
+  memory. A message at an epoch with no blob for this member shows "not
+  readable for this epoch".
+
+### 7.6 Decisions
+
+- Delegate does not persist epoch keys and does not rotate in the background in
+  P3c.
+- AES-256-GCM for both the secret blob and the body; a ChaCha20-Poly1305 blob
+  (version `0x02`) is the documented fallback if wasm size demands it.
+- The `0x01` marker is fail-closed; a plaintext body at an encrypted epoch is
+  shown as unencrypted (self-DoS, not a boundary).
+- Readers rely on contract validation for membership authenticity; the UI does
+  not re-verify signatures, and `openRoomSecret` is intentionally stateless.
+- Delegate v12 requires the usual re-key: register v11 in `LEGACY_DELEGATES`,
+  record artifacts, and open each live zone once after deploying.
+
 
 ## 8. Artifacts and upgrades
 

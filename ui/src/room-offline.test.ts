@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OfflineRoomTransport, OFFLINE_ROOM_WELCOME_TIME } from "./room-offline";
+import {
+  OfflineRoomTransport,
+  OFFLINE_ROOM_WELCOME_TIME,
+  offlineEpochKey,
+} from "./room-offline";
 import {
   ROOM_MAX_MESSAGES,
   latestMembership,
   roomBodyToText,
   type RoomMessageV1,
 } from "./room-state";
+import { readRoomBody } from "./room-crypto";
 import { RoomError } from "./room-client";
-import { isLowerHex } from "./util";
+import { bytesToHex, isLowerHex } from "./util";
 
 const OWNER = "aa".repeat(32);
 const CHILD = "bb".repeat(32);
@@ -145,5 +150,67 @@ describe("OfflineRoomTransport", () => {
     expect(bodyText(state!.messages[state!.messages.length - 1])).toBe(
       "message 204",
     );
+  });
+
+  it("seals a deterministic epoch key and 93-byte blobs", async () => {
+    const transport = new OfflineRoomTransport(OWNER);
+    const sealed = await transport.sealEpoch(OWNER, 2, [OWNER, CHILD]);
+
+    expect(sealed.epochKey).toEqual(offlineEpochKey(OWNER, 2));
+    expect(sealed.nextMembershipSeq).toBe(2);
+    expect(sealed.secrets.map((secret) => secret.recipient)).toEqual([
+      OWNER,
+      CHILD,
+    ]);
+    for (const secret of sealed.secrets) {
+      expect(isLowerHex(secret.blob, 93 * 2)).toBe(true);
+      expect(secret.blob.startsWith("01")).toBe(true);
+    }
+
+    const opened = await transport.openEpoch(
+      OWNER,
+      2,
+      sealed.secrets[0].blob,
+    );
+    expect(opened).toEqual(sealed.epochKey);
+    await expect(
+      transport.openEpoch(OWNER, 2, "01"),
+    ).rejects.toMatchObject({ code: "crypto" });
+  });
+
+  it("encrypts messages after enabling encryption and stores no plaintext", async () => {
+    const transport = new OfflineRoomTransport(OWNER);
+    const state = await transport.updateMembership(OWNER, [CHILD], {
+      encrypt: true,
+    });
+    const membership = latestMembership(state)!;
+    expect(membership.secrets).toHaveLength(2);
+    expect(membership.secrets.every((secret) => secret.blob.length === 186)).toBe(
+      true,
+    );
+
+    const sent = await transport.sendMessage(OWNER, encoder.encode("secret room"));
+    const message = sent.messages[sent.messages.length - 1];
+    expect(message.epoch).toBe(membership.seq);
+    expect(message.body.startsWith("01")).toBe(true);
+    expect(message.body).not.toContain(
+      bytesToHex(encoder.encode("secret room")),
+    );
+
+    const key = await transport.epochKeyFor(OWNER, membership);
+    expect(key).not.toBeNull();
+    await expect(
+      readRoomBody(key, {
+        roomId: transport.roomIdFor(OWNER),
+        owner: OWNER,
+        author: OWNER,
+        epoch: membership.seq,
+      }, message.body),
+    ).resolves.toEqual({ kind: "encrypted", text: "secret room" });
+
+    // The body is not decoded as legacy plaintext either.
+    const raw = transport.snapshot(OWNER)!;
+    const stored = raw.messages[raw.messages.length - 1];
+    expect(stored.body).toBe(message.body);
   });
 });

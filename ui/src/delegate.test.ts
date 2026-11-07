@@ -672,6 +672,7 @@ describe("delegate transport", () => {
     );
 
     const automationDefaults = {
+      version: 11,
       configured: false,
       codeHashes: [],
       matchedCodeHash: null,
