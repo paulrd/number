@@ -2,8 +2,11 @@
 
 Durable state for the project. Read this with `README.md`, then the design docs:
 `DESIGN.md` (v4/v5), `DESIGN-v6.md` (private address book, signed names),
+`DESIGN-network.md` (regions, onboarding, rooms; growth deferred),
+`DESIGN-regions-p1.md` (stage-1 dataset, contracts, picker),
 `DESIGN-views.md` (what the two surfaces may contain, + revision 3),
-`DESIGN-payments-lca.md` (payments whose endpoint is the LCA).
+`DESIGN-payments-lca.md` (payments whose endpoint is the LCA),
+`DESIGN-rooms.md` (members-room contract, P3a).
 
 The app's display name is **Tally**; the repository, crate names, WASM
 filenames and `number.*` secret keys stay `number`, because renaming them
@@ -17,14 +20,16 @@ changes the compiled bytes and re-keys every zone.
 | Live URL | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
-| Delegate | **v10** `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV`, code `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` |
+| Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (recorded; live nodes still v10 until published) |
+| Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM` (not pinned in the UI yet) |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1793625118`, bundle `assets/index-CLPmTfnE.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1794067282`, bundle `assets/index-BFPNfg9F.js` + lazy `assets/picker-B-_fJI4b.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-02, `9c26acb`; no WASM change, contract/delegate generations unchanged |
+| Last UI publish | 2026-11-07; site `1794067282`, no WASM change, contract/delegate generations unchanged |
+| Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
 eight child slots and a **private** address book in the delegate; a tree of
@@ -36,6 +41,235 @@ with any link can pay or be paid, including when an endpoint is the LCA
 background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
+
+## Where we left off (2026-11-07) — regions P1
+
+### Live now
+
+- **Region dataset stage 1 (depth ≤7) is live.** 178 shards, 1,481,182 rows,
+  35,517,561 row bytes; manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU`
+  (seq 1), publisher verifying key
+  `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`.
+  Published to 7509 in 2m50s; verified the 8-shard sample from 7511 and **all
+  178 shards + the manifest from 7512** (179 checks, exit 0).
+- **UI constants are set** in `ui/src/region/constants.ts`: the manifest id
+  above and the raw manifest code hash
+  `4DfUwwoSPpfEPW5sSRjBGVc44BfAB4xn5UckqcqgqPGx`.
+- **Live browser smoke passed** through the dev proxy against 7509:
+  `(69,179)` resolves to `aacbea` (octal `002140`, depth 6, eight child rows,
+  no console errors). Real manifest and shards, not the fixture.
+- **The website is republished.** Live site `1794067282` serves
+  `assets/index-BFPNfg9F.js` and the lazy picker
+  `assets/picker-B-_fJI4b.js` (which carries both live constants) from all
+  four nodes; hashes match the local build. The picker is now live for users.
+  Note: the manifest ids live in the lazy `picker-*.js` chunk, not
+  `index-*.js`; `npm run test:e2e:offline` builds `dist-offline`, not `dist`,
+  so build with `npm run build` before publishing.
+- The 4-shard fixture manifest `BzasDcLJ1HK3SEN7pGCd3sdK91brb5QCcGbFyDQBLLBG`
+  (ephemeral key) is a throwaway on the network. It is **not** a UI constant
+  and must not be reused.
+
+### P1 complete (2026-11-07)
+
+Published with:
+
+```bash
+fdev --port 7509 website update --key number-local ui/dist
+# -> version 1794067282, 404628 bytes compressed, 9 files
+```
+
+Pre-publish: UI 271 tests and 24 offline e2e passed; bundled
+`number_contract.wasm` and `number_delegate.wasm` byte-identical to
+`published/`. Post-publish: HTML and all four assets fetched from
+7509/7511/7512/7513 and matched the local build by SHA-256. No WASM change,
+no re-key.
+
+### What is built
+
+- `region/wire`, `region/blob`, `region/manifest`: the two contracts and the
+  shared envelope/summary codec. Raw code hashes: blob
+  `H1u41bZHHy9zN19QJK3kGCmEBhFhzmh86k4GJqiMiSxN`, manifest
+  `4DfUwwoSPpfEPW5sSRjBGVc44BfAB4xn5UckqcqgqPGx`.
+- `region/tool`: exporter, signer, publisher, verifier. Export reproduces the
+  design numbers exactly; publish has a resumable ledger and GET-verifies every
+  PUT; verify samples or checks all.
+- `ui/src/region/`: path codec, wire parser, geometry, dataset client (manifest
+  once, shard LRU, verification, `lookupRow`/`childrenOf`/`resolve`), offline
+  fixture, and the lazy Leaflet picker.
+- `fixtures/regions/`: cross-language golden (72-row tree, 4 shards) used by the
+  Rust tool test and the TypeScript parser tests.
+- `ui/e2e/live-region.mjs`: manual live manifest read (no CI).
+- CI has a `regions` job; `make check` runs `regions-check`.
+
+Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **83
+delegate**, **299 UI**, **26 offline e2e** (the region tests are Axe-clean and
+make no external requests).
+
+### P2 implemented (2026-11-07); next is P3/P4 (no contract change)
+
+- Show a zone's region as its octal address (slot `i` = dataset child digit
+  `i`) and draw its cell and assignable child cells on the picker.
+- Add the designation step to admission: the parent writes the slot first
+  (the region assignment), the candidate signs `parent` after seeing the
+  assigned cell. Ideal = the published child cell containing the newcomer;
+  otherwise any free slot. No moves this iteration.
+- Root = world; match order is **shallowest zone with a free slot**; growth and
+  re-organization are deferred (`DESIGN-network.md` §4). The shallowest-first
+  walk is the P4 newcomer path; P2 only fixes the invariant.
+- Then P3 (rooms) and P4 (`?root=` onboarding).
+
+**P2 decisions (2026-11-07, from the design pass):**
+
+- Free-slot ranking: published cell containing the point, then other free
+  published cells by distance/population/slot, provisional cells last.
+- Keep one-based `Slot 1–8` labels in Advanced and always show the zero-based
+  address digit and resulting address beside them.
+- Do not lock the contact field on a written slot in P2 (existing edit/clear
+  behaviour stays); document it as a move-shaped operation for §4.
+- Clearing a confirmed child slot stays allowed with a confirmation that names
+  the freed region.
+- Candidate transport in P2 is the existing "Add a parent" flow (paste the
+  parent id); no `?join=` link until P4. The review screen is gated on reading
+  the parent's slot, and the candidate cannot sign without seeing it.
+- Provisional children draw as one ancestor highlight plus a labelled list row,
+  never eight synthetic rectangles.
+- Simple surface stays map-free: the quiet octal address is the region and
+  mutual child rows gain their own address.
+- Work is split: pass 1 = pure resolution/ranking + picker zone mode; pass 2 =
+  assignment dialog + candidate review + wiring.
+
+**What shipped (pass 1 + pass 2):**
+
+- `region/paths` gained `addressToPath`/`pathToAddress`; `RegionDataset` gained
+  `nearestPublishedAncestor`; new `zone-region.ts` (address + slots -> own cell,
+  ancestor, eight child regions, free count) and `assignment.ts` (ranking and
+  warning strings). All unit-tested.
+- The Advanced region dialog now has **This zone** (own cell, legend, eight
+  child cells with slot/letter/address/state, free count) and **A place**
+  (the P1 point lookup). Root draws the world and its eight depth-1 cells;
+  provisional cells use the nearest published ancestor, never a synthetic
+  rectangle. Map is `aria-hidden`; the list/coordinate form is the keyboard
+  path.
+- `#add-child-slot` opens **Assign a child region**: optional newcomer
+  location, ranked free cells (contained published cell first, then distance/
+  population/slot, provisional last), warnings, then the existing slot editor
+  writes the chosen slot. That write is the designation.
+- The candidate's parent dialog reads the selected parent's board, derives the
+  prospective address from its slot (`childSlotIndex`), and shows
+  address/slot/cell plus a **See it on the map** review before signing. Missing
+  or unreadable parents render explicit states; save stays available for the
+  existing pending-link flow.
+- Slot cards, unconfirmed rows and simple child rows show their octal region.
+- `#board-region-state` fills with Published / Provisional / Root when the zone
+  map is opened.
+
+**Not in P2 (recorded for P3/P4):**
+
+- The shallowest-zone-with-a-free-slot walk and `?root=` onboarding are P4.
+- No `?join=` invite in P2: the candidate uses the existing parent-id flow, and
+  the preview is informational, not a hard admission gate.
+- Editing a written slot's contact is still allowed (a move-shaped operation;
+  §4). Clearing still needs the existing confirmation.
+- `#board-region-state` is filled only after opening the region dialog, so no
+  dataset load happens on page load.
+- The live site has **not** been republished with P2; it still serves the P1
+  picker (`1794067282`). Publish after a maintainer review.
+
+### P3a implemented (2026-11-07): members room
+
+The implementation spec is `DESIGN-rooms.md`. Decisions taken there:
+
+- **Separate WASM per room kind.** `room/` accepts `ZMR1` only; the candidate
+  room (`ZCR1`) will be its own crate in P4. A shared WASM would force the P4
+  request queue into today's code hash or re-key every members room.
+- **History-based removal.** Old-epoch messages stay valid history; a removed
+  member is rejected at the new epoch. This keeps merge associative and allows
+  re-admission. The UI must render old epochs as history.
+- **Membership history window 32, messages 200.** Messages are keyed by
+  `BLAKE3(sig)[0..16]`, ordered by `(time, id)`, and filtered against the
+  retained epoch memberships.
+- **Contract never encrypts.** Bodies and epoch `secrets` are opaque; P3c adds
+  client-side ECIES. The secrets shape is frozen now so P3c needs no re-key.
+- **Multi-writer delta policy:** skip invalid deltas rather than rejecting the
+  update; merge memberships first, then messages.
+- **Artifacts deferred to P3b:** P3a adds the crate, `make room`/`room-check`,
+  and CI. `published/room/` and its manifest arrive when the UI pins the hash,
+  so the zone artifact gate stays independent.
+- P3a exit: native tests prove exchange, outsider rejection, removal at the new
+  epoch, old-message retention, and merge determinism; zone artifacts unchanged.
+
+**What shipped (P3a):**
+
+- New standalone `room/` crate (`number-room`, stdlib `0.12.1`, own lockfile):
+  v1 state, owner-signed membership history (`seq` = epoch), 9-member cap,
+  32-revision window, 200 bounded messages, opaque bodies/secrets, canonical
+  membership/message bytes, join-semilattice merge, summary/full-catch-up
+  delta, lenient multi-writer `update_state`, and 21 native tests including
+  proptest merge laws.
+- `fixtures/rooms/golden_v1.json` + `room/examples/gen_golden.rs`; regenerating
+  is byte-stable. Rust consumes it now; TypeScript in P3b.
+- Build plumbing: `make room` (19 s, 425,227-byte raw WASM), `make room-check`,
+  `make check` includes it, a CI `room` job, and `.gitignore` entries.
+  `make check-artifacts` still proves the zone/delegate bytes unchanged.
+- Recorded room artifact: `published/room/number_room.wasm` (425,227 bytes),
+  base58 `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`, hex
+  `b9c54630c1e7ecac451a833e7e4d81739cc62832e6d88373b3c089e81e85c638`.
+  `make room-record` / `make room-check-artifacts`; `make check-artifacts`
+  verifies the sibling manifest and still proves the zone/delegate bytes
+  unchanged. Not pinned in the UI yet; P3b2 adds the constant/client.
+
+**P3b1 shipped (delegate v11):** `signRoomMembership` and `signRoomMessage`
+with canonical bytes built in the delegate, per-room membership/message
+counters, golden-fixture parity with the room crate, and the delegate recorded
+as v11 (`3CPsh…` / `BRXS…`). v10 is in `LEGACY_DELEGATES`. No deploy: live
+nodes still run v10; when v11 ships, open each zone once so the seed migrates
+and the Background prompt is asked again.
+
+**Next (P3b2):** the room client with 36-byte parameters and the pinned room
+code hash (`published/room/manifest.json`), membership recomputed from zone
+slots with a mismatch warning, the Advanced room panel, and a plaintext
+send/render path. Then P3c adds client-side ECIES; do not present plaintext as
+private.
+
+### Gotchas worth remembering
+
+- **The code hash is BLAKE3 of the raw WASM**, never the packaged file (the
+  package embeds a container). Hashing the packaged file gives a different id.
+- `cargo fmt` can change the manifest hash (panic-location line numbers). Format
+  before recording; `regions-check` enforces `fmt --check`.
+- `make regions-tool` builds **release**; sign/publish/verify use that binary.
+  The earlier "`regions-tool` has no publish command" was a stale release build
+  from before the subcommands were added.
+- `publish --state` correctly overrides the 1-byte state bundled by
+  `fdev build` (confirmed live).
+- `region/` (crates) vs `/regions/` (ignored generated data).
+- The dataset is a **prefix**: below `max_path_len` (7) cells are provisional.
+  The zone tree may grow deeper; the map cannot distinguish those zones until
+  S2. A deeper stage refines cells in place, without moving zones.
+- The publisher seed is held by the operator outside the repo and is needed
+  only to sign a new manifest seq. Losing it freezes updates; leaking it lets
+  someone re-sign the index. The node ids on the VPS are **not** this key.
+
+### Commands
+
+```bash
+# contracts (canonical remap) and tool
+make regions-wasm && make regions-tool && make regions-check
+
+# export the real stage (already done; regenerates .build/regions)
+region/tool/target/release/regions-tool export \
+  --db trie.db --out .build/regions --max-depth 7 --target 262144 \
+  --blob-code-wasm .build/regions/blob.code.wasm \
+  --expect-rows 1481182 --expect-row-bytes 35517561 --expect-shards 178
+
+# sign (needs the operator seed), publish, verify
+REGIONS_PUBLISHER_SEED="$(cat <seed-file>)" make regions-sign
+make regions-publish     # 7509, 3 workers (override REGIONS_PUBLISH_PORT)
+make regions-verify      # 7511, sample 8 (override REGIONS_VERIFY_PORT)
+
+# UI
+cd ui && npm run build && npm test && npm run test:e2e:offline
+```
 
 ## Open items
 
@@ -137,8 +371,8 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 74, UI 247,
-offline e2e 23, `verify-merge` 14 laws / 0 violations.
+Expected at the time of writing: contract 123 tests, delegate 83, room 21, UI
+299, offline e2e 26, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -180,6 +414,46 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-07 — P3b1: delegate v11 room signing**
+- New `signRoomMembership` / `signRoomMessage` commands, strict validation,
+  exact DESIGN-rooms §3 bytes duplicated in `delegate/src/room.rs`, per-room
+  counters, and `RoomMessageResponse`.
+- 9 new tests (83 total) including byte/signature/id parity with
+  `fixtures/rooms/golden_v1.json`.
+- Delegate re-key recorded: v11 `3CPsh…` / `BRXS…`; v10 appended to
+  `LEGACY_DELEGATES`; contract unchanged; room artifact unchanged.
+- No deploy. When v11 ships, open each live zone once (seed migration and
+  Background prompt).
+
+**2026-11-07 — P3a: members-room contract**
+- New standalone `room/` crate implementing `DESIGN-rooms.md`: owner-signed
+  membership history, bounded messages, opaque bodies/secrets, deterministic
+  merge, summary/catch-up delta, lenient multi-writer updates.
+- 21 native tests (signatures, bounds, removal/re-admission, merge laws,
+  top-200/top-32, delta caps, replay); byte-stable golden vector.
+- `make room`, `make room-check`, CI `room` job; zone/delegate artifacts still
+  byte-identical. Room code hash provisional at `DWAts…` (not pinned).
+- No contract/delegate/UI behavior changed; nothing published.
+
+**2026-11-07 — P2: regions on the map and designation at admission**
+- Pure layer: address codec helpers, `nearestPublishedAncestor`,
+  `resolveZoneRegion`, slot ranking/warnings; +35 region tests.
+- Advanced region dialog: **This zone** (own cell + eight child cells, published
+  or provisional, list as keyboard path) and **A place** (P1 lookup).
+- `Add a child slot` -> **Assign a child region** (optional location, ranked
+  cells, then the existing editor writes the designation).
+- Candidate parent dialog shows the assigned address/slot/cell before signing,
+  with a map review; no save-flow change.
+- Slot/unconfirmed/simple rows show octal addresses. UI only; no contract,
+  delegate or signing change. 299 unit / 26 offline e2e pass.
+- Not published: the live site remains at `1794067282` (P1 picker).
+
+**2026-11-07 — site republished with the region picker**
+- `fdev --port 7509 website update --key number-local ui/dist` → version
+  `1794067282`, 9 files / 404628 bytes. No WASM change, no re-key.
+- Live bundle `index-BFPNfg9F.js` + lazy `picker-B-_fJI4b.js`; all four nodes
+  verified by SHA-256. P1 is complete; P2 starts next.
 
 **2026-11-02 — zones (`8271776`, site `1793620651`; copy `794f870`, site `1793621397`)**
 - User-facing copy says **zone**; identifiers, ids and signing domains keep
@@ -264,8 +538,12 @@ Newest first. **Never remove an entry**; the record gate and
 - Unmigratable: `6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57` (unsettled v4),
   `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` (v1), `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd`
   (pre-remap build), `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` (first v1).
-- Delegate **v10** `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV` /
-  `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` — current.
+- Delegate **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd` /
+  `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` — members-room signing;
+  current in the repo, not deployed.
+- Delegate v10 `6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV` /
+  `AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe` — LCA payments; superseded by
+  v11, registered.
 - Delegate v9 `9a34iJr7yK1RRV3tAu3jp7nTSkPYMb6ySv9HeTGXh7vA` / `Cnfyn…` — v6
   data layer; registered.
 - Delegate v8 `8G5M9XNyrZC7kYmpnrJPtBA3N29DdmhGfAa4KoMfdwWg` / `3PoWy…` —

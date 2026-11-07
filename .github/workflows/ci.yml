@@ -57,6 +57,48 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
+  room:
+    name: Room (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: room
+      - name: Check and test
+        working-directory: room
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+  regions:
+    name: Regions (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            region/wire -> target
+            region/blob -> target
+            region/manifest -> target
+            region/tool -> target
+      # The exporter's golden test drives the sqlite3 CLI; the tool has no
+      # native SQLite dependency.
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+      - name: Check and test
+        run: make regions-check
+
   reproducible:
     name: Reproducible WASM (byte equality)
     runs-on: ubuntu-latest

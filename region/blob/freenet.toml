@@ -1,0 +1,8 @@
+[contract]
+type = "standard"
+lang = "rust"
+
+# Published with an explicit `--state` for every shard; this placeholder is
+# only what `fdev build` needs to package the code and is never published.
+[state]
+files = ["initial_state.bin"]

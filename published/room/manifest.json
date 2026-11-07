@@ -1,0 +1,17 @@
+{
+  "note": "Committed reproducible room artifact. `make room-check-artifacts` rebuilds and compares bytes; `make room-record` is the only supported way to change this file. This registry is independent of published/manifest.json.",
+  "toolchain": "1.98.0",
+  "remap": {
+    "cargoHome": "/cargo",
+    "rustupHome": "/rustup",
+    "repoRoot": "/build"
+  },
+  "room": {
+    "codeHash": "DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM",
+    "codeHashHex": "b9c54630c1e7ecac451a833e7e4d81739cc62832e6d88373b3c089e81e85c638",
+    "file": "published/room/number_room.wasm",
+    "generations": [
+      "DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM"
+    ]
+  }
+}

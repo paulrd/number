@@ -17,9 +17,10 @@ BUILD_DIR ?= .build
 UI := ui
 CONTRACT := contract
 DELEGATE := delegate
+ROOM := room
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate check check-artifacts record-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate room regions-wasm regions-tool regions-sign regions-publish regions-verify regions-check check room-check check-artifacts record-artifacts room-record room-check-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -38,19 +39,78 @@ contract:
 delegate:
 	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate delegate --no-ui
 
+room:
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate room --no-ui
+
+# Region contracts + packaged artifacts (blob and manifest). The packaged files
+# are what `fdev publish --code` takes; the copies under .build/regions/ are the
+# paths the exporter/publisher spec names.
+regions-wasm:
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate regions --no-ui
+	mkdir -p $(BUILD_DIR)/regions
+	cp region/blob/build/freenet/region_blob $(BUILD_DIR)/regions/blob.wasm
+	cp region/manifest/build/freenet/region_manifest $(BUILD_DIR)/regions/manifest.wasm
+	# The code hash (and therefore every contract id) is BLAKE3 of the RAW
+	# wasm; the packaged file embeds a container and hashes differently.
+	cp $(BUILD_DIR)/region/blob/wasm32-unknown-unknown/release/region_blob.wasm $(BUILD_DIR)/regions/blob.code.wasm
+	cp $(BUILD_DIR)/region/manifest/wasm32-unknown-unknown/release/region_manifest.wasm $(BUILD_DIR)/regions/manifest.code.wasm
+
+# The release binary is what the sign/publish/verify commands use; debug and
+# release can drift if only one is rebuilt.
+REGIONS_TOOL := region/tool/target/release/regions-tool
+REGIONS_PUBLISH_PORT ?= 7509
+REGIONS_VERIFY_PORT ?= 7511
+
+regions-tool:
+	cd region/tool && cargo build --release --locked
+
+# Needs REGIONS_PUBLISHER_SEED (64 hex) in the environment or --key-file.
+regions-sign: regions-tool
+	$(REGIONS_TOOL) sign --out $(BUILD_DIR)/regions \
+	  --manifest-code-wasm $(BUILD_DIR)/regions/manifest.code.wasm
+
+regions-publish: regions-tool
+	$(REGIONS_TOOL) publish --out $(BUILD_DIR)/regions \
+	  --port $(REGIONS_PUBLISH_PORT) --workers 3 --fdev $(FDEV)
+
+regions-verify: regions-tool
+	$(REGIONS_TOOL) verify --out $(BUILD_DIR)/regions \
+	  --port $(REGIONS_VERIFY_PORT) --sample 8 --fdev $(FDEV)
+
+regions-check:
+	cd region/wire && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	cd region/blob && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	cd region/manifest && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	cd region/tool && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+
+room-check:
+	cd $(ROOM) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+
 check:
 	cd $(CONTRACT) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 	cd $(DELEGATE) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	$(MAKE) room-check
+	$(MAKE) regions-check
 	cd $(UI) && npm run build && npm test
 
 # Byte-equality gate: a fresh reproducible build must match published/.
+# The zone/delegate gate runs first; the room registry is checked after.
 check-artifacts:
 	./scripts/check-artifacts.sh
+	$(MAKE) room-check-artifacts
 
 # Record the current build as the published artifact set (refuses to orphan a
 # generation that is missing from ui/src/migrations.ts).
 record-artifacts:
 	FDEV=$(FDEV) ./scripts/record-artifacts.sh
+
+# Room artifact registry, independent of published/manifest.json. Re-recording
+# is append-only (older room generations are preserved newest-first).
+room-record:
+	./scripts/record-room.sh
+
+room-check-artifacts:
+	./scripts/check-room-artifact.sh
 
 ui:
 	cd $(UI) && npm run build
@@ -137,6 +197,7 @@ e2e-gateway:
 clean:
 	cd $(CONTRACT) && cargo clean
 	cd $(DELEGATE) && cargo clean
+	cd $(ROOM) && cargo clean
 	rm -rf $(BUILD_DIR) $(UI)/dist $(UI)/node_modules
 	rm -f $(UI)/contract_code_hash*.json $(UI)/contract_code_hash.txt \
 	      $(UI)/delegate_key*.json $(UI)/delegate_key.txt \

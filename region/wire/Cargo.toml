@@ -1,0 +1,13 @@
+[package]
+name = "region-wire"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Standalone crate, like the contracts: a lock of its own so an unrelated
+# dependency bump cannot change the manifest WASM hash.
+[workspace]
+
+[dependencies]
+blake3 = "=1.8.7"

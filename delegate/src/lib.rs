@@ -22,8 +22,10 @@ use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub mod advance;
+pub mod room;
 
 use advance::{AdvanceError, BoardState, LegPlan, OwnBoard, audit_slots};
+use room::RoomSecret;
 
 /// Number of slots on a board.
 pub const SLOT_COUNT: usize = 8;
@@ -42,9 +44,9 @@ pub const USER_ID_HEX_LEN: usize = 64;
 /// Length of the webapp contract instance id carried in the delegate params.
 pub const WEBAPP_ID_LEN: usize = 32;
 
-/// The delegate protocol version; v10 routes payments whose source or
-/// destination is the LCA.
-pub const DELEGATE_VERSION: u32 = 10;
+/// The delegate protocol version; v11 adds members-room membership and message
+/// signing (`DESIGN-rooms.md` §3) alongside the v10 payment routing.
+pub const DELEGATE_VERSION: u32 = 11;
 
 /// Version of the export/import payload shape (independent of the wire state
 /// version). Version 1 payloads are accepted by `import`.
@@ -90,6 +92,15 @@ pub const INBOX_KEY: &[u8] = b"number.v8.inbox";
 pub const DEDUP_KEY: &[u8] = b"number.v8.dedup";
 /// Secret-store key holding the bounded audit log.
 pub const AUDIT_KEY: &[u8] = b"number.v8.audit";
+
+/// Prefix for the per-room v11 sequence counters.
+///
+/// Keys are `number.v11.room.<roomId>.membershipSeq` and
+/// `number.v11.room.<roomId>.messageSeq`. These are deliberately not part of
+/// the export payload: no room counters can exist before v11, so a v10 export
+/// imported into v11 cannot lose one. Add them to the payload version when a
+/// room can predate the delegate.
+pub const ROOM_COUNTER_PREFIX: &str = "number.v11.room.";
 
 /// Bootstrap at most this many subscribes per invocation.
 pub const MAX_BOOTSTRAP_SUBSCRIBES: usize = 4;
@@ -801,6 +812,28 @@ enum Request {
         seq: u64,
         entries: Vec<Adjustment>,
     },
+    /// Sign a members-room membership record (`DESIGN-rooms.md` §3).
+    #[serde(rename = "signRoomMembership")]
+    SignRoomMembership {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        owner: String,
+        tag: String,
+        seq: u64,
+        members: Vec<String>,
+        secrets: Vec<RoomSecret>,
+    },
+    /// Sign one members-room message; the delegate assigns the per-author seq.
+    #[serde(rename = "signRoomMessage")]
+    SignRoomMessage {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        owner: String,
+        tag: String,
+        epoch: u64,
+        time: i64,
+        body: String,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
@@ -916,6 +949,16 @@ pub struct SignResponse {
     pub sig: String,
 }
 
+/// `{"ok":true,"author":"<64 hex>","seq":7,"sig":"<128 hex>"}` for a signed
+/// room message. `seq` is delegate-assigned, never client-supplied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMessageResponse {
+    pub ok: bool,
+    pub author: String,
+    pub seq: u64,
+    pub sig: String,
+}
+
 /// `{"ok":true,"hasSeed":false}` before first use, or
 /// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1020,6 +1063,7 @@ pub enum Response {
     Identity(IdentityResponse),
     Sign(SignResponse),
     Adjustment(AdjustmentResponse),
+    RoomMessage(RoomMessageResponse),
     Contacts(ContactsResponse),
     Status(Box<StatusResponse>),
     Export(ExportResponse),
@@ -1269,6 +1313,36 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 Err(error) => Response::error(error),
             }
         }
+        Request::SignRoomMembership {
+            room_id,
+            owner,
+            tag,
+            seq,
+            members,
+            secrets,
+        } => {
+            match sign_room_membership_with(store, &room_id, &owner, &tag, seq, &members, &secrets)
+            {
+                Ok(sig) => Response::Sign(SignResponse { ok: true, sig }),
+                Err(error) => Response::error(error),
+            }
+        }
+        Request::SignRoomMessage {
+            room_id,
+            owner,
+            tag,
+            epoch,
+            time,
+            body,
+        } => match sign_room_message_with(store, &room_id, &owner, &tag, epoch, time, &body) {
+            Ok((author, seq, sig)) => Response::RoomMessage(RoomMessageResponse {
+                ok: true,
+                author,
+                seq,
+                sig,
+            }),
+            Err(error) => Response::error(error),
+        },
         Request::Configure {
             code_hashes,
             address,
@@ -1874,6 +1948,102 @@ pub fn sign_adjustment_with(
     Ok(hex::encode(signature.to_bytes()))
 }
 
+/// Validate, sign, then advance a room's membership sequence counter.
+///
+/// This is an owner-only record: the `owner` in the signing bytes is the room
+/// owner, and this delegate refuses to sign it unless its own key is that
+/// owner. The counter is per room and is written only after a successful
+/// signature, exactly like the other records.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_room_membership_with(
+    store: &mut impl SecretStore,
+    room_id: &str,
+    owner: &str,
+    tag: &str,
+    seq: u64,
+    members: &[String],
+    secrets: &[RoomSecret],
+) -> Result<String, String> {
+    room::validate_tag(tag)?;
+    room::decode_room_id(room_id)?;
+    room::validate_key("owner", owner)?;
+    room::membership_error(owner, seq, members, secrets)?;
+
+    let next_seq = read_room_next_seq(store, room_id, "membershipSeq")?;
+    if seq < next_seq {
+        return Err(format!(
+            "stale seq {seq} for room membership; need at least {next_seq}"
+        ));
+    }
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("seq {seq} is too large to advance"))?;
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let local = hex::encode(signing_key.verifying_key().to_bytes());
+    if local != owner {
+        return Err(format!(
+            "refused room membership for owner {owner}: this delegate's key is {local}"
+        ));
+    }
+
+    let bytes = room::membership_signing_bytes(tag, owner, seq, members, secrets)?;
+    let signature = signing_key.sign(&bytes);
+
+    if !store.set_secret(
+        &room_counter_key(room_id, "membershipSeq"),
+        &following.to_le_bytes(),
+    ) {
+        return Err(format!(
+            "failed to persist membershipSeq for room {room_id}"
+        ));
+    }
+
+    Ok(hex::encode(signature.to_bytes()))
+}
+
+/// Validate and sign one room message, assigning and advancing its sequence.
+///
+/// The author is always this delegate's key. `seq` starts at 1 and is read,
+/// signed and then incremented; a failed counter write is an error, so the same
+/// seq is never issued twice.
+pub fn sign_room_message_with(
+    store: &mut impl SecretStore,
+    room_id: &str,
+    owner: &str,
+    tag: &str,
+    epoch: u64,
+    time: i64,
+    body: &str,
+) -> Result<(String, u64, String), String> {
+    room::validate_tag(tag)?;
+    room::decode_room_id(room_id)?;
+    room::validate_key("owner", owner)?;
+    room::message_error(epoch, body)?;
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let author = hex::encode(signing_key.verifying_key().to_bytes());
+
+    let seq = read_room_next_seq(store, room_id, "messageSeq")?;
+    let following = seq
+        .checked_add(1)
+        .ok_or_else(|| format!("message seq {seq} is too large to advance"))?;
+
+    let bytes = room::message_signing_bytes(tag, owner, &author, epoch, seq, time, body)?;
+    let signature = signing_key.sign(&bytes);
+
+    if !store.set_secret(
+        &room_counter_key(room_id, "messageSeq"),
+        &following.to_le_bytes(),
+    ) {
+        return Err(format!("failed to persist messageSeq for room {room_id}"));
+    }
+
+    Ok((author, seq, hex::encode(signature.to_bytes())))
+}
+
 /// Build the canonical v5 adjustments signing bytes (`DESIGN-v4.1-v5.md`).
 pub fn adjustments_signing_bytes(seq: u64, entries: &[Adjustment]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(64 + entries.len() * 40);
@@ -2088,6 +2258,31 @@ fn push_optional_str(bytes: &mut Vec<u8>, value: Option<&str>) {
 
 fn next_seq_key(slot: u8) -> Vec<u8> {
     format!("{NEXTSEQ_PREFIX}{slot}").into_bytes()
+}
+
+/// Secret-store key for a per-room counter, e.g.
+/// `number.v11.room.<roomId>.membershipSeq`.
+fn room_counter_key(room_id: &str, counter: &str) -> Vec<u8> {
+    format!("{ROOM_COUNTER_PREFIX}{room_id}.{counter}").into_bytes()
+}
+
+fn read_room_next_seq(
+    store: &impl SecretStore,
+    room_id: &str,
+    counter: &str,
+) -> Result<u64, String> {
+    match store.get_secret(&room_counter_key(room_id, counter)) {
+        None => Ok(1),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "stored {counter} for room {room_id} has invalid length {} (expected 8)",
+                    bytes.len()
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+    }
 }
 
 fn read_next_seq(store: &impl SecretStore, slot: u8) -> Result<u64, String> {
@@ -5734,5 +5929,368 @@ mod tests {
         // Non-final hops.
         assert_eq!(final_leg("3", &intent("31", "", 0)), FinalLeg::None);
         assert_eq!(final_leg("3", &intent("", "31", 0)), FinalLeg::None);
+    }
+
+    // --- v11 members-room signing ------------------------------------------
+
+    const ROOM_GOLDEN_JSON: &str = include_str!("../../fixtures/rooms/golden_v1.json");
+    const ROOM_ID: &str = "6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV";
+    const ROOM_AUTHOR: &str = "66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a";
+    const ROOM_OWNER: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+
+    fn room_golden() -> Value {
+        serde_json::from_str(ROOM_GOLDEN_JSON).expect("golden room fixture is valid JSON")
+    }
+
+    fn seed_from_hex(value: &str) -> [u8; 32] {
+        hex::decode(value)
+            .expect("seed is hex")
+            .try_into()
+            .expect("seed is 32 bytes")
+    }
+
+    fn room_membership_payload(
+        room_id: &str,
+        owner: &str,
+        tag: &str,
+        seq: u64,
+        members: &[&str],
+        secrets: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let secrets: Vec<Value> = secrets
+            .iter()
+            .map(|(recipient, blob)| json!({ "recipient": recipient, "blob": blob }))
+            .collect();
+        serde_json::to_vec(&json!({
+            "cmd": "signRoomMembership",
+            "roomId": room_id,
+            "owner": owner,
+            "tag": tag,
+            "seq": seq,
+            "members": members,
+            "secrets": secrets,
+        }))
+        .expect("room membership request serializes")
+    }
+
+    fn room_message_payload(
+        room_id: &str,
+        owner: &str,
+        tag: &str,
+        epoch: u64,
+        time: i64,
+        body: &str,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "signRoomMessage",
+            "roomId": room_id,
+            "owner": owner,
+            "tag": tag,
+            "epoch": epoch,
+            "time": time,
+            "body": body,
+        }))
+        .expect("room message request serializes")
+    }
+
+    #[test]
+    fn golden_room_membership_vector() {
+        let golden = room_golden();
+        let owner_seed = seed_from_hex(golden["owner_seed_hex"].as_str().unwrap());
+        let owner = golden["owner_vk_hex"].as_str().unwrap();
+        let membership = &golden["membership"];
+        let expected_sig = membership["sig_hex"].as_str().unwrap();
+        let expected_bytes = membership["signing_bytes_hex"].as_str().unwrap();
+
+        let record = &golden["state"]["memberships"][0];
+        let seq = record["seq"].as_u64().unwrap();
+        let members: Vec<String> = record["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let secrets: Vec<RoomSecret> = record["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| RoomSecret {
+                recipient: value["recipient"].as_str().unwrap().into(),
+                blob: value["blob"].as_str().unwrap().into(),
+            })
+            .collect();
+
+        let mut store = store_with_seed(owner_seed);
+        let payload = serde_json::to_vec(&json!({
+            "cmd": "signRoomMembership",
+            "roomId": ROOM_ID,
+            "owner": owner,
+            "tag": golden["tag"],
+            "seq": seq,
+            "members": members,
+            "secrets": secrets,
+        }))
+        .expect("golden membership request serializes");
+
+        let response = call(&mut store, &payload);
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"], expected_sig);
+
+        // Pin the canonical bytes, not just the signature.
+        let bytes = room::membership_signing_bytes("ZMR1", owner, seq, &members, &secrets).unwrap();
+        assert_eq!(hex::encode(&bytes), expected_bytes);
+
+        // And confirm the fixture signature verifies over those bytes.
+        let verifying_key = SigningKey::from_bytes(&owner_seed).verifying_key();
+        let signature: [u8; 64] = hex::decode(expected_sig)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        verifying_key
+            .verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("golden room membership signature verifies");
+
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+            Some(4u64.to_le_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn golden_room_message_vector() {
+        let golden = room_golden();
+        let author_seed = seed_from_hex(golden["author_seed_hex"].as_str().unwrap());
+        let owner = golden["owner_vk_hex"].as_str().unwrap();
+        let message = &golden["message"];
+        let expected_sig = message["sig_hex"].as_str().unwrap();
+        let expected_bytes = message["signing_bytes_hex"].as_str().unwrap();
+
+        let record = &golden["state"]["messages"][0];
+        let epoch = record["epoch"].as_u64().unwrap();
+        let time = record["time"].as_i64().unwrap();
+        let body = record["body"].as_str().unwrap();
+        let author = record["author"].as_str().unwrap();
+
+        let mut store = store_with_seed(author_seed);
+        // The delegate assigns the seq, so seed the counter at the golden value.
+        assert!(store.set_secret(
+            &room_counter_key(ROOM_ID, "messageSeq"),
+            &7u64.to_le_bytes()
+        ));
+
+        let payload = room_message_payload(ROOM_ID, owner, "ZMR1", epoch, time, body);
+        let response = call(&mut store, &payload);
+
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["author"], author);
+        assert_eq!(response["seq"], 7u64);
+        assert_eq!(response["sig"], expected_sig);
+
+        // The id is derived from the signature, never supplied or stored.
+        assert_eq!(
+            room::message_id(response["sig"].as_str().unwrap()).unwrap(),
+            message["id"].as_str().unwrap()
+        );
+
+        let bytes =
+            room::message_signing_bytes("ZMR1", owner, author, epoch, 7, time, body).unwrap();
+        assert_eq!(hex::encode(&bytes), expected_bytes);
+
+        let verifying_key = SigningKey::from_bytes(&author_seed).verifying_key();
+        let signature: [u8; 64] = hex::decode(expected_sig)
+            .expect("golden signature is hex")
+            .try_into()
+            .expect("golden signature is 64 bytes");
+        verifying_key
+            .verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("golden room message signature verifies");
+
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
+            Some(8u64.to_le_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn room_membership_rejects_invalid_requests() {
+        let owner_seed = [7u8; 32];
+        let owner = ROOM_OWNER;
+        let author = ROOM_AUTHOR;
+        let valid_secrets = [(author, "deadbeef"), (owner, "0102030405")];
+
+        let mut store = store_with_seed(owner_seed);
+
+        // ZCR1 is a different room kind.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZCR1", 3, &[author, owner], &valid_secrets),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("ZMR1"), "{response}");
+
+        // Room id must be base58 and exactly 32 bytes.
+        let response = call(
+            &mut store,
+            &room_membership_payload(
+                "not a room id",
+                owner,
+                "ZMR1",
+                3,
+                &[author, owner],
+                &valid_secrets,
+            ),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("roomId"), "{response}");
+
+        // Members must be strictly ascending.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[owner, author], &[]),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("ascending"), "{response}");
+
+        // Duplicates are not unique.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author, author], &[]),
+        );
+        assert!(!is_ok(&response));
+
+        // The owner must be a member.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author], &[]),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("owner"), "{response}");
+
+        // Secrets must be complete, not partial.
+        let response = call(
+            &mut store,
+            &room_membership_payload(
+                ROOM_ID,
+                owner,
+                "ZMR1",
+                3,
+                &[author, owner],
+                &[(author, "deadbeef")],
+            ),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("secrets"), "{response}");
+
+        // Nothing above advanced the counter.
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+            None
+        );
+
+        // A non-owner local key cannot sign an owner-only membership record.
+        let mut other_store = store_with_seed([11u8; 32]);
+        let response = call(
+            &mut other_store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author, owner], &valid_secrets),
+        );
+        assert!(!is_ok(&response));
+        assert!(
+            error_text(&response).contains("refused room membership"),
+            "{response}"
+        );
+
+        // The counter advances only on a successful signature.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author, owner], &valid_secrets),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+            Some(4u64.to_le_bytes().to_vec())
+        );
+
+        // A stale seq is refused.
+        let response = call(
+            &mut store,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author, owner], &valid_secrets),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("stale seq"), "{response}");
+
+        // A failed counter write is an error and leaves no signature.
+        let mut failing = store_with_seed(owner_seed);
+        failing.fail_key = Some(room_counter_key(ROOM_ID, "membershipSeq"));
+        let response = call(
+            &mut failing,
+            &room_membership_payload(ROOM_ID, owner, "ZMR1", 3, &[author, owner], &valid_secrets),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("persist"), "{response}");
+    }
+
+    #[test]
+    fn room_message_rejects_invalid_requests() {
+        // Seed 11 is the fixture's author seed; its key is `ROOM_AUTHOR`.
+        let author_seed = [11u8; 32];
+        let owner = ROOM_OWNER;
+        let mut store = store_with_seed(author_seed);
+
+        // ZCR1 is rejected here too.
+        let response = call(
+            &mut store,
+            &room_message_payload(ROOM_ID, owner, "ZCR1", 3, 0, "00"),
+        );
+        assert!(!is_ok(&response));
+
+        // Epoch must be positive.
+        let response = call(
+            &mut store,
+            &room_message_payload(ROOM_ID, owner, "ZMR1", 0, 0, "00"),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("epoch"), "{response}");
+
+        // Bodies are capped at 1024 decoded bytes.
+        let oversized = "00".repeat(room::MAX_BODY_BYTES + 1);
+        let response = call(
+            &mut store,
+            &room_message_payload(ROOM_ID, owner, "ZMR1", 3, 0, &oversized),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("1024"), "{response}");
+
+        // A rejected message did not consume a seq.
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
+            None
+        );
+
+        // The first successful message is seq 1, then the counter advances.
+        let response = call(
+            &mut store,
+            &room_message_payload(ROOM_ID, owner, "ZMR1", 3, 1762500000000, "68656c6c6f"),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["author"], ROOM_AUTHOR);
+        assert_eq!(response["seq"], 1u64);
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
+            Some(2u64.to_le_bytes().to_vec())
+        );
+
+        // A failed counter write is an error rather than a silent replay.
+        let mut failing = store_with_seed(author_seed);
+        failing.fail_key = Some(room_counter_key(ROOM_ID, "messageSeq"));
+        let response = call(
+            &mut failing,
+            &room_message_payload(ROOM_ID, owner, "ZMR1", 3, 0, "00"),
+        );
+        assert!(!is_ok(&response));
+        assert!(error_text(&response).contains("persist"), "{response}");
+        assert_eq!(
+            failing.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
+            None
+        );
     }
 }

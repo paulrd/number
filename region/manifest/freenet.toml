@@ -1,0 +1,8 @@
+[contract]
+type = "standard"
+lang = "rust"
+
+# Published with an explicit `--state`; the placeholder only satisfies
+# `fdev build` packaging and is never published.
+[state]
+files = ["initial_state.bin"]

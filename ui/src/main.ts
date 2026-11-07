@@ -45,6 +45,8 @@ import {
   type PaymentFailure,
 } from "./payments";
 import { MAX_CONTACTS } from "./contact-rules";
+import { pathToAddress } from "./region/paths";
+import type { SlotOccupancy, ZoneRegion } from "./region/zone-region";
 import {
   formatCents,
   I64_MAX,
@@ -143,6 +145,7 @@ const boardMode = byId<HTMLParagraphElement>("board-mode");
 const boardAddress = byId<HTMLElement>("board-address");
 const boardAddressValue = byId<HTMLElement>("board-address-value");
 const boardAddressNote = byId<HTMLElement>("board-address-note");
+const boardRegionState = byId<HTMLElement>("board-region-state");
 const parentValueBox = byId<HTMLElement>("parent-value");
 const parentValueBoard = byId<HTMLElement>("parent-value-board");
 const parentValueSlot = byId<HTMLElement>("parent-value-slot");
@@ -275,6 +278,7 @@ interface SlotView {
   unit: HTMLSpanElement;
   label: HTMLSpanElement;
   id: HTMLSpanElement;
+  region: HTMLSpanElement;
   note: HTMLSpanElement;
   seq: HTMLSpanElement;
   action: HTMLSpanElement;
@@ -549,15 +553,17 @@ function buildSlots(): void {
     const label = createElement("span", "slot-label is-placeholder", "Waiting…");
     const id = createElement("span", "slot-id");
     id.hidden = true;
+    const region = createElement("span", "slot-region");
+    region.hidden = true;
     const note = createElement("span", "slot-note");
     note.hidden = true;
     const action = createElement("span", "sr-only", "Waiting for the zone.");
 
     // Let the button's own visible content name it, with one hidden action hint.
     // This keeps voice-control labels and screen-reader output in sync.
-    button.append(top, valueLine, label, id, note, action);
+    button.append(top, valueLine, label, id, region, note, action);
     boardElement.append(button);
-    slotViews.push({ button, value, unit, label, id, note, seq, action });
+    slotViews.push({ button, value, unit, label, id, region, note, seq, action });
   }
 }
 
@@ -619,6 +625,9 @@ function renderBoard(): void {
       slotView.id.textContent = "";
       slotView.id.title = "";
       slotView.id.hidden = true;
+      slotView.region.textContent = "";
+      slotView.region.title = "";
+      slotView.region.hidden = true;
       slotView.note.hidden = true;
       slotView.seq.textContent = "seq 0";
       slotView.action.textContent = "Waiting for the zone.";
@@ -632,6 +641,12 @@ function renderBoard(): void {
   const state = current.state;
   const ready = boardStatus === "ready" || boardStatus === "offline";
   const canEdit = ready && !busy;
+  const ownAddress =
+    ownReceiveAddressOwner === current.ownerId &&
+    ownReceiveAddress !== null &&
+    ownReceiveAddress.address !== null
+      ? ownReceiveAddress.address
+      : null;
 
   state.slots.forEach((slot, index) => {
     const slotView = slotViews[index];
@@ -697,6 +712,18 @@ function renderBoard(): void {
     slotView.id.title = entry ? entry.contact : "";
     slotView.id.hidden = !entry;
 
+    if (entry && ownAddress !== null) {
+      const address = `${ownAddress}${index}`;
+      slotView.region.textContent = `region ${address}`;
+      slotView.region.title =
+        `Slot ${index + 1} · address ${address} · cell ${"abcdefgh"[index]}`;
+      slotView.region.hidden = false;
+    } else {
+      slotView.region.textContent = "";
+      slotView.region.title = "";
+      slotView.region.hidden = true;
+    }
+
     slotView.note.textContent = entry?.note ?? "";
     slotView.note.hidden = !entry?.note;
     slotView.seq.textContent = `seq ${slot.seq}`;
@@ -734,6 +761,12 @@ function renderSimpleChildren(): void {
   }
 
   const rows: HTMLLIElement[] = [];
+  const ownAddress =
+    ownReceiveAddressOwner === current.ownerId &&
+    ownReceiveAddress !== null &&
+    ownReceiveAddress.address !== null
+      ? ownReceiveAddress.address
+      : null;
   current.state.slots.forEach((slot, index) => {
     const entry = slot.entry;
     if (entry === null || slotExistence.get(index) !== true) return;
@@ -751,6 +784,15 @@ function renderSimpleChildren(): void {
     const id = createElement("span", "simple-child-id", shorten(entry.contact));
     id.title = entry.contact;
     row.append(label, value, id);
+    if (ownAddress !== null) {
+      row.append(
+        createElement(
+          "span",
+          "simple-child-address",
+          `${ownAddress}${index}`,
+        ),
+      );
+    }
     rows.push(row);
   });
 
@@ -815,7 +857,25 @@ function unconfirmedRow(index: number): HTMLLIElement {
     void clearUnconfirmedSlot(index);
   });
 
-  row.append(copy, clear);
+  const ownAddress =
+    ownReceiveAddressOwner === current.ownerId &&
+    ownReceiveAddress !== null &&
+    ownReceiveAddress.address !== null
+      ? ownReceiveAddress.address
+      : null;
+  if (ownAddress !== null) {
+    row.append(
+      copy,
+      createElement(
+        "span",
+        "unconfirmed-region",
+        `Slot ${index + 1} · region ${ownAddress}${index}`,
+      ),
+      clear,
+    );
+  } else {
+    row.append(copy, clear);
+  }
   return row;
 }
 
@@ -1069,6 +1129,8 @@ function renderBoardAddress(): void {
     ownReceiveAddressOwner = current.ownerId;
     renderSimpleActions();
     paintSimpleAddress(info);
+    // The slot and child rows carry the address, so repaint them once known.
+    renderBoard();
 
     if (info.address === null) {
       const problem: AddressProblem = info.problem ?? "unreadable";
@@ -1115,6 +1177,114 @@ function renderBoardAddress(): void {
       `Octal address ${info.address}. Each digit is a zero-based slot ` +
       "number counted from the root.";
     boardAddress.setAttribute("aria-label", `Octal address ${info.address}`);
+  });
+}
+
+/** Slot occupancy in slot order for the region picker. */
+function ownSlotOccupancy(): SlotOccupancy[] {
+  const current = view;
+  const slots: SlotOccupancy[] = [];
+  for (let index = 0; index < SLOT_COUNT; index += 1) {
+    const entry = current?.state.slots[index]?.entry ?? null;
+    if (entry === null) {
+      slots.push("free");
+      continue;
+    }
+    const exists =
+      current !== null &&
+      slotExistenceOwner === current.ownerId &&
+      slotExistence.get(index) === true;
+    slots.push(exists ? "taken" : "unconfirmed");
+  }
+  return slots;
+}
+
+/**
+ * The own zone's octal address, reusing the painted value when it belongs to
+ * the zone on screen and resolving it again otherwise.
+ */
+async function ownRegionAddress(): Promise<string | null> {
+  const current = view;
+  if (current === null) return null;
+  if (
+    ownReceiveAddressOwner === current.ownerId &&
+    ownReceiveAddress !== null &&
+    ownReceiveAddress.address !== null
+  ) {
+    return ownReceiveAddress.address;
+  }
+  const info = await octalAddress(ownSnapshot() ?? current, linkDeps);
+  return info.address;
+}
+
+function paintBoardRegionState(region: ZoneRegion): void {
+  let text: string;
+  if (region.root) {
+    text = "Root · the whole world";
+  } else if (region.provisional) {
+    text = region.ancestor
+      ? `Provisional · shown inside ${pathToAddress(region.ancestor.path)}`
+      : "Provisional · the map does not cover this area yet";
+  } else if (region.cell) {
+    text = `Published · cell ${region.cell.letters}`;
+  } else {
+    text = "Published";
+  }
+  boardRegionState.textContent = text;
+  boardRegionState.hidden = false;
+}
+
+function announceAddressProblem(): void {
+  const info =
+    ownReceiveAddressOwner === view?.ownerId ? ownReceiveAddress : null;
+  const problem: AddressProblem = info?.problem ?? "unreadable";
+  announce(`Octal address unavailable: ${ADDRESS_PROBLEM_REASONS[problem]}.`);
+}
+
+async function openZoneRegionPicker(): Promise<void> {
+  const address = await ownRegionAddress();
+  if (address === null) {
+    announceAddressProblem();
+    return;
+  }
+  const module = await import("./region/picker");
+  module.openZoneRegion({
+    address,
+    slots: ownSlotOccupancy(),
+    onAssign: () => {
+      void openAssign().catch((error) => {
+        console.error("Could not open the region assignment", error);
+      });
+    },
+    onResolved: paintBoardRegionState,
+  });
+}
+
+function openPlaceRegionPicker(): void {
+  void import("./region/picker")
+    .then((module) => module.openRegionPicker())
+    .catch((error) => {
+      console.error("Could not open the region picker", error);
+    });
+}
+
+/**
+ * Open the assignment picker for the first free slot. Without a settled
+ * address, fall back to the old direct editor so the parent can still write.
+ */
+async function openAssign(): Promise<void> {
+  if (!view || !ownState) return;
+  const address = await ownRegionAddress();
+  if (address === null) {
+    const index = ownState.slots.findIndex((slot) => slot.entry === null);
+    if (index !== -1) openEditor(index);
+    return;
+  }
+  const module = await import("./region/picker");
+  module.openAssignRegion({
+    address,
+    slots: ownSlotOccupancy(),
+    onChoose: (slot) => openEditor(slot),
   });
 }
 
@@ -4076,6 +4246,14 @@ contactsOpen.addEventListener("click", () => {
 viewToggle.addEventListener("click", () => {
   setViewMode(viewMode === "advanced" ? "simple" : "advanced");
 });
+byId<HTMLButtonElement>("region-open").addEventListener("click", () => {
+  void openZoneRegionPicker().catch((error) => {
+    console.error("Could not open the region picker", error);
+  });
+});
+byId<HTMLButtonElement>("region-place-open").addEventListener("click", () => {
+  openPlaceRegionPicker();
+});
 simplePay.addEventListener("click", () => {
   if (!simplePay.disabled) openPaymentDialog();
 });
@@ -4093,9 +4271,9 @@ simplePaymentReview.addEventListener("click", () => {
   paymentInbox.focus({ preventScroll: true });
 });
 addChildSlot.addEventListener("click", () => {
-  if (view === null || ownState === null) return;
-  const index = ownState.slots.findIndex((slot) => slot.entry === null);
-  if (index !== -1) openEditor(index);
+  void openAssign().catch((error) => {
+    console.error("Could not open the region assignment", error);
+  });
 });
 window.addEventListener("popstate", () => {
   receiveLinkSettled = false;

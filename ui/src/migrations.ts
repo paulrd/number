@@ -37,6 +37,14 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v10: payments may route through the LCA (source or destination).
+    // Superseded by v11, which adds members-room membership and message
+    // signing. Its seed and counters carry forward.
+    key: "6RQvoNj3CQV2AWTruyuExE3gMcXyxWK2cmE47rPXowrV",
+    codeHash: "AmbYHZnEfQ8n5vZmbWT6XQU4iVTAhx9Ua9swy6QD5nBe",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v9: private address book (contacts with octal addresses) and
     // selfName/childNames signing. Superseded by v10, which also allows a
     // payment route whose endpoint is the LCA. Its seed, counters and address

@@ -9,7 +9,14 @@
  */
 import type { BoardSnapshot } from "./board";
 import type { ContactRecord } from "./delegate";
-import { MAX_TREE_DEPTH, walkParentChain } from "./tree-view";
+import { prospectiveRegion, type ProspectiveRegion } from "./parent-region";
+import type { SlotOccupancy } from "./region/zone-region";
+import {
+  MAX_TREE_DEPTH,
+  octalAddress,
+  walkParentChain,
+  type AddressInfo,
+} from "./tree-view";
 import { errorMessage } from "./util";
 
 export interface ParentDialogDeps {
@@ -61,10 +68,21 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
   const error = byId<HTMLParagraphElement>("parent-error");
   const saveButton = byId<HTMLButtonElement>("parent-save");
   const cancelButton = byId<HTMLButtonElement>("parent-cancel");
+  const regionSection = byId<HTMLElement>("parent-region");
+  const regionAddress = byId<HTMLElement>("parent-region-address");
+  const regionCell = byId<HTMLElement>("parent-region-cell");
+  const regionState = byId<HTMLElement>("parent-region-state");
+  const regionWarning = byId<HTMLParagraphElement>("parent-region-warning");
+  const regionMap = byId<HTMLButtonElement>("parent-region-map");
 
   let writing = false;
   let checking = false;
   let warningAcknowledged = false;
+  /** Guards async region reads so a stale selection cannot paint. */
+  let regionGeneration = 0;
+  let currentRegion: ProspectiveRegion | null = null;
+  let currentParentAddress = "";
+  let currentParentSlots: SlotOccupancy[] = [];
 
   function setError(message: string | null): void {
     error.textContent = message ?? "";
@@ -166,6 +184,98 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
     select.value = desired === null ? "" : desired;
     setBusy();
     updateHint();
+    void refreshRegion();
+  }
+
+  function hideRegion(): void {
+    currentRegion = null;
+    currentParentAddress = "";
+    currentParentSlots = [];
+    regionSection.hidden = true;
+    regionAddress.textContent = "";
+    regionCell.textContent = "";
+    regionState.textContent = "";
+    regionWarning.textContent = "";
+    regionWarning.hidden = true;
+    regionMap.hidden = false;
+  }
+
+  function renderRegion(region: ProspectiveRegion): void {
+    regionSection.hidden = false;
+    regionAddress.textContent = "—";
+    regionCell.textContent = "";
+    regionMap.hidden = true;
+
+    let state = "";
+    let warning: string | null = null;
+
+    if (region.problem === "unreadable") {
+      state = "This zone could not be read.";
+      warning = "You cannot see your assigned region yet. Try again.";
+    } else if (region.problem === "unsettled-parent") {
+      state = "Your parent's address is not settled yet.";
+    } else if (region.problem === "no-slot") {
+      state = "No region assigned yet.";
+      warning = "That zone has not assigned you a region yet.";
+    } else if (region.problem === "no-parent") {
+      state = "Your zone is not loaded yet.";
+      warning = "You cannot see your assigned region yet. Try again.";
+    } else {
+      regionAddress.textContent = region.address ?? "—";
+      regionCell.textContent = `Slot ${(region.slot ?? 0) + 1} · cell ${region.cellLetter}`;
+      state = "Assigned region";
+      warning =
+        "Your zone's region will be this cell. Check it on the map before you sign.";
+      regionMap.hidden = false;
+    }
+
+    regionState.textContent = state;
+    regionWarning.textContent = warning ?? "";
+    regionWarning.hidden = warning === null;
+  }
+
+  /**
+   * Read the selected parent's board and show the region it would assign.
+   * Informational only: a failed read or a missing slot never blocks saving.
+   */
+  async function refreshRegion(): Promise<void> {
+    const request = ++regionGeneration;
+    const id = selectedId();
+    // Clear the previous selection's preview before reading; the generation
+    // check below stops a slow read from painting over a newer selection.
+    hideRegion();
+    if (id === null) return;
+
+    let board: BoardSnapshot | null;
+    try {
+      board = await deps.readBoard(id);
+    } catch {
+      board = null;
+    }
+    if (request !== regionGeneration) return;
+
+    let address: AddressInfo;
+    if (board === null) {
+      address = { address: null, problem: "unreadable", blockedBy: null };
+    } else {
+      try {
+        address = await octalAddress(board, { readBoard: deps.readBoard });
+      } catch {
+        address = { address: null, problem: "unreadable", blockedBy: null };
+      }
+    }
+    if (request !== regionGeneration) return;
+
+    const region = prospectiveRegion(board, address, deps.getOwnOwnerId());
+    currentRegion = region;
+    currentParentAddress = address.address ?? "";
+    currentParentSlots =
+      board === null
+        ? []
+        : board.state.slots.map((slot) =>
+            slot.entry === null ? "free" : "taken",
+          );
+    renderRegion(region);
   }
 
   function fill(): void {
@@ -314,10 +424,26 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
     setWarning(null);
     setBusy();
     updateHint();
+    void refreshRegion();
   });
 
   addContact.addEventListener("click", () => {
     if (!writing && !checking) deps.openContacts();
+  });
+
+  regionMap.addEventListener("click", () => {
+    const region = currentRegion;
+    if (region === null || region.address === null) return;
+    const address = region.address;
+    const parentAddress = currentParentAddress;
+    const slots = currentParentSlots;
+    void import("./region/picker")
+      .then(({ openRegionReview }) => {
+        openRegionReview({ address, parentAddress, slots, point: null });
+      })
+      .catch((error: unknown) => {
+        deps.announce(`Could not open the map. ${errorMessage(error)}`);
+      });
   });
 
   form.addEventListener("submit", (event) => {
@@ -336,6 +462,8 @@ export function createParentDialog(deps: ParentDialogDeps): ParentDialog {
   });
 
   dialog.addEventListener("close", () => {
+    regionGeneration += 1;
+    hideRegion();
     setError(null);
     setWarning(null);
   });

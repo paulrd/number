@@ -1,0 +1,12 @@
+{
+  "start": "a",
+  "rows": 18,
+  "bytes": 405,
+  "hash": "CVeSyzw1UQAtr1hdfBTNn59iPy9ju8iYRzj9MDJTdXkq",
+  "total_rows": 72,
+  "row_bytes": 1584,
+  "shard_bytes": 1620,
+  "shard_count": 4,
+  "max_path_len": 2,
+  "blob_code_hash": "CKrXZHzTZ6d9Qhgq3nykW7pD6M3v6TZpZPsw7xLx3fvM"
+}

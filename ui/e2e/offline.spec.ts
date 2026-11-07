@@ -38,6 +38,34 @@ async function openSimple(page: Page): Promise<void> {
   await expect(page.locator("#advanced-view")).toBeHidden();
 }
 
+/**
+ * Add a child through the region assignment picker, choosing the lowest free
+ * slot (the same slot the old direct path opened), then return to the editor.
+ */
+async function openAssignEditor(page: Page): Promise<void> {
+  await page.locator("#add-child-slot").click();
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  await expect(page.locator("#region-assign-panel")).toBeVisible();
+  await expect(
+    page.locator("#region-assign-cards .region-assign-card").first(),
+  ).toBeVisible();
+
+  for (let index = 0; index < 8; index += 1) {
+    const input = page.locator(
+      `#region-assign-cards .region-assign-card[data-slot="${index}"] input`,
+    );
+    if ((await input.count()) > 0 && (await input.isEnabled())) {
+      await input.check();
+      break;
+    }
+  }
+
+  await expect(page.locator("#region-assign-choose")).toBeEnabled();
+  await page.locator("#region-assign-choose").click();
+  await expect(page.locator("#region-dialog")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+}
+
 /** Set the own board's parent from the default surface. */
 async function setParent(page: Page, userId: string): Promise<void> {
   await openSimple(page);
@@ -84,7 +112,7 @@ async function saveDetails(
   await openAdvanced(page);
   const slot = page.locator(".slot").nth(slotIndex);
   if (await slot.isVisible()) await slot.click();
-  else await page.locator("#add-child-slot").click();
+  else await openAssignEditor(page);
   await expect(page.locator("#editor")).toBeVisible();
   await page.locator("#contact-select").selectOption(userId);
   await page.locator("#save-button").click();
@@ -152,7 +180,7 @@ test("board mounts, adds a contact, saves a decimal slot, and passes axe", async
   // mutual children yet, so the empty grid offers the add control instead.
   await expect(page.locator("#child-slots-title")).toHaveText("Child slots (0 of 8)");
   await expect(page.locator("#child-slots-empty")).toBeVisible();
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await expect(page.locator("#adjust-panel")).toBeVisible();
   await expect(page.locator("#adjust-empty")).toBeVisible();
   await expect(page.locator("#adjust-empty")).toContainText(
@@ -397,7 +425,7 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await expect(page.locator("#contacts-count")).toHaveText("3");
 
   // A child slot is Linked when both signed sides agree.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Linked");
   await expect(page.locator("#child-link-detail")).toContainText(
@@ -421,6 +449,13 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
     `${MOCK_CHILD_ID.slice(0, 8)}…${MOCK_CHILD_ID.slice(-8)}`,
   );
   await expect(childSlotId).toHaveAttribute("title", MOCK_CHILD_ID);
+  const childSlotRegion = page.locator(".slot .slot-region").first();
+  await expect(childSlotRegion).toBeVisible();
+  await expect(childSlotRegion).toHaveText("region 0");
+  await expect(childSlotRegion).toHaveAttribute(
+    "title",
+    "Slot 1 · address 0 · cell a",
+  );
 
   // A details-only save keeps the issued liability (and the signed log) while
   // the unit changes.
@@ -441,6 +476,9 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   await expect(page.locator("#simple-children")).toContainText("Child");
   await expect(page.locator("#simple-children")).toContainText("3.25");
   await expect(page.locator("#simple-children button")).toHaveCount(0);
+  await expect(
+    page.locator("#simple-children .simple-child-address"),
+  ).toHaveText("0");
 
   // No control in the app offers to visit another owner's board.
   await expect(
@@ -453,7 +491,7 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   // A one-sided child link is Pending: the parent fixture exists, but its own
   // parent is empty, so it has not added this board as a parent. It leaves the
   // grid and is listed as an unconfirmed fact instead.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Pending");
   await expect(page.locator("#child-link-detail")).toContainText(
@@ -509,7 +547,7 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
   ).toEqual([]);
 
   // Duplicate child ids are rejected before saving.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await expect(page.locator("#contact-hint")).toContainText("already in slot 1");
   await expect(page.locator("#save-button")).toBeDisabled();
@@ -517,7 +555,7 @@ test("links boards as a tree, sets a parent, and rejects duplicate children", as
 
   // A contact with no board is "Not created yet"; the slot still saves and is
   // listed as an unconfirmed fact.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(GHOST_ID);
   await expect(page.locator("#child-link-status")).toHaveText("Not created yet");
   await page.locator("#save-button").click();
@@ -591,6 +629,30 @@ test("adds a parent from the default surface, then keeps it quiet", async ({
 
   await page.locator("#parent-edit").click();
   await page.locator("#parent-select").selectOption(MOCK_PARENT_ID);
+
+  // The parent fixture has this zone in its slot 0, so the candidate must see
+  // the assigned region before signing: address 0, cell a. This is the
+  // designation the parent wrote first.
+  const region = page.locator("#parent-region");
+  await expect(region).toBeVisible();
+  await expect(page.locator("#parent-region-address")).toHaveText("0");
+  await expect(page.locator("#parent-region-cell")).toContainText(
+    "Slot 1 · cell a",
+  );
+  await expect(page.locator("#parent-region-state")).toHaveText(
+    "Assigned region",
+  );
+  await expect(page.locator("#parent-region-warning")).toContainText(
+    "Check it on the map",
+  );
+
+  await page.locator("#parent-region-map").click();
+  await expect(page.locator("#region-review-panel")).toBeVisible();
+  await expect(page.locator("#region-review-address")).toHaveText("0");
+  await expect(page.locator("#region-review-cell")).toContainText("Cell a");
+  await page.locator("#region-review-close").click();
+  await expect(page.locator("#region-dialog")).toBeHidden();
+
   await page.locator("#parent-save").click();
   await expect(page.locator("#parent-dialog")).toBeHidden();
 
@@ -753,7 +815,7 @@ test("keeps parent-given slot names after contacts are removed", async ({
   await addContact(page, "Parent", MOCK_PARENT_ID);
 
   // Set up the child slot and a mutual parent link.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
@@ -765,7 +827,7 @@ test("keeps parent-given slot names after contacts are removed", async ({
 
   // The parent fixture does not point back, so this one-sided slot is listed as
   // unconfirmed instead of appearing in the child grid.
-  await page.locator("#add-child-slot").click();
+  await openAssignEditor(page);
   await page.locator("#contact-select").selectOption(MOCK_PARENT_ID);
   await page.locator("#save-button").click();
   await expect(page.locator("#editor")).toBeHidden();
@@ -1355,5 +1417,96 @@ test("rejects incomplete, own and duplicate receive links", async ({ page }) => 
     "Already in your address book.",
   );
 
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("region panel shows the root zone and its eight child cells", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#region-open").click();
+
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  await expect(page.locator("#region-panel-zone")).toBeVisible();
+  await expect(page.locator("#region-zone-address")).toHaveText("root");
+  await expect(page.locator("#region-zone-badge")).toHaveText("The world");
+  await expect(page.locator("#region-cells li")).toHaveCount(8);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("assignment picker opens the slot editor for the chosen cell", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#add-child-slot").click();
+
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  await expect(page.locator("#region-assign-panel")).toBeVisible();
+  const cards = page.locator("#region-assign-cards .region-assign-card");
+  await expect(cards).toHaveCount(8);
+
+  // Without a location no cell is preselected; choose the slot-0 card
+  // explicitly, so the assertion below tests the chosen-cell handoff rather
+  // than the ranking order.
+  const firstFree = page.locator(
+    '#region-assign-cards .region-assign-card[data-slot="0"] input',
+  );
+  await firstFree.check();
+  await expect(page.locator("#region-assign-choose")).toBeEnabled();
+  await page.locator("#region-assign-choose").click();
+
+  await expect(page.locator("#region-dialog")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#editor-title")).toHaveText("Slot 1");
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("region picker resolves a point from sample data", async ({ page }) => {
+  const errors = watchConsole(page);
+  const external: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (
+      !url.startsWith("http://127.0.0.1:4173") &&
+      !url.startsWith("data:") &&
+      !url.startsWith("blob:")
+    ) {
+      external.push(url);
+    }
+  });
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#region-open").click();
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  // The zone mode opens first; the place lookup lives behind its tab.
+  await expect(page.locator("#region-panel-zone")).toBeVisible();
+  await page.locator("#region-tab-place").click();
+  await expect(page.locator("#region-panel-place")).toBeVisible();
+
+  await page.locator("#region-lat").fill("1");
+  await page.locator("#region-lng").fill("1");
+  await page.locator("#region-form button[type=submit]").click();
+
+  await expect(page.locator("#region-path")).toHaveText("aa");
+  await expect(page.locator("#region-octal")).toHaveText("00");
+  await expect(page.locator("#region-depth")).toHaveText("2");
+  await expect(page.locator("#region-population")).toHaveText("1");
+  await expect(page.locator("#region-children tr")).toHaveCount(8);
+  await expect(page.locator("#region-source")).toContainText("Sample");
+
+  expect(external).toEqual([]);
+  const results = await new AxeBuilder({ page })
+    .include("#region-dialog")
+    .analyze();
+  expect(results.violations).toEqual([]);
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });

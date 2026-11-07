@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical build for the contract + delegate WASMs.
+# Canonical build for the contract, delegate and room WASMs.
 #
 # A contract's id is BLAKE3(BLAKE3(wasm) || parameters) and a delegate's key is
 # BLAKE3(BLAKE3(wasm) || parameters), so the WASM bytes ARE the address. This
@@ -17,7 +17,7 @@
 #
 # Usage: scripts/build.sh [options]
 #   --target-dir DIR   Root for per-crate cargo target dirs (default .build)
-#   --crate NAME       all (default) | contract | delegate
+#   --crate NAME       all (default) | contract | delegate | room
 #   --no-ui            Skip the generated UI constants (no node/npm needed)
 #   --no-package       Skip `fdev build` packaging (raw WASM only)
 #   -h, --help
@@ -47,8 +47,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$CRATE" in
-  all|contract|delegate) ;;
-  *) echo "--crate must be one of: all, contract, delegate" >&2; exit 2 ;;
+  all|contract|delegate|room|blob|manifest|regions) ;;
+  *) echo "--crate must be one of: all, contract, delegate, room, blob, manifest, regions" >&2; exit 2 ;;
 esac
 
 TARGET_ROOT="${TARGET_ROOT:-$ROOT/.build}"
@@ -131,6 +131,15 @@ if [ "$CRATE" = "all" ] || [ "$CRATE" = "contract" ]; then
 fi
 if [ "$CRATE" = "all" ] || [ "$CRATE" = "delegate" ]; then
   build_one delegate number_delegate delegate ""
+fi
+if [ "$CRATE" = "all" ] || [ "$CRATE" = "room" ]; then
+  build_one room number_room contract "--features contract"
+fi
+if [ "$CRATE" = "all" ] || [ "$CRATE" = "blob" ] || [ "$CRATE" = "regions" ]; then
+  build_one region/blob region_blob contract "--features contract"
+fi
+if [ "$CRATE" = "all" ] || [ "$CRATE" = "manifest" ] || [ "$CRATE" = "regions" ]; then
+  build_one region/manifest region_manifest contract "--features contract"
 fi
 
 if [ "$WITH_UI" -eq 1 ]; then

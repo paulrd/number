@@ -8,6 +8,12 @@ Revision note: population is included as a `u32`; the shard target is fixed at
 **256 KiB**; the desired region picker is **Leaflet + `world-atlas`
 `countries-110m`, no tile layer**.
 
+> Zone/region semantics and the onboarding picker are now specified in
+> `DESIGN-network.md`. Where §7–§8 here disagree (a zone's region is its octal
+> address, so slot `i` is the dataset child digit `i`; a root is the world;
+> conformance is derived, not claimed), that document wins. The dataset format,
+> shard sizes and publication pipeline here are unchanged.
+
 ## 1. What the data actually is
 
 Measured from `trie.db`:

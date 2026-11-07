@@ -1,5 +1,6 @@
 # Rust
 target
+room/target
 **/*.rs.bk
 
 # Node
@@ -11,6 +12,8 @@ ui/dist-offline
 .build
 contract/build
 delegate/build
+room/build
+region/*/build
 
 # Committed, reproducible artifacts live in published/ (never ignored).
 

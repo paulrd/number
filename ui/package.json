@@ -20,12 +20,16 @@
     "@freenetorg/freenet-stdlib": "^0.4.0",
     "@noble/hashes": "^1.8.0",
     "bs58": "^6.0.0",
-    "lossless-json": "^4.3.3"
+    "leaflet": "^1.9.4",
+    "lossless-json": "^4.3.3",
+    "topojson-client": "^3.1.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
     "@playwright/test": "^1.64.1",
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^22.15.0",
+    "@types/topojson-client": "^3.1.5",
     "flatbuffers": "^25.9.23",
     "typescript": "^5.8.0",
     "vite": "^6.3.0",

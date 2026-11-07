@@ -1,0 +1,29 @@
+[package]
+name = "region-manifest"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Standalone crate: own Cargo.lock so the manifest WASM hash (= its contract id)
+# cannot move with unrelated dependency churn.
+[workspace]
+
+[dependencies]
+freenet-stdlib = { version = "=0.12.1", features = ["contract"] }
+ed25519-dalek = "=2.1.1"
+region-wire = { path = "../wire" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+contract = ["freenet-main-contract"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

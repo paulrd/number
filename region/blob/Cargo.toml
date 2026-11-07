@@ -1,0 +1,30 @@
+[package]
+name = "region-blob"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Standalone crate: own Cargo.lock so UI/dependency churn cannot move the WASM
+# hash (= every shard contract id). See DESIGN-regions.md §5.1.
+[workspace]
+
+[dependencies]
+freenet-stdlib = { version = "=0.12.1", features = ["contract"] }
+blake3 = "=1.8.7"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The FFI in `#[contract]` is gated on this feature; `contract` is the alias
+# expected by the build scripts.
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+contract = ["freenet-main-contract"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
