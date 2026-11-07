@@ -10,6 +10,7 @@ import {
   roomMembershipState,
   roomMessageCountLabel,
   roomMessageRows,
+  roomTargetLabel,
   roomTimeIso,
 } from "./room-panel";
 import type {
@@ -95,6 +96,24 @@ describe("roomMemberRows", () => {
       { id: OWNER, kind: "owner", state: "not-in-room" },
       { id: ALICE, kind: "child", state: "not-in-room" },
     ]);
+  });
+
+  it("renders a foreign room from its signed membership alone", () => {
+    const signed = membership([OWNER, ALICE, CAROL]);
+    const rows = roomMemberRows(OWNER, [BOB], signed, false);
+    expect(rows).toEqual([
+      { id: OWNER, kind: "owner", state: "in-room" },
+      { id: ALICE, kind: "child", state: "in-room" },
+      { id: CAROL, kind: "child", state: "in-room" },
+    ]);
+  });
+});
+
+describe("roomTargetLabel", () => {
+  it("names a parent room and any other foreign room", () => {
+    expect(roomTargetLabel(OWNER, OWNER)).toBe("Your parent's room");
+    expect(roomTargetLabel(OWNER, ALICE)).toBe("Another zone's room");
+    expect(roomTargetLabel(OWNER, null)).toBe("Another zone's room");
   });
 });
 

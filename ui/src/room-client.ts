@@ -414,10 +414,10 @@ export class OnlineRoomTransport implements RoomTransport {
     } catch (error) {
       throw wrapRoomError("sign", error);
     }
-    if (signed.author !== ownerId) {
+    if (!isLowerHex(signed.author, 64)) {
       throw new RoomError(
         "sign",
-        `delegate signed the room message as ${signed.author}, not ${ownerId}`,
+        "delegate returned a malformed room message author",
       );
     }
     if (!Number.isSafeInteger(signed.seq) || signed.seq <= 0) {
@@ -443,6 +443,12 @@ export class OnlineRoomTransport implements RoomTransport {
     const after = await this.read(ownerId);
     if (!after) {
       throw new RoomError("read", "room state is unavailable after the message");
+    }
+    if (!after.messages.some((message) => message.sig === signed.sig)) {
+      throw new RoomError(
+        "write",
+        "the room contract did not accept the message; check membership and epoch",
+      );
     }
     return after;
   }

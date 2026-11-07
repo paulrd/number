@@ -23,7 +23,12 @@ import {
 } from "./room-client";
 
 export interface RoomPanelDeps {
+  /** The default room owner, which is the viewer's own zone id. */
   ownerId(): string | null;
+  /** The viewer's own zone id; owner-only controls require target === self. */
+  selfId(): string | null;
+  /** The viewer's parent zone id, used only to label a foreign room. */
+  parentId?(): string | null;
   /** Occupied slot contacts; may include unconfirmed ones, never the owner. */
   zoneContacts(): string[];
   nameFor(userId: string): string | null;
@@ -32,7 +37,7 @@ export interface RoomPanelDeps {
 }
 
 export interface RoomPanel {
-  open(): void;
+  open(targetOwner?: string): void;
   refresh(): void;
   close(): void;
 }
@@ -119,14 +124,18 @@ export function roomMembershipChanges(
 /**
  * Rows for the membership list: the owner first, then contacts in the derived
  * set, then signed members who no longer appear in any occupied slot (stale).
+ *
+ * A foreign room has no local slot list to compare with, so `compareWithZone`
+ * false renders the signed membership alone: every signed member is in-room
+ * and no stale rows are invented.
  */
 export function roomMemberRows(
   ownerId: string,
   expected: readonly string[],
   signed: RoomMembershipV1 | null,
+  compareWithZone = true,
 ): RoomMemberRow[] {
   const signedIds = new Set(signed?.members ?? []);
-  const expectedIds = new Set(expected);
   const rows: RoomMemberRow[] = [
     {
       id: ownerId,
@@ -135,6 +144,15 @@ export function roomMemberRows(
     },
   ];
 
+  if (!compareWithZone) {
+    for (const id of sortedUnique(signed?.members ?? [])) {
+      if (id === ownerId) continue;
+      rows.push({ id, kind: "child", state: "in-room" });
+    }
+    return rows;
+  }
+
+  const expectedIds = new Set(expected);
   for (const id of sortedUnique(expected)) {
     if (id === ownerId) continue;
     rows.push({
@@ -150,6 +168,14 @@ export function roomMemberRows(
   }
 
   return rows;
+}
+
+/** The quiet line shown when a room belongs to another zone. */
+export function roomTargetLabel(
+  targetOwner: string,
+  parentId: string | null,
+): string {
+  return parentId === targetOwner ? "Your parent's room" : "Another zone's room";
 }
 
 /**
@@ -278,6 +304,7 @@ function actionErrorText(
 export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   const dialog = byId<HTMLDialogElement>("room-dialog");
   const title = byId<HTMLHeadingElement>("room-title");
+  const targetLine = byId<HTMLParagraphElement>("room-target");
   const closeButton = byId<HTMLButtonElement>("room-close");
   const doneButton = byId<HTMLButtonElement>("room-done");
   const refreshButton = byId<HTMLButtonElement>("room-refresh");
@@ -313,6 +340,8 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
 
   let current: RoomStateV1 | null = null;
   let currentOwner: string | null = null;
+  /** null means the own room; otherwise the owner whose room was requested. */
+  let targetOwner: string | null = null;
   let loading = false;
   let sending = false;
   let updating = false;
@@ -327,8 +356,18 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     statusLine.textContent = message;
   }
 
-  function ownerId(): string | null {
-    return deps.ownerId();
+  function currentTarget(): string | null {
+    return targetOwner ?? deps.ownerId();
+  }
+
+  function isOwnRoom(owner: string | null): boolean {
+    return owner !== null && owner === deps.selfId();
+  }
+
+  function selfInMembership(): boolean {
+    const self = deps.selfId();
+    const signed = latestSigned();
+    return self !== null && signed !== null && signed.members.includes(self);
   }
 
   function latestSigned(): RoomMembershipV1 | null {
@@ -342,21 +381,26 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   function membershipStateFor(owner: string | null): RoomMembershipState {
     if (owner === null) return "none";
     if (offline || loadError !== null) return "error";
+    if (!isOwnRoom(owner)) {
+      // A foreign room has no local slot list to compare; a signed membership
+      // is simply the room's current membership.
+      return latestSigned() === null ? "none" : "match";
+    }
     return roomMembershipState(latestSigned(), expectedMembers(owner));
   }
 
-  function displayName(userId: string, owner: string | null): string {
-    if (owner !== null && userId === owner) return "You";
+  function displayName(userId: string): string {
+    if (userId === deps.selfId()) return "You";
     return deps.nameFor(userId) ?? `Member ${userId.slice(0, 8)}`;
   }
 
-  function shortMemberName(userId: string, owner: string | null): string {
-    if (owner !== null && userId === owner) return "You";
+  function shortMemberName(userId: string): string {
+    if (userId === deps.selfId()) return "You";
     return deps.nameFor(userId) ?? userId.slice(0, 8);
   }
 
-  function memberNames(ids: readonly string[], owner: string): string {
-    return ids.map((id) => shortMemberName(id, owner)).join(", ");
+  function memberNames(ids: readonly string[]): string {
+    return ids.map((id) => shortMemberName(id)).join(", ");
   }
 
   function renderComposer(
@@ -364,15 +408,19 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     state: RoomMembershipState,
   ): void {
     const waitingForOwner = owner === null;
+    const self = isOwnRoom(owner);
     const busy = loading || sending || updating;
     const text = input.value;
     const bytes = roomByteLength(text);
     const over = bytes > ROOM_BODY_BYTE_LIMIT;
+    const membershipAllowsSend = self
+      ? state === "match" || state === "mismatch"
+      : selfInMembership();
     const canSend =
       !waitingForOwner &&
       !offline &&
       loadError === null &&
-      (state === "match" || state === "mismatch") &&
+      membershipAllowsSend &&
       !busy;
 
     input.disabled = !canSend;
@@ -393,6 +441,15 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       hint.textContent = "The room could not be read. Choose Refresh to retry.";
     } else if (loading) {
       hint.textContent = "Reading the room…";
+    } else if (!self) {
+      if (!selfInMembership()) {
+        hint.textContent =
+          "This key is not a member of the room's current membership.";
+      } else if (over) {
+        hint.textContent = `Too long: ${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes.`;
+      } else {
+        hint.textContent = `${bytes} / ${ROOM_BODY_BYTE_LIMIT} bytes. Enter sends; Shift+Enter adds a line.`;
+      }
     } else if (state === "none") {
       hint.textContent = "Create a membership before sending.";
     } else if (state === "error") {
@@ -410,8 +467,9 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   }
 
   function renderMembers(owner: string, signed: RoomMembershipV1 | null): void {
-    const expected = expectedMembers(owner);
-    const rows = roomMemberRows(owner, expected, signed);
+    const self = isOwnRoom(owner);
+    const expected = self ? expectedMembers(owner) : [];
+    const rows = roomMemberRows(owner, expected, signed, self);
     membersList.replaceChildren();
 
     for (const row of rows) {
@@ -419,6 +477,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       item.className = "room-member-row";
       item.dataset.kind = row.kind;
       item.dataset.state = row.state;
+      item.dataset.memberId = row.id;
 
       const main = document.createElement("div");
       main.className = "room-member-main";
@@ -426,7 +485,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       const name = document.createElement("span");
       name.className = "room-member-name";
       name.textContent =
-        row.id === owner
+        row.id === deps.selfId()
           ? "You"
           : deps.nameFor(row.id) ??
             (row.kind === "stale" ? "Former member" : `Member ${row.id.slice(0, 8)}`);
@@ -460,7 +519,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
   }
 
-  function renderMessages(owner: string): void {
+  function renderMessages(): void {
     const messages = current?.messages ?? [];
     if (current === null) {
       messagesList.replaceChildren();
@@ -490,14 +549,14 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       const item = document.createElement("li");
       item.className = "room-message";
       item.dataset.history = String(row.history);
-      item.dataset.self = String(row.message.author === owner);
+      item.dataset.self = String(row.message.author === deps.selfId());
 
       const head = document.createElement("div");
       head.className = "room-message-head";
 
       const author = document.createElement("span");
       author.className = "room-message-author";
-      author.textContent = displayName(row.message.author, owner);
+      author.textContent = displayName(row.message.author);
 
       head.append(author);
 
@@ -535,7 +594,8 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   }
 
   function render(): void {
-    const owner = ownerId();
+    const owner = currentTarget();
+    const self = isOwnRoom(owner);
     if (current !== null && currentOwner !== owner) {
       current = null;
       currentOwner = null;
@@ -544,6 +604,21 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     const signed = latestSigned();
     const waitingForOwner = owner === null;
     const busy = loading || sending || updating;
+
+    if (owner === null || self) {
+      title.textContent = "Members room";
+      title.removeAttribute("title");
+      targetLine.textContent = "";
+      targetLine.removeAttribute("title");
+      targetLine.hidden = true;
+    } else {
+      const short = owner.slice(0, 8);
+      title.textContent = `Members room · ${short}`;
+      title.title = owner;
+      targetLine.textContent = roomTargetLabel(owner, deps.parentId?.() ?? null);
+      targetLine.title = owner;
+      targetLine.hidden = false;
+    }
 
     dialog.dataset.state = waitingForOwner
       ? "waiting"
@@ -561,14 +636,23 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     membershipStateElement.hidden =
       waitingForOwner || (loading && current === null);
     membershipStateElement.dataset.state = state;
-    membershipStateElement.textContent =
-      state === "match"
-        ? "Matches slots"
-        : state === "mismatch"
-          ? "Needs update"
+    if (!self && owner !== null) {
+      membershipStateElement.textContent =
+        state === "none"
+          ? "No membership"
           : state === "error"
             ? "Couldn't check"
-            : "No membership";
+            : "Signed membership";
+    } else {
+      membershipStateElement.textContent =
+        state === "match"
+          ? "Matches slots"
+          : state === "mismatch"
+            ? "Needs update"
+            : state === "error"
+              ? "Couldn't check"
+              : "No membership";
+    }
 
     if (waitingForOwner) {
       membershipDetail.textContent =
@@ -580,6 +664,13 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       membershipDetail.textContent = "The signed membership couldn't be checked.";
     } else if (loading && current === null) {
       membershipDetail.textContent = "Reading the signed membership…";
+    } else if (!self && owner !== null) {
+      membershipDetail.textContent =
+        signed === null
+          ? "This room has no signed membership yet."
+          : `Signed membership ${signed.seq} with ${signed.members.length} member${
+              signed.members.length === 1 ? "" : "s"
+            }.`;
     } else if (signed === null) {
       membershipDetail.textContent =
         "No signed membership yet. Create one to write messages here.";
@@ -592,10 +683,10 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
 
     const changes =
-      owner === null
+      owner === null || !self
         ? { added: [], removed: [] }
         : roomMembershipChanges(expectedMembers(owner), signed);
-    mismatch.hidden = waitingForOwner || state !== "mismatch";
+    mismatch.hidden = waitingForOwner || !self || state !== "mismatch";
     mismatch.textContent =
       changes.added.length === 0 && changes.removed.length === 0
         ? "Your occupied slots and the signed membership disagree."
@@ -618,6 +709,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
 
     const canUpdate =
+      self &&
       !waitingForOwner &&
       (state === "none" || state === "mismatch") &&
       !loading &&
@@ -644,11 +736,11 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       const addText =
         changes.added.length === 0
           ? "No members are added."
-          : `Adds ${memberNames(changes.added, owner)}.`;
+          : `Adds ${memberNames(changes.added)}.`;
       const removeText =
         changes.removed.length === 0
           ? "No members are removed."
-          : `Removes ${memberNames(changes.removed, owner)}.`;
+          : `Removes ${memberNames(changes.removed)}.`;
       confirmText.textContent =
         state === "none"
           ? `Create the first signed membership? ${addText} Removed members keep earlier messages as history.`
@@ -668,8 +760,8 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
 
     if (current === null) {
       messagesList.replaceChildren();
-    } else if (owner !== null) {
-      renderMessages(owner);
+    } else {
+      renderMessages();
     }
 
     if (current === null && (loading || offline || loadError !== null)) {
@@ -725,7 +817,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   }
 
   async function loadRoom(announceResult: boolean): Promise<void> {
-    const owner = ownerId();
+    const owner = currentTarget();
     const token = (readToken += 1);
 
     if (owner === null) {
@@ -753,7 +845,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     try {
       const state = await deps.transport.read(owner);
       if (token !== readToken) return;
-      if (ownerId() !== owner) {
+      if (currentTarget() !== owner) {
         render();
         return;
       }
@@ -769,7 +861,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       }
     } catch (error) {
       if (token !== readToken) return;
-      if (ownerId() !== owner) {
+      if (currentTarget() !== owner) {
         render();
         return;
       }
@@ -783,8 +875,9 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   }
 
   async function updateMembership(): Promise<void> {
-    const owner = ownerId();
-    if (owner === null || updating || sending || loading) return;
+    const owner = currentTarget();
+    if (owner === null || !isOwnRoom(owner)) return;
+    if (updating || sending || loading) return;
     const expected = expectedMembers(owner);
 
     updating = true;
@@ -794,7 +887,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
 
     try {
       const state = await deps.transport.updateMembership(owner, expected);
-      if (ownerId() !== owner) return;
+      if (currentTarget() !== owner) return;
       current = state;
       currentOwner = owner;
       offline = false;
@@ -804,7 +897,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       deps.announce("Membership updated.");
       setStatus("Membership updated.");
     } catch (error) {
-      if (ownerId() !== owner) return;
+      if (currentTarget() !== owner) return;
       handleActionError(error, "membership");
     } finally {
       updating = false;
@@ -813,7 +906,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
   }
 
   async function sendMessage(): Promise<void> {
-    const owner = ownerId();
+    const owner = currentTarget();
     if (owner === null || sending || updating || loading) return;
     if (offline || loadError !== null) return;
 
@@ -827,11 +920,23 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
     }
 
     const state = membershipStateFor(owner);
-    if (state === "none" || state === "error") {
+    if (state === "error") {
       composerErrorText =
-        state === "none"
-          ? "Create a membership before sending."
-          : "The membership could not be checked. Refresh and try again.";
+        "The membership could not be checked. Refresh and try again.";
+      renderComposer(owner, state);
+      input.focus({ preventScroll: true });
+      return;
+    }
+    if (!isOwnRoom(owner)) {
+      if (!selfInMembership()) {
+        composerErrorText =
+          "This key is not a member of the room's current membership.";
+        renderComposer(owner, state);
+        input.focus({ preventScroll: true });
+        return;
+      }
+    } else if (state === "none") {
+      composerErrorText = "Create a membership before sending.";
       renderComposer(owner, state);
       input.focus({ preventScroll: true });
       return;
@@ -847,7 +952,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
         owner,
         new TextEncoder().encode(text),
       );
-      if (ownerId() !== owner) return;
+      if (currentTarget() !== owner) return;
       current = next;
       currentOwner = owner;
       input.value = "";
@@ -856,18 +961,24 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       deps.announce("Message sent.");
       setStatus("Message sent.");
     } catch (error) {
-      if (ownerId() !== owner) return;
+      if (currentTarget() !== owner) return;
       handleActionError(error, "message");
     } finally {
       sending = false;
       render();
-      if (dialog.open && ownerId() === owner) {
+      if (dialog.open && currentTarget() === owner) {
         input.focus({ preventScroll: true });
       }
     }
   }
 
-  function open(): void {
+  function open(nextTargetOwner?: string): void {
+    targetOwner = nextTargetOwner ?? null;
+    const owner = currentTarget();
+    if (currentOwner !== owner) {
+      current = null;
+      currentOwner = null;
+    }
     confirmPending = false;
     membershipActionError = null;
     composerErrorText = null;
@@ -932,7 +1043,7 @@ export function createRoomPanel(deps: RoomPanelDeps): RoomPanel {
       composerError.hidden = true;
       composerError.textContent = "";
     }
-    const owner = ownerId();
+    const owner = currentTarget();
     renderComposer(owner, membershipStateFor(owner));
   });
 

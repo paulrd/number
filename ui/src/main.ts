@@ -357,6 +357,10 @@ let paymentBusy = false;
 let pendingReceiveLink: ReceiveInvite | null = null;
 /** True once a link has been resolved (opened, rejected, or handled). */
 let receiveLinkSettled = false;
+/** A `?room=` owner id captured at boot, waiting for the board to be ready. */
+let pendingRoomOwner: string | null = null;
+/** True once a room link has been opened or dismissed. */
+let roomLinkSettled = false;
 
 /** The last auto-advance status the local component reported. */
 let autoAdvanceStatus: DelegateStatus | null = null;
@@ -3061,6 +3065,7 @@ function setStatus(next: BoardStatus, detail?: string): void {
     void refreshAutoAdvanceStatus();
   }
   tryOpenReceiveLink();
+  tryOpenRoomLink();
 
   if (next === "disconnected" && previous === "ready") {
     showNotice(
@@ -3825,6 +3830,46 @@ function tryOpenReceiveLink(): void {
   contactsDialog.openInvite(resolved.invite);
 }
 
+/** `?room=` carries exactly one 64-character lowercase hex owner id. */
+function roomOwnerFromLocation(): string | null {
+  const value = new URLSearchParams(window.location.search).get("room");
+  return value !== null && /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+
+/**
+ * Room deep links are queued like receive links: the dialog must not open over
+ * the delegate/identity prompts, and the board's identity and zone must exist
+ * before the panel can read the room.
+ */
+function maybeOpenRoomLink(): void {
+  if (roomLinkSettled) return;
+  const owner = roomOwnerFromLocation();
+  if (owner === null) return;
+  pendingRoomOwner = owner;
+  tryOpenRoomLink();
+}
+
+function roomLinkReady(): boolean {
+  if (pendingRoomOwner === null) return false;
+  if (ownIdentity === null || ownState === null) return false;
+  if (boardStatus !== "ready" && boardStatus !== "offline") return false;
+  return (
+    document.querySelector(
+      "#delegate-install[open], #identity-setup[open], #identity-manage[open]",
+    ) === null
+  );
+}
+
+function tryOpenRoomLink(): void {
+  if (roomLinkSettled || pendingRoomOwner === null) return;
+  if (!roomLinkReady()) return;
+
+  const owner = pendingRoomOwner;
+  roomLinkSettled = true;
+  pendingRoomOwner = null;
+  roomPanel.open(owner);
+}
+
 /**
  * A repeat link opens the saved row. When it carries a different address, the
  * delegate updates the contact first so a corrected link is not ignored.
@@ -4025,6 +4070,7 @@ const callbacks: BoardCallbacks = {
     }
     parentDialog?.refresh();
     tryOpenReceiveLink();
+    tryOpenRoomLink();
     // A contacts write can land while the editor is open (the address book is
     // reachable from it). Keep the options honest without losing the selection.
     if (editor.open) {
@@ -4039,6 +4085,7 @@ const callbacks: BoardCallbacks = {
     if (snapshot) view = toView(snapshot);
     renderAll();
     tryOpenReceiveLink();
+    tryOpenRoomLink();
   },
   onContractKey: (key) => {
     contractKeyFull = key;
@@ -4066,6 +4113,8 @@ const backend: BoardBackend = isOffline
 
 const roomPanel = createRoomPanel({
   ownerId: () => ownIdentity?.pubkey ?? null,
+  selfId: () => ownIdentity?.pubkey ?? null,
+  parentId: () => ownState?.parent.userId ?? null,
   zoneContacts: zoneRoomContacts,
   nameFor: (userId) =>
     (view === null ? null : parentGivenName(view, userId)) ?? ownerLabel(userId),
@@ -4223,6 +4272,7 @@ if (!isOffline) {
 
 viewMode = initialViewMode();
 maybeOpenReceiveLink();
+maybeOpenRoomLink();
 buildSlots();
 renderAll();
 paintViewMode();
@@ -4322,6 +4372,9 @@ window.addEventListener("popstate", () => {
   receiveLinkSettled = false;
   pendingReceiveLink = null;
   maybeOpenReceiveLink();
+  roomLinkSettled = false;
+  pendingRoomOwner = null;
+  maybeOpenRoomLink();
   const mode: ViewMode =
     new URLSearchParams(window.location.search).get("view") === "advanced"
       ? "advanced"

@@ -44,6 +44,37 @@ describe("OfflineRoomTransport", () => {
     expect(isLowerHex(welcome.sig, 128)).toBe(true);
   });
 
+  it("keeps one lazily seeded room per owner", async () => {
+    const transport = new OfflineRoomTransport(OWNER);
+
+    const own = await transport.read(OWNER);
+    const other = await transport.read(CHILD);
+
+    expect(latestMembership(own!)!.members).toEqual([OWNER]);
+    expect(latestMembership(other!)!.members).toEqual([CHILD]);
+    expect(own!.messages[0].author).toBe(OWNER);
+    expect(other!.messages[0].author).toBe(CHILD);
+
+    // A write to one room is not visible from another.
+    await transport.updateMembership(CHILD, [STRANGER]);
+    expect((await transport.read(OWNER))!.memberships).toHaveLength(1);
+    expect(latestMembership((await transport.read(CHILD))!)!.members).toEqual(
+      [CHILD, STRANGER].sort(),
+    );
+  });
+
+  it("sends as the constructor owner into a foreign room when it is a member", async () => {
+    const transport = new OfflineRoomTransport(OWNER);
+    await transport.updateMembership(CHILD, [OWNER]);
+
+    const state = await transport.sendMessage(CHILD, encoder.encode("hello parent"));
+    const message = state.messages[state.messages.length - 1];
+
+    expect(message.author).toBe(OWNER);
+    expect(message.epoch).toBe(2);
+    expect(bodyText(message)).toBe("hello parent");
+  });
+
   it("advances the membership seq and normalises the member list", async () => {
     const transport = new OfflineRoomTransport(OWNER);
     const seeded = await transport.read(OWNER);

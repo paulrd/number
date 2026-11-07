@@ -21,14 +21,14 @@ changes the compiled bytes and re-keys every zone.
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
 | Delegate | **v11** `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd`, code `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` (live on all four nodes) |
-| Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the local UI build, not published |
+| Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the live UI |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794073317`, bundle `assets/index-B6sOsgQr.js` + lazy `assets/picker-CjhRHu9C.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1794078151`, bundle `assets/index-SCqJUF8C.js` + lazy `assets/picker-Df5iena3.js`, identical on `7509`/`7511`/`7512`/`7513` |
 | Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-07; site `1794073317`, P2 UI + delegate v11 published; contract unchanged |
+| Last UI publish | 2026-11-07; site `1794078151`, P3b2 room UI (foreign rooms + `?room=`), delegate v11; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -101,8 +101,8 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **83
-delegate**, **345 UI**, **28 offline e2e** (the region/room tests are Axe-clean
-and make no external requests).
+delegate**, **349 UI**, **29 offline e2e** (the region/room tests are Axe-clean
+and make no external requests), plus the manual `live-room.mjs`.
 
 ### P2 implemented (2026-11-07); next is P3/P4 (no contract change)
 
@@ -225,7 +225,7 @@ Deployed 2026-11-07: site `1794073317`; each zone was opened once, seeds
 migrated, and all four nodes re-armed (D needed the #22 unregister + app-origin
 reinstall). Readiness is green.
 
-**P3b2 implemented (2026-11-07, not deployed):** room data layer and panel.
+**P3b2 implemented and verified live (2026-11-07):** room data layer and panel.
 `ui/src/room-state.ts` (v1 codec, digest, merge, member derivation),
 `ui/src/room-client.ts` (36-byte `ZMR1` params, derived instance id, own WS,
 PUT/GET/update, WASM hash check, delegate-backed membership/message signing),
@@ -233,17 +233,31 @@ PUT/GET/update, WASM hash check, delegate-backed membership/message signing),
 transport. Build pinning: `make build` copies the raw room WASM to
 `ui/public/number_room.wasm`, writes the hash constants, and fails if the
 build differs from `published/room/manifest.json`.
-UI: 345 tests, 28 offline e2e; the two new e2e flows cover open/send and
-child-slot → mismatch → update → history. The **online** transport is only
-type-checked; no live two-identity room smoke has run yet.
 
-**Next (P3c / live verification):** deploy the room UI when ready and run a
-two-identity live smoke (7511 + 7512): owner signs membership, the other node
-posts, both converge, an outsider is rejected. Then P3c adds client-side ECIES
-and the epoch-secret UI; rooms must not be called private before that. P4 is
-the candidate room + `?root=` onboarding.
+Foreign rooms: `?room=<owner-id>` opens another owner's room; owner-only
+controls and slot-derived mismatch checks apply only to your own room. A child
+signs with its own delegate key; the contract decides membership. The client no
+longer requires the signer to equal the room owner (that bug blocked every
+child), and a sent message is re-read and confirmed before it is reported.
+
+Deployed as site `1794078151`. Live two-identity smoke (`ui/e2e/live-room.mjs`,
+7511/7512/7513) passes: A signs membership including B; B opens A's room via
+`?room=` and posts; A sees it; C is a non-member and its composer is disabled.
+UI: 349 tests, 29 offline e2e.
+
+**Next (P3c):** client-side ECIES epoch secrets and the secret-rotation UI.
+Rooms must not be called private before that. P4 is the candidate room +
+`?root=` onboarding.
 
 ### Gotchas worth remembering
+
+- **A room message is signed by its author, not the room owner.** The delegate
+  always signs as the local key; the room contract checks the author against
+  the epoch's membership. Never compare `signed.author` with the room owner id.
+- **The room contract skips invalid deltas silently.** After any write, re-read
+  and confirm the record/message is present before reporting success.
+- **A room is opened with `?room=<owner-id>`**; owner-only membership controls
+  and slot-derived mismatch checks apply only when the target is your own zone.
 
 - **The code hash is BLAKE3 of the raw WASM**, never the packaged file (the
   package embeds a container). Hashing the packaged file gives a different id.
@@ -384,7 +398,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 83, room 21, UI
-345, offline e2e 28, `verify-merge` 14 laws / 0 violations.
+349, offline e2e 29, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -431,9 +445,11 @@ Newest first. Earlier work is summarised by commit; `git log` has the detail.
 - Advanced members-room panel: plaintext notice, derived member rows,
   none/match/mismatch, owner-only membership update, message log with history,
   composer and 1024-byte cap.
-- Offline in-memory transport seeded with a room; two new e2e flows.
-- 345 UI tests, 28 offline e2e. Not deployed; the online path still needs a
-  live two-identity smoke.
+- Foreign rooms via `?room=<owner>`; owner-only controls stay on the own room.
+- Fixed the client's author check (a child signs as itself, not the room owner)
+  and confirm a sent message by re-reading the room.
+- Deployed site `1794078151`; live smoke A↔B on 7511/7512 passes, C blocked.
+- 349 UI tests, 29 offline e2e, plus `ui/e2e/live-room.mjs`.
 
 **2026-11-07 — deployed P2 + delegate v11**
 - Push `63ef861`; `fdev publish` registered delegate v11 on 7509;

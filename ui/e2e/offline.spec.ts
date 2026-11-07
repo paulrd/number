@@ -1588,3 +1588,45 @@ test("offers a membership update after adding a child and keeps old messages as 
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("opens a parent's members room from a ?room= deep link", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  // The link is queued until the offline identity and zone are ready, then the
+  // room dialog opens on its own (no Advanced-only control is involved).
+  await page.goto(`/?room=${MOCK_PARENT_ID}`);
+  await expect(page.locator("#room-dialog")).toBeVisible();
+  await expect(page.locator("#room-plaintext-notice")).toBeVisible();
+
+  // The heading shows the target owner short id, with the full id in its title.
+  await expect(page.locator("#room-title")).toContainText(
+    MOCK_PARENT_ID.slice(0, 8),
+  );
+  await expect(page.locator("#room-title")).toHaveAttribute(
+    "title",
+    MOCK_PARENT_ID,
+  );
+  await expect(page.locator("#room-target")).toHaveText("Another zone's room");
+
+  // A foreign room has no owner controls and no local-slot comparison.
+  await expect(page.locator("#room-update-membership")).toBeHidden();
+  await expect(page.locator("#room-mismatch")).toBeHidden();
+  await expect(page.locator(".room-member-row")).toHaveCount(1);
+  await expect(page.locator(".room-member-row")).toHaveAttribute(
+    "data-state",
+    "in-room",
+  );
+
+  // The offline parent room is seeded owner-only. The contract only lets a
+  // member send, and the own id is not in that membership, so the composer is
+  // blocked with the existing not-member reason instead of sending.
+  await expect(page.locator("#room-message-input")).toBeDisabled();
+  await expect(page.locator("#room-send")).toBeDisabled();
+  await expect(page.locator("#room-message-hint")).toContainText(
+    "not a member of the room's current membership",
+  );
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

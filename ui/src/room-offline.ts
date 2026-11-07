@@ -65,14 +65,22 @@ function seedState(ownerId: string): RoomStateV1 {
 }
 
 export class OfflineRoomTransport implements RoomTransport {
-  private state: RoomStateV1;
+  /** One lazily seeded room per owner id, so a deep link can read a parent room. */
+  private readonly rooms = new Map<string, RoomStateV1>();
 
-  constructor(private readonly ownerId: string) {
-    this.state = seedState(ownerId);
+  constructor(private readonly ownerId: string) {}
+
+  private roomFor(ownerId: string): RoomStateV1 {
+    let state = this.rooms.get(ownerId);
+    if (state === undefined) {
+      state = seedState(ownerId);
+      this.rooms.set(ownerId, state);
+    }
+    return state;
   }
 
-  async read(_ownerId: string): Promise<RoomStateV1 | null> {
-    return this.state;
+  async read(ownerId: string): Promise<RoomStateV1 | null> {
+    return this.roomFor(ownerId || this.ownerId);
   }
 
   async updateMembership(
@@ -80,8 +88,9 @@ export class OfflineRoomTransport implements RoomTransport {
     members: string[],
   ): Promise<RoomStateV1> {
     const owner = ownerId || this.ownerId;
+    const state = this.roomFor(owner);
     const nextMembers = sortedUnique([...members, owner]);
-    const latest = latestMembership(this.state);
+    const latest = latestMembership(state);
     const seq = (latest?.seq ?? 0) + 1;
     const record: RoomMembershipV1 = {
       seq,
@@ -91,15 +100,16 @@ export class OfflineRoomTransport implements RoomTransport {
         `membership:${seq}:${owner}:${nextMembers.join(",")}`,
       ),
     };
-    this.state = {
-      ...this.state,
-      memberships: [...this.state.memberships, record],
+    const next = {
+      ...state,
+      memberships: [...state.memberships, record],
     };
-    return this.state;
+    this.rooms.set(owner, next);
+    return next;
   }
 
   async sendMessage(
-    ownerId: string,
+    roomOwnerId: string,
     bodyBytes: Uint8Array,
   ): Promise<RoomStateV1> {
     if (
@@ -112,39 +122,43 @@ export class OfflineRoomTransport implements RoomTransport {
       );
     }
 
-    const latest = latestMembership(this.state);
-    if (!latest || !latest.members.includes(ownerId)) {
+    const owner = roomOwnerId || this.ownerId;
+    const state = this.roomFor(owner);
+    const author = this.ownerId;
+    const latest = latestMembership(state);
+    if (!latest || !latest.members.includes(author)) {
       throw new RoomError(
         "not-member",
-        "the room owner is not a member of the latest room epoch",
+        "the sender is not a member of the latest room epoch",
       );
     }
 
     const epoch = latest.seq;
-    const seq = this.nextSeq(ownerId);
+    const seq = this.nextSeq(state, author);
     const time = Date.now();
     const body = bytesToHex(bodyBytes);
     const message: RoomMessageV1 = {
-      author: ownerId,
+      author,
       epoch,
       seq,
       time,
       body,
       sig: mockSignature(
-        `message:${ownerId}:${epoch}:${seq}:${time}:${body}`,
+        `message:${author}:${epoch}:${seq}:${time}:${body}`,
       ),
     };
 
-    const messages = [...this.state.messages, message]
+    const messages = [...state.messages, message]
       .sort(compareMessages)
       .slice(-ROOM_MAX_MESSAGES);
-    this.state = { ...this.state, messages };
-    return this.state;
+    const next = { ...state, messages };
+    this.rooms.set(owner, next);
+    return next;
   }
 
-  private nextSeq(author: string): number {
+  private nextSeq(state: RoomStateV1, author: string): number {
     let max = 0;
-    for (const message of this.state.messages) {
+    for (const message of state.messages) {
       if (message.author === author && message.seq > max) max = message.seq;
     }
     return max + 1;
