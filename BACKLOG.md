@@ -26,11 +26,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794135174`, bundle `assets/index-CNI3c8J-.js` + lazy `assets/picker-XEjP6UmC.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Live site | version `1794145739`, bundle `assets/index-CNH7TjIE.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794135174`, delegate v13; contract unchanged |
+| Last UI publish | 2026-11-08; site `1794145739`, P4c onboarding UI + pinned candidate WASM; delegate v13; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -44,7 +44,41 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c complete
+## Where we left off (2026-11-08) — P4d deployed, cross-node read blocker
+
+### P4d (2026-11-08): deployed; same-node smoke passes, cross-node read is stale
+
+- **Deployed** site `1794145739` (15 files / 537,336 bytes compressed) with the
+  P4c UI, delegate v13 and the pinned candidate WASM. `make build` is required
+  before publishing: it generates `candidate_code_hash.txt` and copies
+  `ui/public/number_candidate.wasm`; a bare `npm run build` omits both. All
+  four nodes serve `index-CNH7TjIE.js` and the candidate WASM; readiness OK.
+- **Live same-node smoke passed** with two app origins on 7511 (two seeds):
+  candidate request → queued → owner sees the request → one-candidate interview
+  with an encrypted message → **Admit** through the assign picker (slot editor
+  prefilled) → Slot 5 / Region 4 → **Finish admission** (membership rotated to
+  owner-only) → candidate **Check again** shows admitted → **Sign and join**.
+  Verified on-chain: owner slot 5 names the candidate, the candidate's
+  `parent.userId` is the owner, the candidate address is `4`, and the candidate
+  room's latest membership (seq 4) has rotated the candidate out. Harness:
+  `ui/e2e/live-onboarding.mjs` (`OWNER_WEBAPP`/`CANDIDATE_WEBAPP`/ports).
+- **Blocker found — cross-node foreign-zone reads can be stale.** On two live
+  nodes, the candidate node kept the empty target zone after the owner wrote
+  the slot and finished; GETs (including subscribe/blocking GETs and
+  `fdev execute subscribe`) never received the update, so the candidate never
+  saw the admission. Same-node (shared contract store) works. Before multi-node
+  onboarding is claimed, establish a target-zone subscription before the
+  designation or find a supported force-fetch; Freenet reads return the local
+  copy.
+- The throwaway smoke sites `number-smoke`, `number-smoke2` and `number-smoke3`
+  exist only for this test; their ids are not UI constants.
+- **Join-link origin is wrong for sharing.** `Copy join link` copies the
+  current node's origin (`http://127.0.0.1:7511/...?...&root=`), which only
+  works on the owner's machine. It should copy the root id or a shareable app
+  address; the smoke passed the root id explicitly.
+
+Next: fix the two findings above, then a true two-node smoke before calling P4
+live. Growth/re-organization remains deferred (`DESIGN-network.md` §4).
 
 ### P4c3b2b implemented (2026-11-08): candidate pending surface
 
@@ -634,8 +668,16 @@ cd ui && npm run build && npm test && npm run test:e2e:offline
 
 ## Open items
 
-Ranked by what a next session should care about. Nothing here blocks the current
-deployment.
+Ranked by what a next session should care about.
+
+1. **Cross-node onboarding reads can be stale (blocker for multi-node P4).** A
+   candidate on another node kept an old copy of the target zone after the
+   owner designated the slot; GET/subscribe did not refresh it. Same-node
+   flows pass. Fix the refresh/subscription design before calling onboarding
+   live across nodes.
+2. **Copy join link uses the node origin.** It must produce a shareable form
+   (root id or the app's public address), not `http://127.0.0.1:.../` with a
+   root parameter.
 
 1. **Address-book import marker cannot persist (#ours, small).** The app runs in
    a sandboxed, opaque-origin iframe where `localStorage` throws, so the
@@ -775,6 +817,17 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4d: deployed, same-node live smoke**
+- Published site `1794145739` (15 files; `index-CNH7TjIE.js`) with delegate
+  v13 and the pinned candidate WASM; all four nodes identical; readiness OK.
+- Two app origins on 7511 completed the full flow live: request → interview →
+  Admit/Slot 5/Region 4 → finish → candidate admits → signs parent. On-chain
+  checks: owner slot 5 = candidate, candidate parent = owner, address `4`,
+  candidate-room membership rotated to owner-only at seq 4.
+- Found: cross-node foreign-zone reads stay stale (blocker), and Copy join
+  link uses the node's loopback origin (not shareable). Recorded in Open items.
+- Harness `ui/e2e/live-onboarding.mjs`.
 
 **2026-11-08 — P4c3b2b: candidate pending surface**
 - `resolveZoneAddress` + `joinCheck`; the join link keeps `root` after submit
