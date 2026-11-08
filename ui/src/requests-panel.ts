@@ -1,13 +1,14 @@
 /**
- * Owner-side join-request queue (P4c3a, `DESIGN-candidates.md` §12.1).
+ * Owner-side join-request queue and interview (P4c3a/P4c3b1,
+ * `DESIGN-candidates.md` §12.1 and §12.2).
  *
  * A quiet Advanced surface over the owner's own candidate room: read the
  * public queue, switch accepting on or off, dismiss one request at a time (or
- * all of them), and copy the zone's join link. Every write passes the owner's
- * own id to the transport; there is no way to point this panel at another
- * zone's queue.
+ * all of them), copy the zone's join link, and interview one requester in the
+ * encrypted candidate room. Every write passes the owner's own id to the
+ * transport; there is no way to point this panel at another zone's queue.
  *
- * No interview or admission action lives here. Those are §12.2.
+ * Admission (writing a zone slot) is P4c3b2 and does not live here.
  */
 
 import type { CandidateTransport } from "./candidate-client";
@@ -15,16 +16,48 @@ import {
   candidateNoteToText,
   candidateRequestId,
   isAccepting,
+  latestCandidateMembership,
+  type CandidateMembershipV1,
+  type CandidateMessageV1,
   type CandidateRequestV1,
   type CandidateStateV1,
 } from "./candidate-state";
+import {
+  interviewBlockReason,
+  interviewMembers,
+  interviewState,
+  zoneChildren,
+} from "./candidate-interview";
 import { errorMessage, shorten } from "./util";
+import {
+  formatRoomTime,
+  roomByteLength,
+  roomComposerProblem,
+  roomMessageCountLabel,
+  roomMessageRows,
+  roomTimeIso,
+  type RoomMessageRow,
+} from "./room-panel";
+import { roomBodyToText, roomMessageId } from "./room-state";
+import {
+  ROOM_ENCRYPTED_BODY_BYTE_LIMIT,
+  ROOM_LEGACY_BODY_BYTE_LIMIT,
+  isEncryptedRoomBody,
+  readRoomBody,
+  type RoomBodyView,
+} from "./room-crypto";
+import type { StateV3 } from "./state";
+
+/** Candidate-room tag bound into the body AAD. */
+export const INTERVIEW_TAG = "ZCR1";
 
 export interface RequestsPanelDeps {
   /** Candidate-room transport; only the owner's own id is ever passed. */
   transport: CandidateTransport;
   /** The viewer's own owner id, or null while the identity is not ready. */
   ownId(): string | null;
+  /** Read the owner's own zone state; null when it is not available. */
+  readOwnZone(): Promise<StateV3 | null>;
   announce(message: string): void;
 }
 
@@ -187,10 +220,19 @@ function errorCode(error: unknown): string | null {
   return null;
 }
 
+export type RequestsAction =
+  | "read"
+  | "zone"
+  | "accepting"
+  | "dismiss"
+  | "interview"
+  | "message"
+  | "end";
+
 /** Readable sentences for queue actions; contract detail stays out of them. */
 export function requestsErrorText(
   error: unknown,
-  action: "read" | "accepting" | "dismiss",
+  action: RequestsAction,
 ): string {
   const code = errorCode(error);
   if (action === "read") {
@@ -202,11 +244,23 @@ export function requestsErrorText(
     }
     return "The request queue could not be read. Try again.";
   }
+  if (action === "zone") {
+    if (code === "connection") {
+      return "Your zone's members could not be checked while offline. Try again.";
+    }
+    return "Your zone's members could not be read. Try again.";
+  }
 
   const prefix =
     action === "accepting"
       ? "Accepting was not changed."
-      : "The request was not dismissed.";
+      : action === "interview"
+        ? "The interview was not started."
+        : action === "message"
+          ? "The message was not sent."
+          : action === "end"
+            ? "The interview was not ended."
+            : "The request was not dismissed.";
   switch (code) {
     case "connection":
       return `${prefix} Check your connection and try again.`;
@@ -233,6 +287,168 @@ export function requestRows(
   return state === null ? [] : [...state.requests].reverse();
 }
 
+function sameMembers(a: readonly string[], b: readonly string[]): boolean {
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+/** The composer cap for the interview's current epoch. */
+export function interviewComposerLimit(
+  latest: CandidateMembershipV1 | null,
+): number {
+  return (latest?.secrets.length ?? 0) > 0
+    ? ROOM_ENCRYPTED_BODY_BYTE_LIMIT
+    : ROOM_LEGACY_BODY_BYTE_LIMIT;
+}
+
+/**
+ * Messages at the latest interview epoch in contract order, newest last. Older
+ * epochs stay in the room as history but are not part of the current
+ * conversation.
+ */
+export function interviewMessageRows(
+  messages: readonly CandidateMessageV1[],
+  latest: CandidateMembershipV1 | null,
+): RoomMessageRow[] {
+  if (latest === null) return [];
+  return roomMessageRows(
+    messages.filter((message) => message.epoch === latest.seq),
+    latest.seq,
+  );
+}
+
+/** Signed members outside the owner and the zone's occupied slots. */
+export function interviewOutsideMembers(
+  zoneState: StateV3 | null,
+  ownerId: string,
+  members: readonly string[],
+): string[] {
+  const known = new Set([
+    ownerId,
+    ...(zoneState === null ? [] : zoneChildren(ownerId, zoneState)),
+  ]);
+  return [...new Set(members.filter((member) => !known.has(member)))].sort();
+}
+
+export interface InterviewCandidateView {
+  candidate: string | null;
+  /** A client-visible inconsistency, or null when the state is coherent. */
+  warning: string | null;
+}
+
+/**
+ * Resolve the candidate shown in the interview section.
+ *
+ * The signed membership is authoritative. `invited` is the requester the owner
+ * just invited: it covers a membership that dedupes the candidate (the offline
+ * self-request flow), where the candidate is also the owner. A membership with
+ * several outsiders is reported rather than guessed at.
+ */
+export function interviewCandidateView(
+  candidateState: CandidateStateV1 | null,
+  zoneState: StateV3 | null,
+  ownerId: string,
+  invited: string | null = null,
+): InterviewCandidateView {
+  if (candidateState === null) return { candidate: null, warning: null };
+  const latest = latestCandidateMembership(candidateState);
+  if (latest === null) return { candidate: null, warning: null };
+  if (zoneState === null) {
+    return {
+      candidate: null,
+      warning: "Your zone could not be read, so the interview cannot be checked.",
+    };
+  }
+
+  const outsiders = interviewOutsideMembers(
+    zoneState,
+    ownerId,
+    latest.members,
+  );
+  if (outsiders.length > 1) {
+    return {
+      candidate: null,
+      warning:
+        "The candidate room lists more than one candidate. End the interview before continuing.",
+    };
+  }
+
+  const state = interviewState(candidateState, zoneState, ownerId);
+  if (state?.candidate !== null && state?.candidate !== undefined) {
+    return { candidate: state.candidate, warning: null };
+  }
+
+  if (
+    invited !== null &&
+    ownerId === invited &&
+    latest.members.includes(invited)
+  ) {
+    return { candidate: invited, warning: null };
+  }
+  if (invited !== null && outsiders.includes(invited)) {
+    return { candidate: invited, warning: null };
+  }
+  return { candidate: null, warning: null };
+}
+
+/**
+ * Hard lock: a composer only opens while `[owner] ∪ children ∪ candidate`
+ * equals the latest signed membership. A removal that skips rotation would
+ * leave the old epoch readable, so sending is refused instead.
+ */
+export function interviewMembershipLock(
+  ownerId: string,
+  zoneState: StateV3 | null,
+  candidate: string | null,
+  latest: CandidateMembershipV1 | null,
+): string | null {
+  if (latest === null) {
+    return "The interview has no signed membership yet.";
+  }
+  if (zoneState === null) {
+    return "Your zone could not be read, so messages are locked.";
+  }
+  if (candidate === null) {
+    return "There is no active candidate in the interview.";
+  }
+  if (!sameMembers(interviewMembers(ownerId, zoneState, candidate), latest.members)) {
+    return "Your zone's members and the interview membership disagree. End the interview before sending.";
+  }
+  return null;
+}
+
+/** The membership to sign when the interview ends: owner plus zone children. */
+export function interviewRemainingMembers(
+  ownerId: string,
+  zoneState: StateV3,
+): string[] {
+  return [...new Set([ownerId, ...zoneChildren(ownerId, zoneState)])].sort();
+}
+
+/**
+ * How a stored body renders. Legacy bodies decode as plaintext; a `0x01`
+ * envelope is either the cached decrypted text or null while pending. It is
+ * never decoded as plaintext.
+ */
+export function interviewBodyView(
+  bodyHex: string,
+  cached: RoomBodyView | undefined,
+): RoomBodyView | null {
+  if (!isEncryptedRoomBody(bodyHex)) {
+    try {
+      return { kind: "plaintext", text: roomBodyToText(bodyHex) };
+    } catch {
+      return { kind: "unreadable" };
+    }
+  }
+  return cached ?? null;
+}
+
 export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   const dialog = byId<HTMLDialogElement>("requests-dialog");
   const title = byId<HTMLHeadingElement>("requests-title");
@@ -246,6 +462,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   const acceptingError = byId<HTMLParagraphElement>("requests-accepting-error");
 
   const count = byId<HTMLSpanElement>("requests-count");
+  const queueTitle = byId<HTMLHeadingElement>("requests-queue-title");
   const refreshButton = byId<HTMLButtonElement>("requests-refresh");
   const clearButton = byId<HTMLButtonElement>("requests-clear");
   const clearConfirm = byId<HTMLDivElement>("requests-clear-confirm");
@@ -268,6 +485,34 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   const linkField = byId<HTMLElement>("requests-link-field");
   const linkInput = byId<HTMLInputElement>("requests-link-input");
 
+  const interviewSection = byId<HTMLElement>("interview-section");
+  const interviewTitle = byId<HTMLHeadingElement>("interview-title");
+  const interviewStateLabel = byId<HTMLSpanElement>("interview-state");
+  const interviewCandidate = byId<HTMLElement>("interview-candidate");
+  const interviewRefresh = byId<HTMLButtonElement>("interview-refresh");
+  const interviewCount = byId<HTMLSpanElement>("interview-message-count");
+  const interviewLoading = byId<HTMLParagraphElement>("interview-loading");
+  const interviewError = byId<HTMLParagraphElement>("interview-error");
+  const interviewWarning = byId<HTMLParagraphElement>("interview-warning");
+  const interviewEmpty = byId<HTMLParagraphElement>("interview-empty");
+  const interviewMessages = byId<HTMLOListElement>("interview-messages");
+  const interviewComposer = byId<HTMLFormElement>("interview-composer");
+  const interviewInput = byId<HTMLTextAreaElement>("interview-message-input");
+  const interviewHint = byId<HTMLParagraphElement>("interview-message-hint");
+  const interviewSend = byId<HTMLButtonElement>("interview-send");
+  const interviewComposerError = byId<HTMLParagraphElement>(
+    "interview-composer-error",
+  );
+  const interviewEnd = byId<HTMLButtonElement>("interview-end");
+  const interviewEndConfirm = byId<HTMLDivElement>("interview-end-confirm");
+  const interviewEndConfirmText = byId<HTMLParagraphElement>(
+    "interview-end-confirm-text",
+  );
+  const interviewEndCancel = byId<HTMLButtonElement>("interview-end-cancel");
+  const interviewEndConfirmButton = byId<HTMLButtonElement>(
+    "interview-end-confirm-button",
+  );
+
   let current: CandidateStateV1 | null = null;
   /** A successful read happened; `current === null` is then a missing room. */
   let loaded = false;
@@ -289,6 +534,30 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   let copying = false;
   let copied = false;
   let manualLink: string | null = null;
+
+  /** The owner's own zone, read alongside the candidate room. */
+  let zoneState: StateV3 | null = null;
+  let zoneLoaded = false;
+  let zoneError: string | null = null;
+
+  /** Set after an invite so a deduped candidate (the offline self flow) shows. */
+  let invitedCandidate: string | null = null;
+  /** A membership write (invite or end) is in flight. */
+  let interviewWriting = false;
+  let interviewStartingId: string | null = null;
+  let interviewActionError: string | null = null;
+  let interviewEndingConfirm = false;
+  let sendingInterviewMessage = false;
+  let interviewComposerErrorText: string | null = null;
+  /** Decrypted/plaintext bodies keyed by message id; epoch keys stay in crypto. */
+  let interviewViews = new Map<string, RoomBodyView>();
+  let interviewDecrypting = false;
+  /** Invalidates in-flight decryption when the room/identity changes or closes. */
+  let interviewGeneration = 0;
+  /** Focus the interview heading once when it appears for this opening. */
+  let interviewFocusWanted = false;
+  /** The last active interview announced by a read, to avoid repeating it. */
+  let announcedInterview: string | null = null;
 
   let lastFocus: HTMLElement | null = null;
   let liveStatus = "";
@@ -313,6 +582,59 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     return rows().map((request) => candidateRequestId(request));
   }
 
+  function latestInterview(): CandidateMembershipV1 | null {
+    return current === null ? null : latestCandidateMembership(current);
+  }
+
+  function candidateView(): InterviewCandidateView {
+    const owner = ownId();
+    if (owner === null) return { candidate: null, warning: null };
+    return interviewCandidateView(current, zoneState, owner, invitedCandidate);
+  }
+
+  function candidateId(): string | null {
+    return candidateView().candidate;
+  }
+
+  function interviewVisible(): boolean {
+    const view = candidateView();
+    return view.candidate !== null || view.warning !== null;
+  }
+
+  function interviewLock(): string | null {
+    const owner = ownId();
+    if (owner === null) return "Waiting for your identity.";
+    return interviewMembershipLock(
+      owner,
+      zoneState,
+      candidateId(),
+      latestInterview(),
+    );
+  }
+
+  function anyWriteBusy(): boolean {
+    return (
+      acceptingBusy ||
+      clearing ||
+      dismissing !== null ||
+      interviewWriting ||
+      sendingInterviewMessage
+    );
+  }
+
+  function clearInterviewViews(): void {
+    interviewViews = new Map();
+    interviewDecrypting = false;
+    interviewGeneration += 1;
+  }
+
+  function showInterviewHeading(): void {
+    if (!dialog.open || !interviewVisible()) return;
+    if (!interviewFocusWanted) return;
+    interviewFocusWanted = false;
+    interviewTitle.focus({ preventScroll: true });
+  }
+
   function setStatus(message: string): void {
     if (liveStatus === message) return;
     liveStatus = message;
@@ -332,8 +654,9 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     const owner = ownId();
     const waiting = owner === null;
     const requests = rows();
-    const busy = acceptingBusy || clearing || dismissing !== null;
+    const busy = anyWriteBusy();
     const initialLoading = loading && !loaded;
+    const interview = interviewVisible();
 
     dialog.dataset.state = waiting
       ? "waiting"
@@ -342,6 +665,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
         : loadError !== null && !loaded
           ? "error"
           : "ready";
+    dialog.dataset.interview = String(interview);
 
     acceptingToggle.checked = displayedAccepting();
     acceptingToggle.disabled = waiting || initialLoading || busy;
@@ -403,6 +727,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     emptyLine.hidden =
       waiting ||
       loading ||
+      interview ||
       (loadError !== null && !loaded) ||
       requests.length > 0;
     emptyLine.tabIndex = -1;
@@ -427,6 +752,8 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     } else {
       copyStatus.textContent = "";
     }
+
+    renderInterview(busy);
 
     if (waiting) {
       setStatus("Waiting for your identity.");
@@ -496,6 +823,51 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     message.hidden = rowError === undefined;
     message.textContent = rowError ?? "";
 
+    const owner = ownId();
+    let blockReason: string | null = null;
+    if (owner === null) {
+      blockReason = "Waiting for your identity.";
+    } else if (interviewVisible()) {
+      blockReason =
+        candidateId() === request.requester
+          ? "The interview is already open."
+          : "An interview is already in progress.";
+    } else if (zoneState === null) {
+      blockReason = zoneError ?? "Your zone could not be read.";
+    } else {
+      blockReason = interviewBlockReason(
+        current,
+        zoneState,
+        owner,
+        request.requester,
+      );
+    }
+
+    const block = document.createElement("p");
+    block.className = "requests-row-block";
+    block.hidden = blockReason === null;
+    block.textContent = blockReason ?? "";
+
+    const interviewButton = document.createElement("button");
+    interviewButton.type = "button";
+    interviewButton.className =
+      "button button--small button--primary requests-interview";
+    interviewButton.dataset.requestId = id;
+    interviewButton.textContent =
+      interviewStartingId === id ? "Starting…" : "Interview";
+    interviewButton.disabled = busy || blockReason !== null;
+    interviewButton.setAttribute("aria-busy", String(interviewStartingId === id));
+    interviewButton.setAttribute(
+      "aria-label",
+      blockReason === null
+        ? `Interview ${shortRequester(request.requester)}`
+        : `Interview unavailable: ${blockReason}`,
+    );
+    if (blockReason !== null) interviewButton.title = blockReason;
+    interviewButton.addEventListener("click", () => {
+      void startInterview(id, request.requester);
+    });
+
     const dismissButton = document.createElement("button");
     dismissButton.type = "button";
     dismissButton.className = "button button--small button--quiet requests-dismiss";
@@ -511,9 +883,188 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
       void dismissRequest(id);
     });
 
-    foot.append(message, dismissButton);
+    foot.append(message, block, interviewButton, dismissButton);
     item.append(head, note, foot);
     return item;
+  }
+
+  function interviewAuthorLabel(author: string): string {
+    return author === ownId() ? "You" : `Member ${author.slice(0, 8)}`;
+  }
+
+  function renderInterview(busy: boolean): void {
+    const owner = ownId();
+    const view = candidateView();
+    const visible = view.candidate !== null || view.warning !== null;
+    interviewSection.hidden = !visible;
+
+    if (!visible) {
+      interviewEndConfirm.hidden = true;
+      interviewEndingConfirm = false;
+      interviewMessages.replaceChildren();
+      interviewEmpty.hidden = true;
+      interviewWarning.hidden = true;
+      interviewError.hidden = true;
+      interviewLoading.hidden = true;
+      return;
+    }
+
+    const id = view.candidate;
+    interviewCandidate.textContent =
+      id === null ? "Unknown candidate" : shorten(id);
+    if (id === null) interviewCandidate.removeAttribute("title");
+    else interviewCandidate.title = id;
+    interviewCandidate.setAttribute(
+      "aria-label",
+      id === null ? "Candidate unknown" : `Candidate ${id}`,
+    );
+    interviewStateLabel.textContent =
+      id === null ? "Needs attention" : "Interviewing";
+    interviewStateLabel.dataset.state = id === null ? "warning" : "active";
+    interviewWarning.hidden = view.warning === null;
+    interviewWarning.textContent = view.warning ?? "";
+
+    const latest = latestInterview();
+    const allMessages = current?.messages ?? [];
+    const rows = interviewMessageRows(allMessages, latest);
+    const atEpoch =
+      latest === null
+        ? 0
+        : allMessages.filter((message) => message.epoch === latest.seq).length;
+    interviewCount.textContent = roomMessageCountLabel(atEpoch, rows.length);
+
+    interviewMessages.replaceChildren();
+    for (const row of rows) {
+      const item = document.createElement("li");
+      item.className = "room-message";
+      item.dataset.history = String(row.history);
+      item.dataset.self = String(row.message.author === owner);
+
+      const head = document.createElement("div");
+      head.className = "room-message-head";
+
+      const author = document.createElement("span");
+      author.className = "room-message-author";
+      author.textContent = interviewAuthorLabel(row.message.author);
+      author.title = row.message.author;
+      head.append(author);
+
+      const cached = interviewViews.get(roomMessageId(row.message));
+      const bodyView = interviewBodyView(row.message.body, cached);
+      const encryption =
+        bodyView === null ? "pending" : bodyView.kind;
+      item.dataset.encryption = encryption;
+
+      const badge = document.createElement("span");
+      badge.className = "room-message-badge room-message-encryption";
+      badge.dataset.state = encryption;
+      badge.textContent =
+        encryption === "encrypted"
+          ? "Encrypted"
+          : encryption === "plaintext"
+            ? "Unencrypted"
+            : encryption === "unreadable"
+              ? "Not readable"
+              : "Decrypting";
+      head.append(badge);
+
+      const time = document.createElement("time");
+      time.className = "room-message-time";
+      const iso = roomTimeIso(row.message.time);
+      if (iso !== null) time.dateTime = iso;
+      time.textContent = formatRoomTime(row.message.time);
+      time.title = iso ?? "Unknown time";
+      head.append(time);
+
+      const body = document.createElement("p");
+      body.className = "room-message-body";
+      if (bodyView === null) {
+        body.textContent = "Reading encrypted message…";
+      } else if (bodyView.kind === "unreadable") {
+        body.textContent = "Not readable for this epoch";
+      } else {
+        body.textContent = bodyView.text;
+      }
+
+      item.append(head, body);
+      interviewMessages.append(item);
+    }
+
+    interviewEmpty.hidden = rows.length > 0 || loading;
+    interviewEmpty.textContent = "No messages yet. Say hello.";
+
+    const actionError = interviewActionError ?? zoneError;
+    interviewError.hidden = actionError === null;
+    interviewError.textContent = actionError ?? "";
+    interviewLoading.hidden = !(loading && (current === null || !zoneLoaded));
+
+    const lock = interviewLock();
+    const encrypted = (latest?.secrets.length ?? 0) > 0;
+    const limit = interviewComposerLimit(latest);
+    const text = interviewInput.value;
+    const bytes = roomByteLength(text);
+    const over = bytes > limit;
+    const problem = roomComposerProblem(text, limit);
+    const canSend =
+      id !== null &&
+      latest !== null &&
+      lock === null &&
+      !busy &&
+      !loading;
+
+    interviewInput.disabled = !canSend;
+    interviewInput.setAttribute("aria-invalid", over ? "true" : "false");
+    interviewComposer.classList.toggle("is-over", over);
+    interviewComposer.setAttribute(
+      "aria-busy",
+      String(sendingInterviewMessage),
+    );
+    interviewSend.disabled = !canSend || problem !== null;
+    interviewSend.textContent = sendingInterviewMessage ? "Sending…" : "Send";
+    interviewSend.setAttribute(
+      "aria-busy",
+      String(sendingInterviewMessage),
+    );
+
+    interviewHint.classList.toggle("is-warning", over && canSend);
+    if (owner === null) {
+      interviewHint.textContent = "Waiting for your identity.";
+    } else if (loading) {
+      interviewHint.textContent = "Reading the interview…";
+    } else if (!zoneLoaded) {
+      interviewHint.textContent = "Reading your zone…";
+    } else if (lock !== null) {
+      interviewHint.textContent = lock;
+    } else if (latest === null) {
+      interviewHint.textContent = "The interview has no signed membership yet.";
+    } else if (over) {
+      interviewHint.textContent = `Too long: ${bytes} / ${limit} bytes.`;
+    } else {
+      interviewHint.textContent = `${bytes} / ${limit} bytes${
+        encrypted ? " (encrypted)" : ""
+      }. Enter sends; Shift+Enter adds a line.`;
+    }
+
+    interviewComposerError.hidden = interviewComposerErrorText === null;
+    interviewComposerError.textContent = interviewComposerErrorText ?? "";
+
+    const canEnd = id !== null && latest !== null && !busy && !loading;
+    interviewEnd.hidden = interviewEndingConfirm;
+    interviewEnd.disabled = !canEnd;
+    interviewEndConfirm.hidden = !interviewEndingConfirm;
+    interviewEndConfirmText.textContent =
+      id === null
+        ? ""
+        : `End the interview with ${shorten(id)}? This removes them from the candidate room. Old messages stay in the room.`;
+    interviewEndCancel.disabled = busy;
+    interviewEndConfirmButton.disabled = busy;
+    interviewEndConfirmButton.textContent = interviewWriting
+      ? "Ending…"
+      : "End interview";
+    interviewRefresh.disabled = busy || loading;
+    interviewRefresh.textContent = loading ? "Refreshing…" : "Refresh";
+
+    if (id !== null) void ensureInterviewDecryption();
   }
 
   async function load(announceResult: boolean): Promise<void> {
@@ -526,51 +1077,344 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
       loaded = false;
       loading = false;
       loadError = null;
+      zoneState = null;
+      zoneLoaded = false;
+      zoneError = null;
+      clearInterviewViews();
       render();
       return;
     }
 
     loading = true;
     loadError = null;
+    zoneError = null;
     render();
 
     try {
-      const state = await deps.transport.read(owner);
+      const [candidateResult, zoneResult] = await Promise.allSettled([
+        deps.transport.read(owner),
+        deps.readOwnZone(),
+      ]);
       if (token !== readToken || run !== generation) return;
-      current = state;
-      loaded = true;
-      loadError = null;
-      const known = new Set(
-        state === null
-          ? []
-          : state.requests.map((request) => candidateRequestId(request)),
-      );
-      for (const id of [...rowErrors.keys()]) {
-        if (!known.has(id)) rowErrors.delete(id);
+
+      if (candidateResult.status === "fulfilled") {
+        const state = candidateResult.value;
+        current = state;
+        loaded = true;
+        loadError = null;
+        const known = new Set(
+          state === null
+            ? []
+            : state.requests.map((request) => candidateRequestId(request)),
+        );
+        for (const id of [...rowErrors.keys()]) {
+          if (!known.has(id)) rowErrors.delete(id);
+        }
+      } else {
+        loadError = requestsErrorText(candidateResult.reason, "read");
+        deps.announce(loadError);
       }
-      if (announceResult) {
+
+      if (zoneResult.status === "fulfilled") {
+        zoneState = zoneResult.value;
+        zoneLoaded = true;
+        zoneError = null;
+      } else {
+        zoneState = null;
+        zoneLoaded = false;
+        zoneError = requestsErrorText(zoneResult.reason, "zone");
+        deps.announce(zoneError);
+      }
+
+      const active = candidateView();
+      const key =
+        active.candidate === null
+          ? null
+          : `${active.candidate}:${latestInterview()?.seq ?? 0}`;
+      if (key !== null && key !== announcedInterview) {
         deps.announce(
-          state === null || state.requests.length === 0
-            ? "Join request queue refreshed. No open requests."
-            : `Join request queue refreshed. ${requestCountLabel(
-                state.requests.length,
-              )}.`,
+          `Interview with ${shortRequester(active.candidate!)} is active.`,
         );
       }
-    } catch (error) {
-      if (token !== readToken || run !== generation) return;
-      loadError = requestsErrorText(error, "read");
-      deps.announce(loadError);
+      announcedInterview = key;
+
+      if (announceResult) {
+        if (candidateResult.status === "fulfilled") {
+          const state = candidateResult.value;
+          deps.announce(
+            state === null || state.requests.length === 0
+              ? "Join request queue refreshed. No open requests."
+              : `Join request queue refreshed. ${requestCountLabel(
+                  state.requests.length,
+                )}.`,
+          );
+        }
+      }
     } finally {
       if (token === readToken && run === generation) {
         loading = false;
         render();
+        showInterviewHeading();
       }
     }
   }
 
+  async function ensureInterviewDecryption(): Promise<void> {
+    if (interviewDecrypting) return;
+    const owner = ownId();
+    const state = current;
+    if (owner === null || state === null || zoneState === null) return;
+    const latest = latestCandidateMembership(state);
+    if (latest === null) return;
+
+    const rows = interviewMessageRows(state.messages, latest);
+    const pending = rows.filter(
+      (row) =>
+        isEncryptedRoomBody(row.message.body) &&
+        !interviewViews.has(roomMessageId(row.message)),
+    );
+    if (pending.length === 0) return;
+
+    const generation = interviewGeneration;
+    const roomId = deps.transport.roomIdFor(owner);
+    interviewDecrypting = true;
+    try {
+      let key: Uint8Array | null = null;
+      try {
+        key = await deps.transport.epochKeyFor(owner, latest);
+      } catch {
+        // A missing or foreign blob is "not readable", never plaintext.
+        key = null;
+      }
+      if (generation !== interviewGeneration) return;
+
+      for (const row of pending) {
+        const view = await readRoomBody(
+          key,
+          {
+            roomId,
+            owner,
+            author: row.message.author,
+            epoch: row.message.epoch,
+            tag: INTERVIEW_TAG,
+          },
+          row.message.body,
+        );
+        if (generation !== interviewGeneration) return;
+        interviewViews.set(roomMessageId(row.message), view);
+      }
+    } finally {
+      interviewDecrypting = false;
+    }
+
+    if (generation === interviewGeneration && current === state) {
+      render();
+    }
+  }
+
+  async function startInterview(
+    requestId: string,
+    requester: string,
+  ): Promise<void> {
+    if (anyWriteBusy()) return;
+    const owner = ownId();
+    if (owner === null) return;
+    const run = generation;
+
+    interviewWriting = true;
+    interviewStartingId = requestId;
+    interviewActionError = null;
+    interviewComposerErrorText = null;
+    interviewEndingConfirm = false;
+    rowErrors.delete(requestId);
+    render();
+
+    try {
+      const [nextZone, nextCandidate] = await Promise.all([
+        deps.readOwnZone(),
+        deps.transport.read(owner),
+      ]);
+      if (run !== generation || ownId() !== owner) return;
+      if (nextZone === null) {
+        interviewActionError = "Your zone could not be read. Try again.";
+        deps.announce(interviewActionError);
+        return;
+      }
+
+      zoneState = nextZone;
+      zoneLoaded = true;
+      zoneError = null;
+      current = nextCandidate;
+      loaded = true;
+      loadError = null;
+
+      const reason = interviewBlockReason(
+        current,
+        nextZone,
+        owner,
+        requester,
+      );
+      if (reason !== null) {
+        rowErrors.set(requestId, reason);
+        deps.announce(reason);
+        return;
+      }
+
+      const members = interviewMembers(owner, nextZone, requester);
+      const afterInvite = await deps.transport.updateMembership(
+        owner,
+        members,
+        { encrypt: true },
+      );
+      if (run !== generation || ownId() !== owner) return;
+      current = afterInvite;
+      loaded = true;
+      invitedCandidate = requester;
+      interviewFocusWanted = true;
+      announcedInterview = `${requester}:${
+        latestCandidateMembership(afterInvite)?.seq ?? 0
+      }`;
+
+      let warning: string | null = null;
+      try {
+        current = await deps.transport.dismiss(owner, requestId);
+      } catch (error) {
+        // The invite already landed; the request staying is a warning, not a
+        // reason to roll the interview back.
+        const dismissError = requestsErrorText(error, "dismiss");
+        warning = `The interview started, but the request remains in the queue. ${dismissError}`;
+        rowErrors.set(requestId, warning);
+      }
+      if (run !== generation || ownId() !== owner) return;
+      deps.announce(
+        warning ?? `Interview started with ${shortRequester(requester)}.`,
+      );
+    } catch (error) {
+      if (run !== generation || ownId() !== owner) return;
+      interviewActionError = requestsErrorText(error, "interview");
+      deps.announce(interviewActionError);
+    } finally {
+      if (run === generation) {
+        interviewWriting = false;
+        interviewStartingId = null;
+        render();
+        showInterviewHeading();
+      }
+    }
+  }
+
+  async function endInterview(): Promise<void> {
+    if (anyWriteBusy()) return;
+    const owner = ownId();
+    if (owner === null) return;
+    const run = generation;
+
+    interviewWriting = true;
+    interviewEndingConfirm = false;
+    interviewActionError = null;
+    interviewComposerErrorText = null;
+    render();
+
+    try {
+      const nextZone = await deps.readOwnZone();
+      if (run !== generation || ownId() !== owner) return;
+      if (nextZone === null) {
+        interviewActionError = "Your zone could not be read. Try again.";
+        deps.announce(interviewActionError);
+        return;
+      }
+
+      zoneState = nextZone;
+      zoneLoaded = true;
+      zoneError = null;
+      const members = interviewRemainingMembers(owner, nextZone);
+      const state = await deps.transport.updateMembership(owner, members, {
+        encrypt: true,
+      });
+      if (run !== generation || ownId() !== owner) return;
+      current = state;
+      loaded = true;
+      loadError = null;
+      invitedCandidate = null;
+      announcedInterview = null;
+      clearInterviewViews();
+      deps.announce("Interview ended.");
+    } catch (error) {
+      if (run !== generation || ownId() !== owner) return;
+      interviewActionError = requestsErrorText(error, "end");
+      deps.announce(interviewActionError);
+    } finally {
+      if (run === generation) {
+        interviewWriting = false;
+        render();
+        if (dialog.open) queueTitle.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  async function sendInterviewMessage(): Promise<void> {
+    if (anyWriteBusy()) return;
+    const owner = ownId();
+    if (owner === null) return;
+    const candidate = candidateId();
+    const latest = latestInterview();
+    if (candidate === null || latest === null) return;
+
+    const lock = interviewMembershipLock(
+      owner,
+      zoneState,
+      candidate,
+      latest,
+    );
+    if (lock !== null) {
+      interviewComposerErrorText = lock;
+      render();
+      interviewInput.focus({ preventScroll: true });
+      return;
+    }
+
+    const limit = interviewComposerLimit(latest);
+    const text = interviewInput.value;
+    const problem = roomComposerProblem(text, limit);
+    if (problem !== null) {
+      interviewComposerErrorText = problem;
+      render();
+      interviewInput.focus({ preventScroll: true });
+      return;
+    }
+
+    const run = generation;
+    sendingInterviewMessage = true;
+    interviewComposerErrorText = null;
+    render();
+
+    try {
+      const next = await deps.transport.sendMessage(
+        owner,
+        new TextEncoder().encode(text),
+      );
+      if (run !== generation || ownId() !== owner) return;
+      current = next;
+      loaded = true;
+      loadError = null;
+      interviewInput.value = "";
+      deps.announce("Message sent.");
+    } catch (error) {
+      if (run !== generation || ownId() !== owner) return;
+      interviewComposerErrorText = requestsErrorText(error, "message");
+      deps.announce(interviewComposerErrorText);
+    } finally {
+      if (run === generation) {
+        sendingInterviewMessage = false;
+        render();
+        if (dialog.open) interviewInput.focus({ preventScroll: true });
+      }
+    }
+  }
+
+
   async function setAccepting(desired: boolean): Promise<void> {
-    if (acceptingBusy || clearing || dismissing !== null) return;
+    if (anyWriteBusy()) return;
     const owner = ownId();
     if (owner === null) return;
     if (desired === acceptingValue()) {
@@ -608,7 +1452,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   }
 
   async function dismissRequest(id: string): Promise<void> {
-    if (dismissing !== null || clearing || acceptingBusy) return;
+    if (anyWriteBusy()) return;
     const owner = ownId();
     if (owner === null) return;
     const run = generation;
@@ -638,7 +1482,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   }
 
   async function clearAll(): Promise<void> {
-    if (clearing || dismissing !== null || acceptingBusy) return;
+    if (anyWriteBusy()) return;
     const owner = ownId();
     if (owner === null) return;
     const ids = rowIds();
@@ -736,6 +1580,19 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     loaded = false;
     loading = false;
     loadError = null;
+    zoneState = null;
+    zoneLoaded = false;
+    zoneError = null;
+    invitedCandidate = null;
+    interviewWriting = false;
+    interviewStartingId = null;
+    interviewActionError = null;
+    interviewEndingConfirm = false;
+    sendingInterviewMessage = false;
+    interviewComposerErrorText = null;
+    interviewFocusWanted = true;
+    announcedInterview = null;
+    clearInterviewViews();
     acceptingBusy = false;
     acceptingPending = null;
     acceptingErrorText = null;
@@ -767,6 +1624,9 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     if (!dialog.open) return;
     clearMessage = null;
     clearConfirmPending = false;
+    interviewActionError = null;
+    interviewComposerErrorText = null;
+    interviewEndingConfirm = false;
     void load(true);
   }
 
@@ -812,6 +1672,53 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     void copyJoinLink();
   });
 
+  interviewRefresh.addEventListener("click", () => {
+    refresh();
+  });
+
+  interviewEnd.addEventListener("click", () => {
+    if (interviewEnd.hidden || interviewEnd.disabled) return;
+    interviewEndingConfirm = true;
+    render();
+    interviewEndConfirmButton.focus({ preventScroll: true });
+  });
+
+  interviewEndCancel.addEventListener("click", () => {
+    interviewEndingConfirm = false;
+    render();
+    interviewEnd.focus({ preventScroll: true });
+  });
+
+  interviewEndConfirmButton.addEventListener("click", () => {
+    void endInterview();
+  });
+
+  interviewComposer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendInterviewMessage();
+  });
+
+  interviewInput.addEventListener("keydown", (event) => {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.isComposing &&
+      !interviewInput.disabled
+    ) {
+      event.preventDefault();
+      interviewComposer.requestSubmit();
+    }
+  });
+
+  interviewInput.addEventListener("input", () => {
+    if (interviewComposerErrorText !== null) {
+      interviewComposerErrorText = null;
+      interviewComposerError.hidden = true;
+      interviewComposerError.textContent = "";
+    }
+    render();
+  });
+
   closeButton.addEventListener("click", close);
   doneButton.addEventListener("click", close);
   openButton.addEventListener("click", open);
@@ -825,6 +1732,12 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     dismissing = null;
     clearing = false;
     clearConfirmPending = false;
+    interviewWriting = false;
+    interviewStartingId = null;
+    interviewEndingConfirm = false;
+    sendingInterviewMessage = false;
+    interviewFocusWanted = false;
+    clearInterviewViews();
     const target = lastFocus;
     lastFocus = null;
     if (target?.isConnected) target.focus({ preventScroll: true });

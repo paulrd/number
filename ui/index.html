@@ -2071,7 +2071,7 @@
               aria-labelledby="requests-queue-title"
             >
               <div class="requests-section-head">
-                <h3 id="requests-queue-title" class="requests-section-title">
+                <h3 id="requests-queue-title" class="requests-section-title" tabindex="-1">
                   Request queue
                 </h3>
                 <span id="requests-count" class="requests-count">
@@ -2153,6 +2153,144 @@
                 class="requests-list"
                 aria-labelledby="requests-queue-title"
               ></ul>
+            </section>
+
+            <section
+              id="interview-section"
+              class="requests-section interview-section"
+              aria-labelledby="interview-title"
+              hidden
+            >
+              <div class="requests-section-head">
+                <h3
+                  id="interview-title"
+                  class="requests-section-title"
+                  tabindex="-1"
+                >
+                  Interview
+                </h3>
+                <span
+                  id="interview-state"
+                  class="interview-state"
+                  data-state="active"
+                >
+                  Interviewing
+                </span>
+                <code id="interview-candidate" class="interview-candidate"></code>
+                <span id="interview-message-count" class="requests-count">
+                  No messages
+                </span>
+                <div class="requests-head-actions">
+                  <button
+                    id="interview-refresh"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              <p class="interview-intro">
+                Messages are encrypted for the candidate room's current members.
+                The candidate sees this conversation from their pending request.
+              </p>
+
+              <p
+                id="interview-warning"
+                class="form-error interview-warning"
+                role="alert"
+                hidden
+              ></p>
+              <p id="interview-loading" class="requests-loading" hidden>
+                Reading the interview…
+              </p>
+              <p
+                id="interview-error"
+                class="form-error requests-error"
+                role="alert"
+                hidden
+              ></p>
+              <p id="interview-empty" class="requests-empty" hidden>
+                No messages yet. Say hello.
+              </p>
+
+              <ol
+                id="interview-messages"
+                class="room-messages interview-messages"
+                aria-labelledby="interview-title"
+              ></ol>
+
+              <form
+                id="interview-composer"
+                class="room-composer interview-composer"
+                novalidate
+              >
+                <label class="field" for="interview-message-input">
+                  <span>Message</span>
+                  <textarea
+                    id="interview-message-input"
+                    rows="3"
+                    maxlength="2000"
+                    aria-describedby="interview-message-hint interview-composer-error"
+                  ></textarea>
+                </label>
+                <div class="room-composer-foot">
+                  <p
+                    id="interview-message-hint"
+                    class="field-hint"
+                    aria-live="polite"
+                  ></p>
+                  <button
+                    id="interview-send"
+                    class="button button--small button--primary"
+                    type="submit"
+                  >
+                    Send
+                  </button>
+                </div>
+                <p
+                  id="interview-composer-error"
+                  class="form-error"
+                  role="alert"
+                  hidden
+                ></p>
+              </form>
+
+              <div
+                id="interview-end-confirm"
+                class="requests-confirm"
+                role="alert"
+                hidden
+              >
+                <p id="interview-end-confirm-text"></p>
+                <div class="requests-confirm-actions">
+                  <button
+                    id="interview-end-cancel"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="interview-end-confirm-button"
+                    class="button button--small button--danger"
+                    type="button"
+                  >
+                    End interview
+                  </button>
+                </div>
+              </div>
+
+              <div class="interview-actions">
+                <button
+                  id="interview-end"
+                  class="button button--small button--quiet"
+                  type="button"
+                >
+                  End interview
+                </button>
+              </div>
             </section>
 
             <section

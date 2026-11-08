@@ -527,6 +527,55 @@ candidate pending surface lives in the join dialog after a successful request,
 with a manual **Check again** action. The existing slot editor remains the
 designation step; do not duplicate region ranking in the queue.
 
+### 12.2.1 Pure helpers (P4c3b1)
+
+`ui/src/candidate-interview.ts` holds the derivations both surfaces share:
+
+```ts
+export function zoneChildren(ownerId: string, state: StateV3): string[];
+export function interviewMembers(
+  ownerId: string,
+  state: StateV3,
+  candidate: string,
+): string[];
+export interface InterviewState {
+  seq: number;
+  members: string[];
+  candidate: string | null; // a member outside owner ∪ zone children
+}
+export function interviewState(
+  candidateState: CandidateStateV1 | null,
+  zoneState: StateV3,
+  ownerId: string,
+): InterviewState | null;
+export function interviewBlockReason(
+  candidateState: CandidateStateV1 | null,
+  zoneState: StateV3,
+  ownerId: string,
+  candidate: string,
+): string | null;
+export function admissionSlot(zoneState: StateV3, candidateId: string): number | null;
+export function admissionAddress(ownAddress: string, slot: number): string;
+export function admissionBlockReason(ownState: StateV3): string | null;
+```
+
+Rules:
+
+- `zoneChildren` is the occupied slot contacts, deduped and ascending.
+- `interviewMembers` is `[owner, ...children, candidate]`, deduped, ascending;
+  it is invalid above 9 members (the zone is full).
+- `interviewState` reads the latest candidate membership; the candidate is the
+  single member outside owner ∪ children. Zero or more than one such member is
+  a client-visible inconsistency (render no active candidate / a warning).
+- `interviewBlockReason` returns a sentence when the zone already has a
+  candidate, is full (eight children), or the requester is already a child.
+- `admissionSlot` returns the first slot whose `entry.contact` is the
+  candidate; null when the owner has not written it.
+- `admissionBlockReason` returns the §3.5 sentence when the candidate's own
+  zone already has a parent or any occupied child; null when it may join.
+- No DOM, transport or crypto in this module.
+
+
 
 
 

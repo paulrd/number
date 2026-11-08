@@ -44,7 +44,35 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c owner side
+## Where we left off (2026-11-08) — P4c interviews
+
+### P4c3b1 implemented (2026-11-08): owner interview
+
+- Pure helpers `ui/src/candidate-interview.ts`: zone children, interview
+  members, active-candidate derivation, invite block reasons, admission slot/
+  address and the §3.5 admission refusal; 28 tests.
+- Requests panel rows gain **Interview** (disabled with a reason when another
+  candidate is active, the requester is already a child, or the zone is full).
+  Inviting reads the zone + candidate state, signs a fresh encrypted membership
+  `[owner, children, requester]`, then dismisses the request; a dismiss failure
+  keeps the invite and warns.
+- Interview view: shortened candidate id, Refresh, latest-epoch messages with
+  `ZCR1` decryption and Unencrypted/Encrypted/Not readable states, a 995-byte
+  encrypted composer (1024 legacy), a hard membership lock when the zone-derived
+  set differs from the signed membership, and a confirmed **End interview** that
+  rotates to `[owner, children]` and keeps old epochs as history.
+- No admission/slot write and no candidate-side surface yet (P4c3b2).
+- UI 502 tests / 34 files; offline e2e 35; all Rust suites and
+  `make check-artifacts` green.
+
+**Next is P4c3b2 (admit + candidate side), then P4d (live smoke + republish).**
+
+- P4c3b2: owner **Admit** writes the slot (region designation) and rotates the
+  candidate room; the candidate's pending surface detects the invite (chat),
+  the assigned slot/address, the §3.5 admission rule, and signs `parent`.
+  Spec is `DESIGN-candidates.md` §12.2.
+- P4d: live two-identity onboarding smoke (no contacts → root link → request →
+  interview → admit) and site republish.
 
 ### P4c3a implemented (2026-11-08): owner request queue
 
@@ -275,7 +303,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **457 UI**, **34 offline e2e** (the region/room
+candidate**, **104 delegate**, **502 UI**, **35 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -644,7 +672,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 457, offline e2e 34, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 502, offline e2e 35, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -683,6 +711,14 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c3b1: owner interview**
+- Pure interview helpers (children, members, active candidate, block reasons,
+  admission slot/address, §3.5 refusal), 28 tests.
+- Requests panel gains Interview and an encrypted interview view: invite signs
+  a fresh membership and dismisses the request, latest-epoch messages decrypt
+  with ZCR1, hard composer lock on membership mismatch, confirmed End rotates.
+- No admit/candidate side yet. UI 502 tests / 34 files, offline e2e 35.
 
 **2026-11-08 — P4c3a: owner join-request queue**
 - Advanced Join requests dialog: accepting toggle, newest-first public queue

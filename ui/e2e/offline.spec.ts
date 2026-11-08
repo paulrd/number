@@ -1930,3 +1930,100 @@ test("reviews and moderates the owner's join-request queue", async ({ page }) =>
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
+
+test("interviews a requester in the candidate room and ends the round", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await openAdvanced(page);
+
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
+
+  // Use the real join flow to put one request into the own zone's queue.
+  await page.locator("#join-open").click();
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await page.locator("#join-root-input").fill(ownerId!);
+  await page.locator("#join-root-continue").click();
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  await page.locator("#join-lat").fill("10");
+  await page.locator("#join-lng").fill("10");
+  await page.locator("#join-point").click();
+  await expect(page.locator("#join-result")).toBeVisible();
+  await page.locator("#join-note").fill("Offline interview check");
+  await page.locator("#join-submit").click();
+  await expect(page.locator("#join-request-success")).toBeVisible();
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await expect(page.locator("#requests-title")).toBeFocused();
+
+  const row = page.locator("#requests-list .requests-row");
+  await expect(row).toHaveCount(1);
+  const interviewButton = row.locator(".requests-interview");
+  await expect(interviewButton).toBeEnabled();
+  await interviewButton.click();
+
+  await expect(page.locator("#interview-section")).toBeVisible();
+  await expect(page.locator("#interview-title")).toBeFocused();
+  await expect(page.locator("#interview-state")).toHaveText("Interviewing");
+  await expect(page.locator("#interview-candidate")).toHaveText(
+    `${ownerId!.slice(0, 8)}…${ownerId!.slice(-8)}`,
+  );
+  await expect(page.locator("#interview-candidate")).toHaveAttribute(
+    "title",
+    ownerId!,
+  );
+  await expect(page.locator("#interview-empty")).toBeVisible();
+  await expect(page.locator("#interview-empty")).toContainText(
+    "No messages yet. Say hello.",
+  );
+  await expect(page.locator("#requests-count")).toHaveText("No open requests");
+  await expect(page.locator("#requests-list .requests-row")).toHaveCount(0);
+
+  // The offline candidate transport is plaintext: expect the Unencrypted badge.
+  await page.locator("#interview-message-input").fill("Hello from the interview");
+  await page.locator("#interview-send").click();
+  const sent = page.locator("#interview-messages .room-message");
+  await expect(sent).toHaveCount(1);
+  await expect(sent.locator(".room-message-body")).toHaveText(
+    "Hello from the interview",
+  );
+  await expect(
+    sent.locator(".room-message-encryption"),
+  ).toHaveText("Unencrypted");
+  await expect(page.locator("#interview-empty")).toBeHidden();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  // Ending is confirmed, removes the candidate, and returns to the empty queue.
+  await page.locator("#interview-end").click();
+  await expect(page.locator("#interview-end-confirm")).toBeVisible();
+  await expect(page.locator("#interview-end-confirm-button")).toBeFocused();
+  await page.locator("#interview-end-confirm-button").click();
+  await expect(page.locator("#interview-section")).toBeHidden();
+  await expect(page.locator("#requests-empty")).toBeVisible();
+  await expect(page.locator("#requests-empty")).toContainText(
+    "No open requests yet",
+  );
+  await expect(page.locator("#requests-count")).toHaveText("No open requests");
+  await expect(page.locator("#interview-messages .room-message")).toHaveCount(0);
+
+  const afterAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    afterAccessibility.violations,
+    `axe violations:\n${JSON.stringify(afterAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

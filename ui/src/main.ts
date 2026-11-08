@@ -4185,6 +4185,12 @@ const joinPanel = createOnboardingPanel({
 createRequestsPanel({
   transport: backend.candidateTransport,
   ownId: () => ownIdentity?.pubkey ?? null,
+  readOwnZone: async () => {
+    const ownerId = ownIdentity?.pubkey ?? null;
+    if (ownerId === null) return null;
+    const snapshot = await backend.readBoard(ownerId);
+    return snapshot?.state ?? null;
+  },
   announce,
 });
 
