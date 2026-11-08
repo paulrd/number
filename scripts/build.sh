@@ -17,7 +17,7 @@
 #
 # Usage: scripts/build.sh [options]
 #   --target-dir DIR   Root for per-crate cargo target dirs (default .build)
-#   --crate NAME       all (default) | contract | delegate | room
+#   --crate NAME       all (default) | contract | delegate | room | candidate
 #   --no-ui            Skip the generated UI constants (no node/npm needed)
 #   --no-package       Skip `fdev build` packaging (raw WASM only)
 #   -h, --help
@@ -47,8 +47,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$CRATE" in
-  all|contract|delegate|room|blob|manifest|regions) ;;
-  *) echo "--crate must be one of: all, contract, delegate, room, blob, manifest, regions" >&2; exit 2 ;;
+  all|contract|delegate|room|candidate|blob|manifest|regions) ;;
+  *) echo "--crate must be one of: all, contract, delegate, room, candidate, blob, manifest, regions" >&2; exit 2 ;;
 esac
 
 TARGET_ROOT="${TARGET_ROOT:-$ROOT/.build}"
@@ -134,6 +134,9 @@ if [ "$CRATE" = "all" ] || [ "$CRATE" = "delegate" ]; then
 fi
 if [ "$CRATE" = "all" ] || [ "$CRATE" = "room" ]; then
   build_one room number_room contract "--features contract"
+fi
+if [ "$CRATE" = "all" ] || [ "$CRATE" = "candidate" ]; then
+  build_one candidate number_candidate contract "--features contract"
 fi
 if [ "$CRATE" = "all" ] || [ "$CRATE" = "blob" ] || [ "$CRATE" = "regions" ]; then
   build_one region/blob region_blob contract "--features contract"

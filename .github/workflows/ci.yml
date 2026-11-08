@@ -76,6 +76,25 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
+  candidate:
+    name: Candidate (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: candidate
+      - name: Check and test
+        working-directory: candidate
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
   regions:
     name: Regions (fmt, clippy, tests)
     runs-on: ubuntu-latest

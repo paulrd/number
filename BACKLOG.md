@@ -6,7 +6,8 @@ Durable state for the project. Read this with `README.md`, then the design docs:
 `DESIGN-regions-p1.md` (stage-1 dataset, contracts, picker),
 `DESIGN-views.md` (what the two surfaces may contain, + revision 3),
 `DESIGN-payments-lca.md` (payments whose endpoint is the LCA),
-`DESIGN-rooms.md` (members-room contract, P3a).
+`DESIGN-rooms.md` (members-room contract, P3a), and
+`DESIGN-candidates.md` (candidates-room contract, P4a).
 
 The app's display name is **Tally**; the repository, crate names, WASM
 filenames and `number.*` secret keys stay `number`, because renaming them
@@ -22,6 +23,7 @@ changes the compiled bytes and re-keys every zone.
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
 | Delegate | **v12** `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb`, code `zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd` (live on all four nodes) |
 | Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the live UI |
+| Candidate contract | **P4a** `candidate/`, not recorded or deployed; raw hash `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh` |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
 | Live site | version `1794080195`, bundle `assets/index-DDEsV89s.js` + lazy `assets/picker-DWQuKAZX.js`, identical on `7509`/`7511`/`7512`/`7513` |
@@ -41,6 +43,64 @@ with any link can pay or be paid, including when an endpoint is the LCA
 background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
+
+## Where we left off (2026-11-08) — P4a candidate room
+
+### P4a implemented (2026-11-08): candidates-room contract
+
+The implementation spec is `DESIGN-candidates.md`. This phase is the contract
+only: no delegate, UI, artifact or deployment change.
+
+- **New standalone `candidate/` crate** (`number-candidate`, lib
+  `number_candidate`, own lockfile) accepting parameters `b"ZCR1" || owner_vk`.
+  The members room stays frozen at `ZMR1`; nothing under `room/` changed.
+- **State v1 = the members-room state plus three records.** `requests` is the
+  bounded public queue (newest 8 by `(time, id)`; `want_cell` is 0–32 octal
+  digits, empty = world; `note` ≤256 opaque bytes; requester-signed, no
+  membership required). `dismissals` is the owner-signed set of dismissed
+  request ids (newest 64). `config` is the owner-signed accepting flag,
+  monotone by `seq`; absent = accepting.
+- **Requests are the only open write.** Everything else keeps the members-room
+  authorship rules. Clearing is dismissals; closing is `config`. Both are
+  merge-effective and delete nothing from contract history.
+- **Merge is a join semilattice** over memberships, messages, requests,
+  dismissals and config; full catch-up deltas; invalid deltas skipped.
+- **Signing domains:** memberships and messages reuse
+  `number:v1:room:{membership,message}` with tag `ZCR1` (the tag separates the
+  kinds); new domains are `number:v1:candidate:{request,dismiss,config}`. The
+  P3c secret/body envelope is reused with `ZCR1`, so delegate v13 only has to
+  accept the tag.
+- **One candidate per epoch** (owner adds a candidate to membership, interviews,
+  then removes them on reject or admit). The contract cannot see zone slots, so
+  the client enforces this.
+- **Build plumbing:** `make candidate`, `make candidate-check` (part of
+  `make check`), CI `candidate` job, `.gitignore`, `scripts/build.sh
+  --crate candidate`. The UI constants step is unchanged.
+- **Provisional code hash** (raw WASM, 603,909 bytes):
+  `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`, hex
+  `32374ace456c653ad49031bfba4fd5aa58de735c59d58904be5a66c03242ebac`.
+  Not recorded in `published/` and not pinned by the UI: the artifact gate and
+  the pin land in P4c, so the contract can still change during integration.
+- Golden fixture `fixtures/candidate/golden_v1.json` (request, dismissal,
+  config, plus the reused membership/message) is byte-stable.
+
+Verified 2026-11-08: `make candidate-check` (24 tests), full `make check`
+(contract, delegate, room, candidate, regions, UI 366) exit 0, and
+`make check-artifacts` still proves the zone, delegate and members-room bytes
+unchanged.
+
+**Next is P4b (delegate v13), then P4c (client + `?root=`), then P4d (deploy).**
+
+- P4b: accept `ZCR1` in `signRoomMembership`, `signRoomMessage`,
+  `sealRoomEpoch` and `openRoomSecret`; add `signCandidateRequest` (any local
+  key), `signCandidateDismissal` and `signCandidateConfig` (owner only).
+  Register v12 in `LEGACY_DELEGATES`, record the delegate, deploy and open each
+  live zone once (the usual re-key).
+- P4c: `?root=` parsing and validation, the shallowest-free-slot match walk,
+  the target panel, request write, queue/interview/admit UI, candidate-room
+  client with the pinned hash, `published/candidate/` and the artifact gate.
+- P4d: live two-identity onboarding smoke (no contacts → root link → request →
+  interview → admit) and site republish.
 
 ## Where we left off (2026-11-07) — regions P1
 
@@ -100,9 +160,10 @@ no re-key.
 - `ui/e2e/live-region.mjs`: manual live manifest read (no CI).
 - CI has a `regions` job; `make check` runs `regions-check`.
 
-Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **95
-delegate**, **366 UI**, **30 offline e2e** (the region/room tests are
-Axe-clean and make no external requests), plus the manual live-room smokes.
+Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
+candidate**, **95 delegate**, **366 UI**, **30 offline e2e** (the region/room
+tests are Axe-clean and make no external requests), plus the manual live-room
+smokes.
 
 ### P2 implemented (2026-11-07); next is P3/P4 (no contract change)
 
@@ -307,6 +368,16 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 - **A room is opened with `?room=<owner-id>`**; owner-only membership controls
   and slot-derived mismatch checks apply only when the target is your own zone.
 
+- **Members-room and candidate-room records share signing domains, not tags.**
+  `number:v1:room:{membership,message}` is signed with `ZMR1` in the members
+  room and `ZCR1` in the candidate room. Never drop the tag from the signed
+  bytes; it is the only thing preventing a replay across kinds.
+
+- **The candidate request queue is bounded, not deleted.** Clearing writes
+  owner dismissals; a dismissal that falls out of the 64-id window can let a
+  stale full-state replay resurrect an old request. The 8-entry queue and the
+  window make this an accepted bound.
+
 - **The code hash is BLAKE3 of the raw WASM**, never the packaged file (the
   package embeds a container). Hashing the packaged file gives a different id.
 - `cargo fmt` can change the manifest hash (panic-location line numbers). Format
@@ -329,6 +400,9 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 ```bash
 # contracts (canonical remap) and tool
 make regions-wasm && make regions-tool && make regions-check
+
+# candidate room contract (native tests; no artifact yet)
+make candidate-check && make candidate
 
 # export the real stage (already done; regenerates .build/regions)
 region/tool/target/release/regions-tool export \
@@ -413,6 +487,9 @@ deployment.
   id to `LEGACY_DELEGATES`. Never remove a registry entry.
 - The build remap namespace (`/cargo`, `/rustup`, `/build`) is frozen; changing
   a root re-keys everything.
+- The candidate room is a **separate WASM** (`ZCR1`). Never fold it into the
+  members room or reuse the members-room code hash; that re-keys every live
+  members room. Never add open writes outside the candidate request queue.
 - Signing domains are frozen for every recorded generation: `number:v2:slot`,
   `number:v2:contacts` (legacy only since v6), `number:v3:parent`,
   `number:v4:payments`, `number:v5:adjustments`, `number:v6:selfname`,
@@ -435,7 +512,7 @@ deployment.
 ## Verify
 
 ```bash
-make check              # contract + delegate fmt/clippy/tests, UI build+tests
+make check              # every crate (fmt/clippy/tests) + UI build+tests
 make check-artifacts    # byte-equality against published/
 make e2e-offline        # built UI + mock backend, includes axe
 make verify-merge       # merge laws against the v6 corpus
@@ -445,8 +522,8 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 95, room 21, UI
-366, offline e2e 30, `verify-merge` 14 laws / 0 violations.
+Expected at the time of writing: contract 123 tests, delegate 95, room 21,
+candidate 24, UI 366, offline e2e 30, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -485,6 +562,18 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4a: candidates-room contract**
+- New standalone `candidate/` crate (`ZCR1`), state v1 = members-room state +
+  bounded request queue (8), owner dismissal set (64) and owner accepting
+  config; requests are the only open write.
+- Canonical request/dismiss/config bytes; membership and message records reuse
+  the room domains under the `ZCR1` tag; P3c envelope reused with `ZCR1`.
+- Semilattice merge, full catch-up deltas, invalid deltas skipped; 24 native
+  tests and a byte-stable golden fixture.
+- `make candidate`/`candidate-check`, CI `candidate` job, build-script support;
+  `make check` and `make check-artifacts` pass. No delegate/UI/artifact/deploy
+  change; code hash provisional at `4P2HZkm…`.
 
 **2026-11-07 — P3c: encrypted members rooms**
 - Delegate v12 `C669…` / `zpYa…`: Ed25519→X25519 conversion, HKDF-SHA256,

@@ -18,9 +18,10 @@ UI := ui
 CONTRACT := contract
 DELEGATE := delegate
 ROOM := room
+CANDIDATE := candidate
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate room regions-wasm regions-tool regions-sign regions-publish regions-verify regions-check check room-check check-artifacts record-artifacts room-record room-check-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate room candidate regions-wasm regions-tool regions-sign regions-publish regions-verify regions-check check room-check candidate-check check-artifacts record-artifacts room-record room-check-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -41,6 +42,9 @@ delegate:
 
 room:
 	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate room --no-ui
+
+candidate:
+	FDEV=$(FDEV) ./scripts/build.sh --target-dir $(BUILD_DIR) --crate candidate --no-ui
 
 # Region contracts + packaged artifacts (blob and manifest). The packaged files
 # are what `fdev publish --code` takes; the copies under .build/regions/ are the
@@ -86,10 +90,14 @@ regions-check:
 room-check:
 	cd $(ROOM) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
+candidate-check:
+	cd $(CANDIDATE) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+
 check:
 	cd $(CONTRACT) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 	cd $(DELEGATE) && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 	$(MAKE) room-check
+	$(MAKE) candidate-check
 	$(MAKE) regions-check
 	cd $(UI) && npm run build && npm test
 
@@ -198,6 +206,7 @@ clean:
 	cd $(CONTRACT) && cargo clean
 	cd $(DELEGATE) && cargo clean
 	cd $(ROOM) && cargo clean
+	cd $(CANDIDATE) && cargo clean
 	rm -rf $(BUILD_DIR) $(UI)/dist $(UI)/node_modules
 	rm -f $(UI)/contract_code_hash*.json $(UI)/contract_code_hash.txt \
 	      $(UI)/delegate_key*.json $(UI)/delegate_key.txt \

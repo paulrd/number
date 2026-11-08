@@ -56,7 +56,9 @@ change; the UI divides by 100 and shows exactly two decimals).
 
 Design and exact wire formats: [DESIGN.md](./DESIGN.md) (v4/v5), [DESIGN-payments-lca.md](./DESIGN-payments-lca.md) for LCA-endpoint payments, and
 [DESIGN-v6.md](./DESIGN-v6.md) (private address book, signed names). UI
-information architecture: [DESIGN-views.md](./DESIGN-views.md).
+information architecture: [DESIGN-views.md](./DESIGN-views.md). Network work:
+[DESIGN-network.md](./DESIGN-network.md), [DESIGN-regions-p1.md](./DESIGN-regions-p1.md),
+[DESIGN-rooms.md](./DESIGN-rooms.md) and [DESIGN-candidates.md](./DESIGN-candidates.md).
 Current deployment state, done work, and the remaining backlog:
 [BACKLOG.md](./BACKLOG.md).
 The historical design docs predate the user-facing **zone** wording and keep
@@ -108,9 +110,9 @@ A contract's id is `BLAKE3(BLAKE3(wasm) || parameters)` and a delegate's key is
   you record can be built in a throwaway directory;
 - a post-build scan that fails if a build-machine path survives in the WASM.
 
-Contract and delegate are standalone crates with their own `Cargo.lock` (see
-DESIGN §9), and `rust-toolchain.toml` pins rustc: a dependency or toolchain
-change must not silently move the address.
+Contract, delegate, members-room and candidates-room are standalone crates with
+their own `Cargo.lock` (see DESIGN §9), and `rust-toolchain.toml` pins rustc: a
+dependency or toolchain change must not silently move the address.
 
 The current artifacts and their generations are committed in `published/`
 (`manifest.json` plus both WASMs). `make check-artifacts` rebuilds into a
