@@ -523,8 +523,9 @@
           >
             <h3 id="join-block-title" class="advanced-block-title">Join a zone</h3>
             <p id="join-block-summary" class="advanced-hint">
-              Have a root link from another zone? Ask that zone for a slot in
-              its tree.
+              Have a root id from another zone? Paste it into Join a zone to
+              ask for a slot in its tree. Owners share their zone's root id, or
+              a link that carries it.
             </p>
             <button
               id="join-open"
@@ -2145,7 +2146,7 @@
                 Retry
               </button>
               <p id="requests-empty" class="requests-empty" hidden>
-                No open requests yet. Share the join link so people can ask.
+                No open requests yet. Share the root id so people can ask.
               </p>
 
               <ul
@@ -2356,11 +2357,12 @@
               aria-labelledby="requests-link-title"
             >
               <h3 id="requests-link-title" class="requests-section-title">
-                Share the join link
+                Share this zone's root id
               </h3>
               <p class="requests-link-copy">
-                This zone is shared by its link; there is no directory. Share
-                the link so people can find this zone and ask to join.
+                Each person is served by their own node, so a URL from this node
+                is not shareable. Share the zone's root id (or a link that
+                carries it); the other person pastes it into Join a zone.
               </p>
               <div class="requests-link-actions">
                 <button
@@ -2368,7 +2370,7 @@
                   class="button button--small"
                   type="button"
                 >
-                  Copy join link
+                  Copy root id
                 </button>
                 <p
                   id="requests-copy-status"
@@ -2382,7 +2384,7 @@
                 class="field requests-link-field"
                 hidden
               >
-                <span>Join link</span>
+                <span>Root id</span>
                 <input
                   id="requests-link-input"
                   type="text"
@@ -2421,8 +2423,8 @@
               <p class="eyebrow">Join a zone</p>
               <h2 id="join-title" tabindex="-1">Join a zone</h2>
               <p id="join-intro" class="onboarding-intro">
-                A zone is shared by its link. There is no directory, so you
-                need the link or root id you were given.
+                A zone is shared by its root id. There is no directory, so you
+                need the root id (or a link that carries it) you were given.
               </p>
             </div>
             <button
@@ -2443,8 +2445,8 @@
             >
               <h3 id="join-root-title" tabindex="-1">Which zone invited you?</h3>
               <p id="join-root-help" class="onboarding-help">
-                Paste the link or the root id you were given. A root id is 64
-                lowercase hex characters; the owner id, not a contract id.
+                Paste the root id you were given (64 lowercase hex characters;
+                the owner id, not a contract id), or a link that carries it.
               </p>
               <form id="join-root-form" class="onboarding-root-form" novalidate>
                 <label class="field" for="join-root-input">

@@ -72,7 +72,9 @@ missing, and everything else behind Advanced.
   copy.
 - The throwaway smoke sites `number-smoke`, `number-smoke2` and `number-smoke3`
   exist only for this test; their ids are not UI constants.
-- **Join-link origin is wrong for sharing.** `Copy join link` copies the
+- **Join-link origin fixed:** the copy action now yields the bare root id
+  (**Copy root id**), the portable form; the local URL is not the artifact.
+- **Join-link origin was wrong for sharing.** `Copy join link` copies the
   current node's origin (`http://127.0.0.1:7511/...?...&root=`), which only
   works on the owner's machine. It should copy the root id or a shareable app
   address; the smoke passed the root id explicitly.
@@ -392,7 +394,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **549 UI**, **37 offline e2e** (the region/room
+candidate**, **104 delegate**, **551 UI**, **37 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -675,9 +677,6 @@ Ranked by what a next session should care about.
    owner designated the slot; GET/subscribe did not refresh it. Same-node
    flows pass. Fix the refresh/subscription design before calling onboarding
    live across nodes.
-2. **Copy join link uses the node origin.** It must produce a shareable form
-   (root id or the app's public address), not `http://127.0.0.1:.../` with a
-   root parameter.
 
 1. **Address-book import marker cannot persist (#ours, small).** The app runs in
    a sandboxed, opaque-origin iframe where `localStorage` throws, so the
@@ -778,7 +777,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 549, offline e2e 37, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 551, offline e2e 37, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -817,6 +816,12 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — join share artifact fixed**
+- Requests panel **Copy root id** copies the bare 64-hex owner id (manual
+  fallback shows the id), not the node's loopback URL. Copy/hints say the other
+  person pastes the root id into Join a zone.
+- UI 551 tests / 34 files, offline e2e 37 with clipboard/manual assertions.
 
 **2026-11-08 — P4d: deployed, same-node live smoke**
 - Published site `1794145739` (15 files; `index-CNH7TjIE.js`) with delegate

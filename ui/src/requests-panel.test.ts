@@ -25,13 +25,15 @@ import {
   interviewMessageRows,
   interviewOutsideMembers,
   interviewRemainingMembers,
-  joinLink,
   notePreview,
   requestCountLabel,
   requestNoteText,
   requestRows,
   requestTimeIso,
   requestsErrorText,
+  rootIdCopyAnnouncement,
+  rootIdCopyStatus,
+  shareRootId,
   shortRequester,
 } from "./requests-panel";
 
@@ -156,26 +158,37 @@ describe("requestRows", () => {
   });
 });
 
-describe("joinLink", () => {
+describe("shareRootId", () => {
   const owner = "ab".repeat(32);
 
-  it("builds origin, path and the root parameter", () => {
-    expect(joinLink("https://example.test", "/app/", owner)).toBe(
-      `https://example.test/app/?root=${owner}`,
-    );
-    expect(joinLink("https://example.test", "/app", owner)).toBe(
-      `https://example.test/app?root=${owner}`,
+  it("is exactly the bare owner id", () => {
+    expect(shareRootId(owner)).toBe(owner);
+    expect(shareRootId(owner)).toMatch(/^[0-9a-f]{64}$/);
+    expect(shareRootId(owner)).not.toContain("://");
+    expect(shareRootId(owner)).not.toContain("?");
+    expect(shareRootId(owner)).not.toContain("=");
+  });
+
+  it("normalises surrounding space and case", () => {
+    expect(shareRootId(`  ${owner.toUpperCase()}  `)).toBe(owner);
+  });
+});
+
+describe("root id copy feedback", () => {
+  it("labels the copying, copied and manual states", () => {
+    expect(rootIdCopyStatus("idle")).toBe("");
+    expect(rootIdCopyStatus("copying")).toBe("Copying the root id…");
+    expect(rootIdCopyStatus("copied")).toBe("Copied.");
+    expect(rootIdCopyStatus("manual")).toContain(
+      "Select the root id and copy it manually.",
     );
   });
 
-  it("drops other query parameters and the fragment", () => {
-    expect(
-      joinLink(
-        "https://example.test",
-        "/app/index.html?view=advanced&root=" + "cd".repeat(32) + "#top",
-        owner,
-      ),
-    ).toBe(`https://example.test/app/index.html?root=${owner}`);
+  it("announces a successful copy and the manual fallback", () => {
+    expect(rootIdCopyAnnouncement("copied")).toBe("Root id copied.");
+    expect(rootIdCopyAnnouncement("manual")).toContain(
+      "The root id is shown for manual copying.",
+    );
   });
 });
 

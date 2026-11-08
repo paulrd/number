@@ -4,8 +4,8 @@
  *
  * A quiet Advanced surface over the owner's own candidate room: read the
  * public queue, switch accepting on or off, dismiss one request at a time (or
- * all of them), copy the zone's join link, and interview one requester in the
- * encrypted candidate room. Every write passes the owner's own id to the
+ * all of them), copy the zone's bare root id, and interview one requester in
+ * the encrypted candidate room. Every write passes the owner's own id to the
  * transport; there is no way to point this panel at another zone's queue.
  *
  * Admission's zone write is P4c3b2 and does not live here. This panel hands off
@@ -164,19 +164,33 @@ export function requestCountLabel(count: number): string {
 }
 
 /**
- * `<origin><pathname>?root=<ownId>` with every other query parameter and the
- * fragment removed. This is the link others open to ask to join (§3.2).
+ * The portable share artifact: the zone's bare owner id. A Freenet app is
+ * served by each person's own node, so a URL from this node is not shareable;
+ * the join field accepts the 64-hex id (or a link that carries it).
  */
-export function joinLink(
-  origin: string,
-  pathname: string,
-  ownerId: string,
+export function shareRootId(ownerId: string): string {
+  return ownerId.trim().toLowerCase();
+}
+
+/** Visible copy feedback for the root id, or "" when there is nothing to say. */
+export function rootIdCopyStatus(
+  mode: "idle" | "copying" | "copied" | "manual",
 ): string {
-  const url = new URL(pathname === "" ? "/" : pathname, origin);
-  url.search = "";
-  url.hash = "";
-  url.searchParams.set("root", ownerId);
-  return url.toString();
+  if (mode === "copying") return "Copying the root id…";
+  if (mode === "copied") return "Copied.";
+  if (mode === "manual") {
+    return "The clipboard is unavailable. Select the root id and copy it manually.";
+  }
+  return "";
+}
+
+/** The screen-reader sentence for a root-id copy attempt. */
+export function rootIdCopyAnnouncement(
+  mode: "copied" | "manual",
+): string {
+  return mode === "copied"
+    ? "Root id copied."
+    : "The clipboard is unavailable. The root id is shown for manual copying.";
 }
 
 /**
@@ -631,7 +645,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
 
   let copying = false;
   let copied = false;
-  let manualLink: string | null = null;
+  let manualId: string | null = null;
 
   /** The owner's own zone, read alongside the candidate room. */
   let zoneState: StateV3 | null = null;
@@ -853,20 +867,18 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     }
 
     copyButton.disabled = waiting || copying;
-    copyButton.textContent = copying ? "Copying…" : "Copy join link";
+    copyButton.textContent = copying ? "Copying…" : "Copy root id";
     copyButton.setAttribute("aria-busy", String(copying));
-    linkField.hidden = manualLink === null;
-    linkInput.value = manualLink ?? "";
-    if (copying) {
-      copyStatus.textContent = "Copying the join link…";
-    } else if (copied) {
-      copyStatus.textContent = "Copied.";
-    } else if (manualLink !== null) {
-      copyStatus.textContent =
-        "The clipboard is unavailable. Select the link and copy it manually.";
-    } else {
-      copyStatus.textContent = "";
-    }
+    linkField.hidden = manualId === null;
+    linkInput.value = manualId ?? "";
+    const copyMode = copying
+      ? "copying"
+      : copied
+        ? "copied"
+        : manualId !== null
+          ? "manual"
+          : "idle";
+    copyStatus.textContent = rootIdCopyStatus(copyMode);
 
     renderInterview(busy);
 
@@ -1810,40 +1822,34 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     }
   }
 
-  async function copyJoinLink(): Promise<void> {
+  async function copyRootId(): Promise<void> {
     const owner = ownId();
     if (owner === null || copying) return;
-    const link = joinLink(
-      window.location.origin,
-      window.location.pathname,
-      owner,
-    );
+    const id = shareRootId(owner);
     const run = generation;
 
     copying = true;
     copied = false;
-    manualLink = null;
+    manualId = null;
     render();
 
     try {
       if (!navigator.clipboard?.writeText) {
         throw new Error("the clipboard is unavailable");
       }
-      await navigator.clipboard.writeText(link);
+      await navigator.clipboard.writeText(id);
       if (run !== generation) return;
       copied = true;
-      deps.announce("Join link copied.");
+      deps.announce(rootIdCopyAnnouncement("copied"));
     } catch {
       if (run !== generation) return;
-      manualLink = link;
-      deps.announce(
-        "The clipboard is unavailable. The join link is shown for manual copying.",
-      );
+      manualId = id;
+      deps.announce(rootIdCopyAnnouncement("manual"));
     } finally {
       if (run === generation) {
         copying = false;
         render();
-        if (manualLink !== null) {
+        if (manualId !== null) {
           linkInput.focus({ preventScroll: true });
           linkInput.select();
         }
@@ -1887,7 +1893,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     clearMessage = null;
     copying = false;
     copied = false;
-    manualLink = null;
+    manualId = null;
     liveStatus = "";
 
     render();
@@ -1954,7 +1960,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   });
 
   copyButton.addEventListener("click", () => {
-    void copyJoinLink();
+    void copyRootId();
   });
 
   interviewRefresh.addEventListener("click", () => {

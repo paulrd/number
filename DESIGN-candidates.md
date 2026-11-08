@@ -473,10 +473,13 @@ owner's own candidate room. It is owner-only: every write passes `ownId` to
   message.
 - **Clear all.** Dismiss every current id, one write at a time, keeping the
   rows that fail; ask for confirmation first and report the count cleared.
-- **Join link.** A "Copy join link" action copies
-  `<origin><path>?root=<ownId>` (the root link defined in §3.2) with a visible
-  "Copied." result; if the clipboard is unavailable, show the URL for manual
-  copy. This is the link the owner shares so others can ask.
+- **Root id.** A "Copy root id" action copies the zone's bare owner id (64
+  lowercase hex). This is the portable share artifact: each person is served
+  by their own node, so a local URL is not shareable. A local URL may still be
+  shown elsewhere, but it is not what the copy button yields. The join field
+  accepts the bare id (or a link that carries it). Show a visible "Copied."
+  result; if the clipboard is unavailable, show the id for manual copy. This
+  is what the owner shares so others can ask.
 - **States.** Loading, empty ("No open requests yet"), read failure with retry,
   write failure per row, and a refresh action. Announce state changes; the map
   is not involved.

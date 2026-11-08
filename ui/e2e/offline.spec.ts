@@ -2030,7 +2030,11 @@ test("keeps a duplicate ?root= value and explains it", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("reviews and moderates the owner's join-request queue", async ({ page }) => {
+test("reviews and moderates the owner's join-request queue", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const errors = watchConsole(page);
   await page.goto("/");
   await openAdvanced(page);
@@ -2105,8 +2109,8 @@ test("reviews and moderates the owner's join-request queue", async ({ page }) =>
   );
   await expect(page.locator("#requests-count")).toHaveText("No open requests");
 
-  // Copy the join link, or accept the manual field when the clipboard is
-  // unavailable in this browser context.
+  // Copy the portable root id, or accept the manual field when the clipboard
+  // is unavailable in this browser context.
   await page.locator("#requests-copy-link").click();
   await expect
     .poll(async () => {
@@ -2118,14 +2122,16 @@ test("reviews and moderates the owner's join-request queue", async ({ page }) =>
     .not.toBe("pending");
 
   if (await page.locator("#requests-link-field").isVisible()) {
-    const link = new URL(
-      await page.locator("#requests-link-input").inputValue(),
+    await expect(page.locator("#requests-copy-status")).toContainText(
+      "Select the root id",
     );
-    expect(link.searchParams.get("root")).toBe(ownerId);
-    expect([...link.searchParams.keys()]).toEqual(["root"]);
+    await expect(page.locator("#requests-link-input")).toHaveValue(ownerId!);
   } else {
     await expect(page.locator("#requests-copy-status")).toHaveText("Copied.");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe(ownerId);
   }
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
 
   await page.locator("#requests-done").click();
   await expect(page.locator("#requests-dialog")).toBeHidden();
