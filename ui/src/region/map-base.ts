@@ -9,8 +9,9 @@
  * equal path and keep the element `aria-hidden`.
  *
  * Detail (`detail: "full"`) adds a graticule, country names and zoom-gated
- * city labels, plus faint ancestor rings around a zone's own cell. The label
- * data is a separate lazy chunk; `compact` (onboarding) loads none of it and
+ * city labels, plus faint ancestor rings around a zone's own cell. Above zoom
+ * 5 it also swaps the 110m world for a lazily imported 1:50m layer. The label
+ * and geometry chunks are separate; `compact` (onboarding) loads neither and
  * keeps the plain 110m world. Every detail rebuild is throttled and reports
  * its own render time in a `map-detail` DOM event on the container.
  */
@@ -25,6 +26,7 @@ import {
   ancestorPaths,
   boxesOverlap,
   countryLabelVisible,
+  detailedWorldForZoom,
   graticuleForZoom,
   labelHeight,
   labelWidth,
@@ -141,15 +143,22 @@ export function createMapStage(
   const topology = countries as unknown as Topology<{
     countries: GeometryCollection;
   }>;
-  // Exactly once per stage; a zoom never rebuilds the topology or the paths.
+  // Exactly once per stage; a zoom never rebuilds the topology or these paths.
   const geometry = feature(topology, topology.objects.countries);
-  L.geoJSON(geometry as unknown as GeoJSON.GeoJsonObject, {
-    style: () =>
-      ({
-        className: options.countryClassName ?? "map-world",
-        ...(options.countryStyle ?? {}),
-      }) as L.PathOptions,
-  }).addTo(map);
+  const worldStyle = (): L.PathOptions =>
+    ({
+      className: options.countryClassName ?? "map-world",
+      ...(options.countryStyle ?? {}),
+    }) as L.PathOptions;
+
+  // The 110m world ships in the base chunk and is visible by default. A full
+  // map swaps it for the lazy 1:50m layer above zoom 5; compact never does.
+  const world110Layer = L.geoJSON(
+    geometry as unknown as GeoJSON.GeoJsonObject,
+    { style: worldStyle, interactive: false },
+  ).addTo(map);
+  world110Layer.bringToBack();
+  element.dataset.detail = detailed ? "110m" : "compact";
 
   const graticuleLayer = L.layerGroup().addTo(map);
   const cellLayer = L.layerGroup().addTo(map);
@@ -168,6 +177,12 @@ export function createMapStage(
   let countryBoundsReady = false;
   let lastCountryCount = 0;
   let lastGraticuleMs = 0;
+  let activeWorld: "110m" | "50m" = "110m";
+  /** Parsed once, kept after switching back, so re-entering the band is instant. */
+  let world50Layer: L.GeoJSON | null = null;
+  let world50Loading = false;
+  /** Previous zoomend band, so a failed import retries on the next crossing. */
+  let detailedZoom = detailedWorldForZoom(map.getZoom());
 
   if (detailed) {
     buildCountryBounds();
@@ -177,8 +192,76 @@ export function createMapStage(
 
   function onZoomEnd(): void {
     if (!detailed || destroyed) return;
+    syncWorldForZoom();
     scheduleGraticule();
     scheduleLabels();
+  }
+
+  /**
+   * Single lazy import. A failed load leaves 110m in place and quietly retries
+   * on the next crossing of the threshold; nothing here blocks clicks.
+   */
+  function loadDetailedWorld(): void {
+    if (world50Loading || world50Layer !== null || destroyed) return;
+    world50Loading = true;
+    element.dataset.detail = "loading";
+    // Static specifier: Vite emits countries-50m.json as its own lazy chunk.
+    void import("../assets/countries-50m.json")
+      .then((module) => {
+        world50Loading = false;
+        if (destroyed) return;
+        const topology50 = module.default as unknown as Topology<{
+          countries: GeometryCollection;
+        }>;
+        const geometry50 = feature(
+          topology50,
+          topology50.objects.countries,
+        ) as unknown as GeoJSON.GeoJsonObject;
+        world50Layer = L.geoJSON(geometry50, {
+          style: worldStyle,
+          interactive: false,
+        });
+        if (detailedWorldForZoom(map.getZoom())) {
+          showWorld(world50Layer, "50m");
+        } else {
+          // The view left the band while the chunk loaded; keep it parsed.
+          element.dataset.detail = "110m";
+        }
+      })
+      .catch(() => {
+        world50Loading = false;
+        if (destroyed) return;
+        element.dataset.detail = "110m";
+      });
+  }
+
+  function showWorld(layer: L.GeoJSON, kind: "110m" | "50m"): void {
+    if (destroyed) return;
+    const current = activeWorld === "50m" ? world50Layer : world110Layer;
+    if (current !== null && current !== layer) map.removeLayer(current);
+    if (!map.hasLayer(layer)) layer.addTo(map);
+    // Beneath the graticule and both cell layers.
+    layer.bringToBack();
+    activeWorld = kind;
+    element.dataset.detail = kind;
+  }
+
+  function syncWorldForZoom(): void {
+    const wantDetailed = detailedWorldForZoom(map.getZoom());
+    const crossed = wantDetailed !== detailedZoom;
+    detailedZoom = wantDetailed;
+    if (wantDetailed) {
+      if (world50Layer !== null) {
+        if (activeWorld !== "50m") showWorld(world50Layer, "50m");
+      } else if (crossed) {
+        loadDetailedWorld();
+      }
+    } else if (activeWorld === "50m") {
+      showWorld(world110Layer, "110m");
+    } else if (element.dataset.detail === "loading") {
+      // Left the band mid-load; the parsed layer can wait for the next crossing.
+      element.dataset.detail = "110m";
+    }
   }
 
   map.on("zoomend", onZoomEnd);

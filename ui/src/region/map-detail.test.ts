@@ -3,6 +3,8 @@ import {
   ancestorPaths,
   boxesOverlap,
   countryLabelVisible,
+  DETAIL_WORLD_MIN_ZOOM,
+  detailedWorldForZoom,
   graticuleForZoom,
   graticuleStepForZoom,
   graticuleValues,
@@ -61,6 +63,21 @@ describe("graticule zoom bands", () => {
     expect(spec?.step).toBe(10);
     expect(spec?.parallels).toContain(0);
     expect(spec?.meridians).toContain(0);
+  });
+});
+
+describe("detailed world threshold", () => {
+  it("swaps at zoom 5 exactly", () => {
+    expect(DETAIL_WORLD_MIN_ZOOM).toBe(5);
+    expect(detailedWorldForZoom(4)).toBe(false);
+    expect(detailedWorldForZoom(5)).toBe(true);
+    expect(detailedWorldForZoom(6)).toBe(true);
+  });
+
+  it("treats non-finite and negative zooms as the 110m world", () => {
+    expect(detailedWorldForZoom(Number.NaN)).toBe(false);
+    expect(detailedWorldForZoom(Number.NEGATIVE_INFINITY)).toBe(false);
+    expect(detailedWorldForZoom(-1)).toBe(false);
   });
 });
 

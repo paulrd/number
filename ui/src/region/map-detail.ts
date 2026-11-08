@@ -39,6 +39,16 @@ export interface GraticuleSpec {
   meridians: readonly number[];
 }
 
+/**
+ * Zoom at which a `full` map swaps the 110m world for the 1:50m countries.
+ * `compact` maps never swap, whatever the zoom.
+ */
+export const DETAIL_WORLD_MIN_ZOOM = 5;
+
+export function detailedWorldForZoom(zoom: number): boolean {
+  return Number.isFinite(zoom) && zoom >= DETAIL_WORLD_MIN_ZOOM;
+}
+
 /** 30° at world zoom, 10° in the middle, 5° near the detail ceiling, none above. */
 export function graticuleStepForZoom(zoom: number): number | null {
   if (!Number.isFinite(zoom)) return 30;

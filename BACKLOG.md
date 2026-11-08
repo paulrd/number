@@ -28,11 +28,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794164388`, bundle `assets/index-WKTltPKS.js` (+ lazy map/picker/labels chunks), 14 files; candidate WASM served and identical on all four nodes |
+| Live site | version `1794165577`, bundle `assets/index-BOVBbO03.js` (+ lazy map/picker/labels/50m-world chunks), 15 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794164388`, map page follow-up (place-tab click + world reset); full-screen `?view=map` with detail layers and inline cell assignment; P4f admission code + P4e watch unchanged; delegate v13 and contract unchanged |
+| Last UI publish | 2026-11-08; site `1794165577`, 1:50m world lazily swapped in above zoom 5; map page (place-tab fix, detail, inline assignment); P4f admission code + P4e watch unchanged; delegate v13 and contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -111,6 +111,18 @@ select), the place tab starts at the world (or the last place), a click fills th
 `region-point` marker, and switching back re-fits the zone and clears the point.
 E2E now clicks the real canvas and asserts the inputs/result/marker, then the
 zone restore. UI 650/41, offline e2e 40.
+
+**Follow-up (site `1794165577`): more detailed coastlines, lazily.** The
+`world-atlas@2` 1:50m countries (756,420 bytes raw, sha256 `04342cdc…`, Natural
+Earth 4.1.0, public domain) is vendored and loaded only when a `full` map first
+reaches zoom 5. It swaps out the 110m layer above 5 and back below, keeps the
+parsed 50m layer for instant re-entry, never loads for `compact`, and fails
+quietly (110m stays, one retry). The chunk is `countries-50m-*.js` (756.5 kB raw
+/ 233.0 kB gzip); first paint is unchanged. Measured swap cost at 1200×800:
+parse 4.8-8.1 ms, `feature()` 3.3-8.8 ms, path build 22.7-31.4 ms (241 paths).
+`#map-canvas[data-detail]` reports `110m`/`loading`/`50m`/`compact`. Live check
+on 7511: 177 paths at the fit, 241 above zoom 5, one same-origin chunk request,
+back to 177 on zoom out, no console errors. UI 652/41, offline e2e 41.
 
 **Known limits recorded in the design doc:** label widths are estimated (not DOM
 measured) so collision is conservative; country labels may be absent when their
@@ -969,7 +981,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 650, offline e2e 40, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 652, offline e2e 41, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -1008,6 +1020,15 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — Lazy 1:50m world (site `1794165577`)**
+- Vendored `countries-50m.json` from world-atlas@2 (756,420 bytes, sha256
+  `04342cdc…`, public domain); 233 kB gzip in its own lazy chunk.
+- Full map stages swap 110m → 50m above zoom 5 and back below, keep the parsed
+  layer for instant re-entry, never load it for the compact onboarding map, and
+  retry once after a failed import. `data-detail` reports the state.
+- UI 652/41; offline e2e 41 (swap up to 241 paths and back to 177, same-origin,
+  axe clean); deployed 15 files and verified on all four nodes; live probe clean.
 
 **2026-11-08 — Map page (site `1794162484`)**
 - Full-screen `?view=map` sub-page of Advanced; one shared base map for page,

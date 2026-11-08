@@ -1482,6 +1482,70 @@ test("map page shows the root zone and its eight child cells", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
+test("map page lazily swaps to the 50m world above zoom 5 and back", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  const external: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (
+      !url.startsWith("http://127.0.0.1:4173") &&
+      !url.startsWith("data:") &&
+      !url.startsWith("blob:")
+    ) {
+      external.push(url);
+    }
+  });
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#region-open").click();
+  await expect(page.locator("#map-view")).toBeVisible();
+
+  const canvas = page.locator("#map-canvas");
+  await expect(canvas).toHaveAttribute("data-state", "ready");
+  // The world view starts on the vendored 110m geometry.
+  await expect(canvas).toHaveAttribute("data-detail", "110m");
+  const worldPaths = page.locator("#map-canvas path.map-world");
+  const overviewPaths = await worldPaths.count();
+  expect(overviewPaths).toBeGreaterThan(0);
+  expect(overviewPaths).toBeLessThanOrEqual(200);
+
+  // Zoom in over the real control until the lazy chunk resolves. The chunk is
+  // bundled and same-origin, so this never depends on the network.
+  const zoomIn = page.locator("#map-zoom-in");
+  for (let click = 0; click < 8; click += 1) {
+    await zoomIn.click();
+    await page.waitForTimeout(350);
+    if ((await canvas.getAttribute("data-detail")) === "50m") break;
+  }
+  await expect(canvas).toHaveAttribute("data-detail", "50m", {
+    timeout: 20_000,
+  });
+  const detailPaths = await worldPaths.count();
+  expect(detailPaths).toBeGreaterThan(200);
+  expect(detailPaths).toBeGreaterThan(overviewPaths);
+  // Cells still draw above the (new) world layer; the sidebar is unchanged.
+  await expect(page.locator("#map-canvas path.region-cell")).toHaveCount(8);
+
+  // Zoom back out: the 110m layer returns and the parsed 50m data is kept.
+  const zoomOut = page.locator("#map-zoom-out");
+  for (let click = 0; click < 8; click += 1) {
+    await zoomOut.click();
+    await page.waitForTimeout(350);
+    if ((await canvas.getAttribute("data-detail")) === "110m") break;
+  }
+  await expect(canvas).toHaveAttribute("data-detail", "110m");
+  await expect.poll(() => worldPaths.count()).toBe(overviewPaths);
+  await expect(page.locator("#map-canvas path.region-cell")).toHaveCount(8);
+
+  expect(external).toEqual([]);
+  const results = await new AxeBuilder({ page }).include("#map-view").analyze();
+  expect(results.violations).toEqual([]);
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
 test("map page opens from a deep link and keeps place=1 on the tab", async ({
   page,
 }) => {

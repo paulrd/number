@@ -8,6 +8,23 @@ derived from Natural Earth 1:110m. Natural Earth data is public domain.
   runtime and the gateway's CSP never needs an external origin.
 - Attribution: "Natural Earth" (shown in the picker footer).
 
+`countries-50m.json` is the `world-atlas@2.0.2` `countries-50m` TopoJSON file,
+derived from Natural Earth 4.1.0 (1:50m). It is loaded lazily, and only by
+`detail: "full"` maps above zoom 5; `compact` maps and the initial bundle keep
+using 110m.
+
+- Source: the `world-atlas@2.0.2` npm tarball
+  (`https://registry.npmjs.org/world-atlas/-/world-atlas-2.0.2.tgz`), member
+  `package/countries-50m.json`, copied unmodified on 2026-11-08.
+- Size: 756,420 bytes. SHA-256:
+  `04342cdc1e3016bcd7db1630de95684d67b79fe3c8c460321e87aef469502394`.
+- Contents: 241 country features plus 1 `land` feature (TopoJSON).
+- Licensing: Natural Earth data is public domain. The `world-atlas` package
+  itself is packaged under ISC, matching the 110m file; the data remains
+  public-domain Natural Earth.
+- Same-origin, same CSP: the build emits it as a local lazy chunk, so no new
+  origin is needed.
+
 ## Label assets
 
 `country-labels-110m.json` and `places-50m-labels.json` are generated from
