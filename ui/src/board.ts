@@ -1622,9 +1622,12 @@ export class OnlineBoard implements BoardBackend {
    *
    * Uses a dedicated viewer (never the shared read-only one) and no repainting
    * callbacks: only `onNotification` is wired, so the join panel decides how to
-   * refresh. `subscribeState` registers a blocking subscription, which keeps a
-   * write made after the initial GET from slipping past. Connect/subscribe
-   * failures are logged and ignored; the returned cleanup is always callable.
+   * refresh. Read the zone first (this also sets the contract key), then send an
+   * explicit Subscribe so the node registers the client listener and includes
+   * this node in the update path for a later owner write. A GET with
+   * `subscribe: true` alone is not enough (the node logs "no
+   * subscription_listener"). Connect/subscribe failures are logged and ignored;
+   * the returned cleanup is always callable.
    */
   watchBoard(ownerId: string, onChange: () => void): () => void {
     if (!isLowerHex(ownerId, 64)) {
@@ -1651,7 +1654,8 @@ export class OnlineBoard implements BoardBackend {
     void (async () => {
       try {
         await viewer.connect();
-        await viewer.subscribeState(hexToBytes(ownerId));
+        await viewer.readState(hexToBytes(ownerId));
+        await viewer.subscribe();
       } catch (error) {
         // Cleanup or board.close() already stopped this watch: stay quiet.
         if (!this.watchViewers.has(viewer)) return;

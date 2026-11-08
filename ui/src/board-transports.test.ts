@@ -34,7 +34,11 @@ const { FakeNumberContract } = vi.hoisted(() => {
       });
     }
 
-    subscribeState(): Promise<never> {
+    readState(): Promise<never> {
+      return new Promise<never>(() => {});
+    }
+
+    subscribe(): Promise<never> {
       return new Promise<never>(() => {});
     }
 

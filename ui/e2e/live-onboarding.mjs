@@ -240,13 +240,26 @@ async function main() {
     await waitGone(owner.app, "#interview-section", 60_000);
     console.log("[owner] admission finished; membership rotated");
 
-    // Candidate checks again until the admission propagates, then signs parent.
-    let admitted = false;
-    const admitDeadline = Date.now() + 180_000;
-    while (!admitted && Date.now() < admitDeadline) {
-      await candidate.app.locator("#join-status-check").click().catch(() => {});
-      await sleep(4_000);
-      admitted = await visible(candidate.app, "#join-status-admitted");
+    // Candidate waits for the target-zone watch (or checks again) to surface
+    // the admission, then signs parent.
+    let admitted = await visible(candidate.app, "#join-status-admitted");
+    if (!admitted && process.env.EXPECT_WATCH === "1") {
+      console.log("[candidate] waiting on the target-zone watch");
+      const watchDeadline = Date.now() + 120_000;
+      while (!admitted && Date.now() < watchDeadline) {
+        await sleep(1_000);
+        admitted = await visible(candidate.app, "#join-status-admitted");
+      }
+      console.log(`[candidate] watch auto-update: ${admitted}`);
+    }
+    if (!admitted) {
+      const admitDeadline = Date.now() + 180_000;
+      while (!admitted && Date.now() < admitDeadline) {
+        await candidate.app.locator("#join-status-check").click().catch(() => {});
+        await sleep(4_000);
+        admitted = await visible(candidate.app, "#join-status-admitted");
+      }
+      console.log(`[candidate] manual Check again: ${admitted}`);
     }
     if (!admitted) throw new Error("the candidate never saw the admission");
     const admittedSlot = ((await candidate.app.locator("#join-admitted-slot").textContent()) ?? "").trim();

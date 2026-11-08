@@ -493,20 +493,7 @@ export class NumberContract {
    * returned state is the node's local copy, not proof of freshness: a stale
    * node still serves what it has.
    */
-  async subscribeState(
-    parameters: Uint8Array,
-    timeoutMs: number = GET_TIMEOUT_MS,
-  ): Promise<StateV3> {
-    if (parameters.length !== 32) {
-      throw new Error(
-        `contract parameters must be 32 bytes, got ${parameters.length}`,
-      );
-    }
-    this.key = deriveContractKey(this.codeHashBase58, parameters);
-    return decodeState(
-      await this.getRawStateForKey(this.key, timeoutMs, true, true),
-    );
-  }
+
 
   private async getStateForKey(
     key: ContractKey,

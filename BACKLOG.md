@@ -46,23 +46,28 @@ missing, and everything else behind Advanced.
 
 ## Where we left off (2026-11-08) — P4e zone watch
 
-### P4e implemented (2026-11-08): target-zone subscription
+### P4e implemented; cross-node admission still not prompt (2026-11-08)
 
-- `NumberContract.subscribeState` sends a blocking subscribed GET; `OnlineBoard
-  .watchBoard(ownerId, onChange)` opens a dedicated viewer (no own-board
-  callbacks), tracks it, reports update notifications, and returns an
-  idempotent cleanup; `close()` closes all watchers. Offline is a no-op.
-- The join panel watches the target while the status is **queued** or
-  **invited** (one watch per target, 500 ms debounce, deferred during a check,
-  stopped on admitted/none/close/target change) and re-checks automatically.
-  Copy notes the app is listening while the dialog is open; Check again
-  remains the fallback.
-- This matches freenet-core's model: a GET on a held contract serves the local
-  copy, and updates only reach advertised co-hosts, so the candidate must
-  subscribe before the owner writes. Files: `freenet.ts`, `board.ts`,
-  `mock.ts`, `onboarding-panel.ts`, `main.ts`.
-- UI 557 tests / 34 files; offline e2e 37; `make check` and
-  `make check-artifacts` green. Cross-node verification is next.
+- `OnlineBoard.watchBoard(ownerId, onChange)` opens a dedicated viewer,
+  reads the target zone, then sends an **explicit Subscribe** and wires update
+  notifications; cleanup is idempotent and `close()` closes watchers. A GET
+  with `subscribe: true` alone is not enough: the node logs
+  `GET with subscribe=true but no subscription_listener`, so the explicit
+  Subscribe is what registers the client listener. Offline is a no-op.
+- The join panel watches the target while queued/invited (one watch per target,
+  500 ms debounce, deferred during a check, stopped on admitted/none/close),
+  and re-checks on updates. UI 557 tests / 34 files; offline e2e 37.
+- **Cross-node test failed to become prompt.** The owner's slot update
+  broadcast to `targets_avg=2.0` co-hosts; the candidate node had a successful
+  subscription (and renewal) for the target contract but still served the old
+  local copy after 6+ minutes. Freenet's GET always prefers the local copy; the
+  update mesh only relays across connected co-hosts, and anti-entropy is
+  300 s+ (tens of minutes in the field). Same-node flows pass.
+- **Conclusion:** the subscription is necessary but not sufficient for a
+  reliable admission handoff. Do not claim multi-node onboarding live yet.
+  Options: carry the signed assignment in a channel the candidate can verify
+  (e.g. a signed admission link/message with the slot record), use a shared
+  gateway for the app, or accept anti-entropy latency with explicit UI copy.
 
 ### P4d (2026-11-08): deployed; same-node smoke passes, cross-node read is stale
 
@@ -690,11 +695,14 @@ cd ui && npm run build && npm test && npm run test:e2e:offline
 
 Ranked by what a next session should care about.
 
-1. **Cross-node onboarding reads can be stale (blocker for multi-node P4).** A
-   candidate on another node kept an old copy of the target zone after the
-   owner designated the slot; GET/subscribe did not refresh it. Same-node
-   flows pass. Fix the refresh/subscription design before calling onboarding
-   live across nodes.
+1. **Cross-node onboarding reads can be stale (blocker for multi-node P4).**
+   Evidence 2026-11-08: the owner's update reached two co-hosts; a candidate
+   node with a successful subscription/renewal still served the old local copy
+   after 6+ minutes. GET always serves the local copy; the update mesh relays
+   only across connected co-hosts; anti-entropy is 300 s+ (tens of minutes in
+   the field). Same-node flows pass. Choose a reliable handoff before calling
+   onboarding live: a signed admission link/message carrying the slot record,
+   a shared gateway, or explicit anti-entropy latency copy.
 
 1. **Address-book import marker cannot persist (#ours, small).** The app runs in
    a sandboxed, opaque-origin iframe where `localStorage` throws, so the
@@ -835,13 +843,14 @@ wake-ups — the app-origin install from the site does.
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
 
-**2026-11-08 — P4e: target-zone watch**
-- Blocking subscribed GET (`subscribeState`) and `watchBoard` with dedicated
-  viewers, update callbacks and idempotent cleanup; offline no-op.
-- Join panel watches while queued/invited, debounces, re-checks; stops on
-  admitted/none/close. Matches freenet-core's local-serve/co-host broadcast
-  model.
-- UI 557 tests / 34 files, offline e2e 37; cross-node verification next.
+**2026-11-08 — P4e: target-zone watch (necessary, not sufficient)**
+- `watchBoard` uses a dedicated viewer, an explicit Subscribe (not just a
+  subscribed GET) and update callbacks; the join panel watches queued/invited
+  and re-checks. Idempotent cleanup; offline no-op.
+- Cross-node test: owner update targeted 2 co-hosts; the subscribed candidate
+  node stayed stale >6 minutes. Freenet GET serves the local copy and the
+  update mesh does not relay promptly; multi-node onboarding remains blocked.
+- UI 557 tests / 34 files, offline e2e 37.
 
 **2026-11-08 — join share artifact fixed**
 - Requests panel **Copy root id** copies the bare 64-hex owner id (manual
