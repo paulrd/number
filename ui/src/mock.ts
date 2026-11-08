@@ -12,6 +12,10 @@
  */
 
 import { blake3 } from "@noble/hashes/blake3";
+import {
+  decodeAdmissionCode,
+  type AdmissionResult,
+} from "./admission";
 import { deriveInstanceIdFromBytes, encodeBase58 } from "./freenet";
 import {
   I64_MAX,
@@ -57,7 +61,7 @@ function digest(label: string): Uint8Array {
   return blake3(encoder.encode(label));
 }
 
-function mockSignature(slotIndex: number, seq: number, entry: Entry | null): string {
+export function mockSignature(slotIndex: number, seq: number, entry: Entry | null): string {
   // The entry value is a bigint now; keep the mock digest deterministic and
   // JSON-safe without depending on the real wire encoder.
   const body = JSON.stringify({
@@ -825,4 +829,33 @@ export class OfflineBoard implements BoardBackend {
   get mockCodeHashBase58(): string {
     return encodeBase58(this.codeHashBytes);
   }
+}
+
+/**
+ * Offline admission verification.
+ *
+ * Offline signatures are deterministic mock bytes, so compare against the same
+ * mock the slot write produced; never treat them as Ed25519. The structural
+ * checks mirror `verifyAdmissionCode` so the offline flow exercises the same
+ * branches (owner mismatch, wrong identity, tampering).
+ */
+export async function verifyOfflineAdmission(
+  text: string,
+  options: { candidate: string | null; expectedOwner?: string | null },
+): Promise<AdmissionResult> {
+  const decoded = decodeAdmissionCode(text);
+  if (!decoded.ok) return decoded;
+  const code = decoded.code;
+  if (code.candidate !== code.entry.contact) {
+    return { ok: false, reason: "bounds" };
+  }
+  if (options.candidate === null || code.candidate !== options.candidate) {
+    return { ok: false, reason: "candidate" };
+  }
+  if (options.expectedOwner != null && code.owner !== options.expectedOwner) {
+    return { ok: false, reason: "owner" };
+  }
+  return code.sig === mockSignature(code.slot, code.seq, code.entry)
+    ? { ok: true, code }
+    : { ok: false, reason: "signature" };
 }

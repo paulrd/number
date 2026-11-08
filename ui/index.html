@@ -2353,6 +2353,62 @@
             </section>
 
             <section
+              id="admission-code-section"
+              class="requests-section"
+              aria-labelledby="admission-code-title"
+              hidden
+            >
+              <h3 id="admission-code-title" class="requests-section-title">
+                Admission code
+              </h3>
+              <p
+                id="admission-code-result"
+                class="interview-admission-result"
+                tabindex="-1"
+                role="status"
+              ></p>
+              <p
+                id="admission-code-region"
+                class="interview-admission-region"
+                hidden
+              ></p>
+              <p class="requests-link-copy">
+                Send this code to the person you admitted. They paste it into
+                Join a zone, so their node does not have to receive your zone's
+                update first.
+              </p>
+              <div class="requests-link-actions">
+                <button
+                  id="admission-code-copy"
+                  class="button button--small"
+                  type="button"
+                >
+                  Copy admission code
+                </button>
+                <p
+                  id="admission-code-copy-status"
+                  class="requests-copy-status"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+              </div>
+              <label
+                id="admission-code-field"
+                class="field requests-link-field"
+                hidden
+              >
+                <span>Admission code</span>
+                <input
+                  id="admission-code-input"
+                  type="text"
+                  readonly
+                  spellcheck="false"
+                  aria-describedby="admission-code-copy-status"
+                />
+              </label>
+            </section>
+
+            <section
               class="requests-section"
               aria-labelledby="requests-link-title"
             >
@@ -2446,7 +2502,8 @@
               <h3 id="join-root-title" tabindex="-1">Which zone invited you?</h3>
               <p id="join-root-help" class="onboarding-help">
                 Paste the root id you were given (64 lowercase hex characters;
-                the owner id, not a contract id), or a link that carries it.
+                the owner id, not a contract id), a link that carries it, or the
+                admission code the owner sent after admitting you.
               </p>
               <form id="join-root-form" class="onboarding-root-form" novalidate>
                 <label class="field" for="join-root-input">
@@ -2458,7 +2515,7 @@
                     autocomplete="off"
                     autocapitalize="none"
                     spellcheck="false"
-                    placeholder="Paste the link or 64-character root id"
+                    placeholder="Paste the link, root id or admission code"
                     aria-describedby="join-root-help join-root-error"
                   />
                 </label>
@@ -2651,6 +2708,11 @@
                 </p>
                 <p class="onboarding-meta">
                   Address <code id="join-admitted-address"></code>
+                </p>
+                <p id="join-admitted-source" class="field-hint" hidden></p>
+                <p class="onboarding-meta">
+                  Owner
+                  <code id="join-admitted-owner" class="onboarding-owner"></code>
                 </p>
                 <p
                   id="join-admitted-blocked"

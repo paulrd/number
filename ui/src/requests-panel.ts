@@ -15,6 +15,11 @@
 
 import type { CandidateTransport } from "./candidate-client";
 import {
+  buildAdmissionCode,
+  encodeAdmissionCode,
+  type AdmissionCode,
+} from "./admission";
+import {
   candidateNoteToText,
   candidateRequestId,
   isAccepting,
@@ -191,6 +196,34 @@ export function rootIdCopyAnnouncement(
   return mode === "copied"
     ? "Root id copied."
     : "The clipboard is unavailable. The root id is shown for manual copying.";
+}
+
+export type AdmissionCodeCopyMode = "idle" | "copying" | "copied" | "manual";
+
+/** Visible feedback for an admission-code copy, or "" when there is nothing. */
+export function admissionCodeCopyStatus(mode: AdmissionCodeCopyMode): string {
+  if (mode === "copying") return "Copying the admission code…";
+  if (mode === "copied") {
+    return "Copied. Send it to the candidate; they paste it into Join a zone.";
+  }
+  if (mode === "manual") {
+    return "The clipboard is unavailable. Select the admission code and copy it manually, then send it to the candidate.";
+  }
+  return "";
+}
+
+/** The screen-reader sentence for an admission-code copy attempt. */
+export function admissionCodeCopyAnnouncement(
+  mode: AdmissionCodeCopyMode,
+): string {
+  if (mode === "copied") {
+    return "Admission code copied. Send it to the candidate; they paste it into Join a zone.";
+  }
+  if (mode === "manual") {
+    return "The clipboard is unavailable. The admission code is shown for manual copying.";
+  }
+  if (mode === "copying") return "Copying the admission code.";
+  return "";
 }
 
 /**
@@ -611,6 +644,17 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   const interviewAdmissionRegion = byId<HTMLParagraphElement>(
     "interview-admission-region",
   );
+  const admissionCodeSection = byId<HTMLElement>("admission-code-section");
+  const admissionCodeResult = byId<HTMLParagraphElement>(
+    "admission-code-result",
+  );
+  const admissionCodeRegion = byId<HTMLParagraphElement>("admission-code-region");
+  const admissionCodeCopy = byId<HTMLButtonElement>("admission-code-copy");
+  const admissionCodeStatusLine = byId<HTMLParagraphElement>(
+    "admission-code-copy-status",
+  );
+  const admissionCodeField = byId<HTMLElement>("admission-code-field");
+  const admissionCodeInput = byId<HTMLInputElement>("admission-code-input");
   const interviewFinish = byId<HTMLButtonElement>("interview-finish");
   const interviewFinishConfirm = byId<HTMLDivElement>(
     "interview-finish-confirm",
@@ -646,6 +690,14 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   let copying = false;
   let copied = false;
   let manualId: string | null = null;
+
+  let copyingAdmission = false;
+  let admissionCopied = false;
+  let admissionManual: string | null = null;
+  /** The owner:slot:seq the admission copy state belongs to. */
+  let admissionCodeKey: string | null = null;
+  /** The last candidate whose designation was on screen, kept across finish. */
+  let lastAdmittedCandidate: string | null = null;
 
   /** The owner's own zone, read alongside the candidate room. */
   let zoneState: StateV3 | null = null;
@@ -719,6 +771,76 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   /** The designation written for the active candidate, if any. */
   function currentAdmission(): AdmissionView | null {
     return admissionView(zoneState, candidateId(), ownAddressValue);
+  }
+
+  /**
+   * The designation to hand off. During the interview `candidateId()` names the
+   * candidate; after "Finish admission" the interview is gone, so the last
+   * admitted candidate keeps the code available until the panel is reopened.
+   */
+  function displayedAdmission(): {
+    candidate: string;
+    admission: AdmissionView;
+  } | null {
+    const candidate = candidateId() ?? lastAdmittedCandidate;
+    if (candidate === null) return null;
+    const admission = admissionView(zoneState, candidate, ownAddressValue);
+    return admission === null ? null : { candidate, admission };
+  }
+
+  /** The owner's copyable admission code for the displayed designation. */
+  function currentAdmissionCode(): AdmissionCode | null {
+    const owner = ownId();
+    const shown = displayedAdmission();
+    if (owner === null || shown === null || zoneState === null) return null;
+    const record = zoneState.slots[shown.admission.slot];
+    if (record === undefined) return null;
+    return buildAdmissionCode({
+      owner,
+      slot: shown.admission.slot,
+      record,
+      address: ownAddressValue,
+    });
+  }
+
+  function currentAdmissionCodeKey(): string | null {
+    const code = currentAdmissionCode();
+    return code === null ? null : `${code.owner}:${code.slot}:${code.seq}`;
+  }
+
+  /** Show the admission-code section only for a complete designation. */
+  function renderAdmissionCode(): void {
+    const key = currentAdmissionCodeKey();
+    if (key !== admissionCodeKey) {
+      admissionCodeKey = key;
+      copyingAdmission = false;
+      admissionCopied = false;
+      admissionManual = null;
+    }
+    const owner = ownId();
+    const shown = displayedAdmission();
+    const show = shown !== null && key !== null && owner !== null;
+    admissionCodeSection.hidden = !show;
+    admissionCodeResult.textContent = shown?.admission.label ?? "";
+    const region = shown?.admission.region ?? null;
+    admissionCodeRegion.hidden = region === null;
+    admissionCodeRegion.textContent = region ?? "";
+    admissionCodeCopy.hidden = !show;
+    admissionCodeCopy.disabled = !show || copyingAdmission;
+    admissionCodeCopy.textContent = copyingAdmission
+      ? "Copying…"
+      : "Copy admission code";
+    admissionCodeCopy.setAttribute("aria-busy", String(copyingAdmission));
+    const mode: AdmissionCodeCopyMode = copyingAdmission
+      ? "copying"
+      : admissionCopied
+        ? "copied"
+        : admissionManual !== null
+          ? "manual"
+          : "idle";
+    admissionCodeStatusLine.textContent = admissionCodeCopyStatus(mode);
+    admissionCodeField.hidden = admissionManual === null;
+    admissionCodeInput.value = admissionManual ?? "";
   }
 
   function hasFreeSlot(): boolean {
@@ -881,6 +1003,11 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     copyStatus.textContent = rootIdCopyStatus(copyMode);
 
     renderInterview(busy);
+    if (currentAdmission() !== null) {
+      const activeCandidate = candidateId();
+      if (activeCandidate !== null) lastAdmittedCandidate = activeCandidate;
+    }
+    renderAdmissionCode();
 
     if (waiting) {
       setStatus("Waiting for your identity.");
@@ -1559,6 +1686,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
       current = state;
       loaded = true;
       loadError = null;
+      lastAdmittedCandidate = candidate;
       invitedCandidate = null;
       announcedInterview = null;
       announcedAdmission = null;
@@ -1857,6 +1985,43 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     }
   }
 
+  async function copyAdmissionCode(): Promise<void> {
+    if (copyingAdmission) return;
+    const code = currentAdmissionCode();
+    if (code === null) return;
+    const text = encodeAdmissionCode(code);
+    const key = `${code.owner}:${code.slot}:${code.seq}`;
+    const run = generation;
+
+    copyingAdmission = true;
+    admissionCopied = false;
+    admissionManual = null;
+    render();
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("the clipboard is unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      if (run !== generation || key !== admissionCodeKey) return;
+      admissionCopied = true;
+      deps.announce(admissionCodeCopyAnnouncement("copied"));
+    } catch {
+      if (run !== generation || key !== admissionCodeKey) return;
+      admissionManual = text;
+      deps.announce(admissionCodeCopyAnnouncement("manual"));
+    } finally {
+      if (run === generation && key === admissionCodeKey) {
+        copyingAdmission = false;
+        render();
+        if (admissionManual !== null) {
+          admissionCodeInput.focus({ preventScroll: true });
+          admissionCodeInput.select();
+        }
+      }
+    }
+  }
+
   function open(): void {
     generation += 1;
     readToken += 1;
@@ -1894,6 +2059,11 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     copying = false;
     copied = false;
     manualId = null;
+    copyingAdmission = false;
+    admissionCopied = false;
+    admissionManual = null;
+    admissionCodeKey = null;
+    lastAdmittedCandidate = null;
     liveStatus = "";
 
     render();
@@ -1918,6 +2088,10 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     interviewComposerErrorText = null;
     interviewEndingConfirm = false;
     finishingConfirm = false;
+    copyingAdmission = false;
+    admissionCopied = false;
+    admissionManual = null;
+    admissionCodeKey = null;
     void load(true);
   }
 
@@ -1961,6 +2135,11 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
 
   copyButton.addEventListener("click", () => {
     void copyRootId();
+  });
+
+  admissionCodeCopy.addEventListener("click", () => {
+    if (admissionCodeCopy.hidden || admissionCodeCopy.disabled) return;
+    void copyAdmissionCode();
   });
 
   interviewRefresh.addEventListener("click", () => {

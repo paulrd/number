@@ -9,15 +9,18 @@ import { chromium } from "playwright";
  *
  * The successful 2026-11-08 run used two app origins on the same live node
  * (7511) so both identities share the node's contract store. A two-node run
- * currently stalls at the candidate's admission check because the candidate
- * node can keep a stale copy of the owner's zone (see BACKLOG open items).
+ * needs `ADMIT_CODE=1`: the owner copies the signed admission code and the
+ * candidate opens it, so the candidate never depends on the owner's zone
+ * reaching their node (Freenet GET serves the local copy; see
+ * `reports/freenet-stale-contract-reads.md`).
  *
  * Flow: request -> owner interview + message -> Admit through the region
- * designation -> Finish admission -> candidate Check again -> Sign and join.
+ * designation -> copy admission code (ADMIT_CODE=1) -> Finish admission ->
+ * candidate opens ?admit=<code> -> Sign and join.
  *
  * Run from ui/:
- *   OWNER_WEBAPP=... CANDIDATE_WEBAPP=... OWNER_PORT=7511 CANDIDATE_PORT=7511 \
- *     node e2e/live-onboarding.mjs
+ *   OWNER_WEBAPP=... CANDIDATE_WEBAPP=... OWNER_PORT=7511 CANDIDATE_PORT=7512 \
+ *     ADMIT_CODE=1 node e2e/live-onboarding.mjs
  */
 const OWNER_WEBAPP =
   process.env.OWNER_WEBAPP ?? process.env.WEBAPP_ID ??
@@ -234,32 +237,63 @@ async function main() {
     const regionText = (await owner.app.locator("#interview-admission-region").textContent()) ?? "";
     console.log(`[owner] ${slotText.trim()} / ${regionText.trim()}`);
 
+    // Portable admission code: the supported cross-node handoff. The owner
+    // copies the signed designation and the candidate pastes it, so the
+    // candidate never needs the owner's zone to reach their node.
+    let admissionCode = null;
+    if (process.env.ADMIT_CODE === "1") {
+      await owner.context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      await owner.app.locator("#admission-code-copy").click();
+      await waitFor(owner.app, "#admission-code-copy-status", 20_000, "admission code status");
+      admissionCode = await owner.page.evaluate(() => navigator.clipboard.readText());
+      if (!admissionCode.startsWith("tally-admit1.")) {
+        throw new Error("the owner's copy did not yield an admission code");
+      }
+      console.log("[owner] admission code copied");
+    }
+
     await owner.app.locator("#interview-finish").click();
     await waitFor(owner.app, "#interview-finish-confirm", 30_000, "finish confirm");
     await owner.app.locator("#interview-finish-confirm-button").click();
     await waitGone(owner.app, "#interview-section", 60_000);
     console.log("[owner] admission finished; membership rotated");
 
-    // Candidate waits for the target-zone watch (or checks again) to surface
-    // the admission, then signs parent.
-    let admitted = await visible(candidate.app, "#join-status-admitted");
-    if (!admitted && process.env.EXPECT_WATCH === "1") {
-      console.log("[candidate] waiting on the target-zone watch");
-      const watchDeadline = Date.now() + 120_000;
-      while (!admitted && Date.now() < watchDeadline) {
-        await sleep(1_000);
-        admitted = await visible(candidate.app, "#join-status-admitted");
+    // Candidate admission. With ADMIT_CODE the code is the handoff and no
+    // target-zone read is involved; otherwise wait for the watch or Check again.
+    let admitted = false;
+    if (admissionCode !== null) {
+      console.log("[candidate] opening the admission code on its own node");
+      await candidate.page.goto(
+        `${base(CANDIDATE_PORT, CANDIDATE_WEBAPP)}?admit=${encodeURIComponent(admissionCode)}`,
+        { waitUntil: "domcontentloaded" },
+      );
+      await waitFor(candidate.app, "#join-status-admitted", 120_000, "admitted from code");
+      await waitFor(candidate.app, "#join-admitted-source", 20_000, "admission source");
+      const source = (await candidate.app.locator("#join-admitted-source").textContent()) ?? "";
+      if (!source.includes("Admission code")) {
+        throw new Error(`unexpected admission source: ${source.trim()}`);
       }
-      console.log(`[candidate] watch auto-update: ${admitted}`);
-    }
-    if (!admitted) {
-      const admitDeadline = Date.now() + 180_000;
-      while (!admitted && Date.now() < admitDeadline) {
-        await candidate.app.locator("#join-status-check").click().catch(() => {});
-        await sleep(4_000);
-        admitted = await visible(candidate.app, "#join-status-admitted");
+      admitted = true;
+    } else {
+      admitted = await visible(candidate.app, "#join-status-admitted");
+      if (!admitted && process.env.EXPECT_WATCH === "1") {
+        console.log("[candidate] waiting on the target-zone watch");
+        const watchDeadline = Date.now() + 120_000;
+        while (!admitted && Date.now() < watchDeadline) {
+          await sleep(1_000);
+          admitted = await visible(candidate.app, "#join-status-admitted");
+        }
+        console.log(`[candidate] watch auto-update: ${admitted}`);
       }
-      console.log(`[candidate] manual Check again: ${admitted}`);
+      if (!admitted) {
+        const admitDeadline = Date.now() + 180_000;
+        while (!admitted && Date.now() < admitDeadline) {
+          await candidate.app.locator("#join-status-check").click().catch(() => {});
+          await sleep(4_000);
+          admitted = await visible(candidate.app, "#join-status-admitted");
+        }
+        console.log(`[candidate] manual Check again: ${admitted}`);
+      }
     }
     if (!admitted) throw new Error("the candidate never saw the admission");
     const admittedSlot = ((await candidate.app.locator("#join-admitted-slot").textContent()) ?? "").trim();

@@ -673,6 +673,72 @@ before the owner writes the designation** and keep that subscription open:
 Reference: freenet-core `client_events.rs` local-serve gate, `update.rs`
 advertised-cohost broadcast targets, and the 300 s interest heartbeat.
 
+*Superseded for admission by §12.2.4: the subscription remains a useful
+accelerator, but the signed admission code no longer depends on this read.*
+
+### 12.2.4 Portable admission code (P4f)
+
+Cross-node reads cannot be made prompt (12.2.3), so admission must not depend on
+the owner's zone reaching the candidate's node. The credential is the record the
+owner already signed: the child-slot designation. Nothing about the delegate,
+the zone contract or the signing domains changes; the browser only verifies.
+
+**Shape.** `"tally-admit1." + base64url(UTF-8 JSON)` with exactly:
+
+```
+{ v: 1, owner, candidate, slot, seq, value, unit, note, address, sig }
+```
+
+`owner`, `candidate` and `sig` are lowercase hex; `slot` is a 0–7 number; `seq`
+and `value` are decimal strings so an i64 round-trips without a JS number;
+`address` is the owner-reported octal address of the owner's zone (`""` for
+root, `null` when it was not settled). `candidate` must equal `entry.contact`.
+
+**Verification** (`ui/src/admission.ts`): reconstruct the contract's canonical
+bytes with `state.ts`'s `signingBytes(slot, seq, entry)` and verify the
+signature with the Ed25519 key named by `owner`. Requirements: `seq > 0`, a
+present entry (a tombstone is refused), the slot and i64 bounds the contract
+enforces, `entry.contact == candidate == the viewer's own id`, and, when the
+join flow already names an owner, `owner` must equal it. Verification is pure
+browser JavaScript (`@noble/ed25519`, `zip215: false`); the sandboxed opaque
+origin makes WebCrypto Ed25519 unusable, and a delegate `verify` command would
+re-key the delegate for a pure function.
+
+**What it binds.** The signing domain, slot index, seq, value, contact, unit and
+note. **What it does not bind.** The owner's zone id (the `owner` field is only
+the key verification trusts), a timestamp, or the zone address. Consequences:
+
+- The address is displayed as reported by the owner, never as verified.
+- A code stays verifiable after the owner clears or reassigns the slot until a
+  reader reports a higher seq. This is the same class as an owner clearing a
+  slot after the child signs (see §12.2), and the candidate can always unilaterally
+  clear their parent. The UI must not claim the code proves current intent.
+- A code pasted cold cannot prove which zone the candidate *meant*; the admitted
+  card shows the full owner id so it can be compared with the id the owner
+  shared. An already-open flow refuses a code naming another owner.
+
+**Freshness rule.** A readable owner zone is a hint, never confirmation. Compare
+`seq` (monotonic), not occupants:
+
+- unreadable → proceed on the signed proof;
+- local seq < code seq → stale → proceed silently (this is the P4e failure mode);
+- local seq ≥ code seq with the same entry → proceeds;
+- local seq ≥ code seq with a different entry or a tombstone → **changed**:
+  block Sign and join and ask for a new code.
+
+**Owner.** Once a slot names the candidate, the interview's admission block
+offers **Copy admission code** (manual fallback shows the code in a readonly
+field). The code is built from the just-written slot record; no extra signature
+or network write happens. Send it by any channel.
+
+**Candidate.** The join field accepts the code (or `?admit=`); the app verifies
+it, reads the candidate's own zone for the §3.5 rule, applies the freshness rule,
+and renders the existing admitted card with slot, address, full owner id and
+**Sign and join** (`saveParent(owner)`). Check again re-runs the code
+verification/cross-check rather than the target-zone status search, so a stale
+read cannot regress the view. `watchBoard` remains an accelerator for nodes that
+share an update mesh, not the guarantee.
+
 
 
 

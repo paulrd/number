@@ -8,6 +8,17 @@
  * path.
  */
 
+import {
+  admissionCodeAddress,
+  admissionCodeFromInput,
+  admissionFailureText,
+  crossCheckAdmission,
+  encodeAdmissionCode,
+  verifyAdmissionCode,
+  type AdmissionCode,
+  type AdmissionCrossCheck,
+  type AdmissionResult,
+} from "./admission";
 import type { BoardSnapshot } from "./board";
 import type { CandidateTransport } from "./candidate-client";
 import {
@@ -97,6 +108,14 @@ export interface OnboardingPanelDeps {
   announce(message: string): void;
   /** Called when the dialog closes or admission completes: drop `?root=`. */
   onSettled(): void;
+  /**
+   * Verify a pasted admission code. Defaults to the real signature check; the
+   * offline harness supplies a stub.
+   */
+  verifyAdmission?: (
+    text: string,
+    options: { candidate: string | null; expectedOwner?: string | null },
+  ) => Promise<AdmissionResult>;
 }
 
 export interface OnboardingPanel {
@@ -342,17 +361,28 @@ interface StatusTarget {
   check: Exclude<JoinCheck, { kind: "none" }>;
 }
 
+/** Where an admitted view's designation came from. */
+type StatusSource = "zone" | "code";
+
 /** Everything one pending view needs, after the four reads. */
 interface StatusModel {
   kind: JoinStatusKind;
   targetId: string;
-  targetZone: StateV3;
+  /** Null only for a code-based admitted view whose owner zone is unreadable. */
+  targetZone: StateV3 | null;
   candidateState: CandidateStateV1 | null;
   address: string | null;
   ownZone: StateV3 | null;
   request: CandidateRequestV1 | null;
   slot: number | null;
   completed: boolean;
+  /** The portable credential, when the view came from an admission code. */
+  admission: AdmissionCode | null;
+  source: StatusSource;
+  /** Freshness cross-check of the code against the best-effort owner read. */
+  crossCheck: AdmissionCrossCheck | null;
+  /** The raw code text, so Check again can repeat the code path. */
+  codeText: string | null;
 }
 
 /** How many zones a link-only status search may read. */
@@ -367,10 +397,24 @@ export function parseTargetHint(search: string): string | null {
   return /^[0-9a-f]{64}$/.test(value) ? value : null;
 }
 
-/** Remove the join link's root and target hints, keeping other parameters. */
+/**
+ * Which owner a pasted admission code must name. Prefer the `target` hint: the
+ * shared `?root=` can be an ancestor of the zone that actually admitted the
+ * candidate (the match walk descends), and a code from that zone must not be
+ * refused as "a different zone".
+ */
+export function expectedAdmissionOwner(
+  search: string,
+  rootId: string | null,
+): string | null {
+  return parseTargetHint(search) ?? rootId ?? null;
+}
+
+/** Remove the join link's root, target and admission hints, keeping the rest. */
 export function stripJoinParams(url: URL): void {
   url.searchParams.delete("root");
   url.searchParams.delete("target");
+  url.searchParams.delete("admit");
 }
 
 type StatusSearchResult =
@@ -573,6 +617,8 @@ export function createOnboardingPanel(
   const admittedSlot = byId<HTMLElement>("join-admitted-slot");
   const admittedDigit = byId<HTMLElement>("join-admitted-digit");
   const admittedAddressEl = byId<HTMLElement>("join-admitted-address");
+  const admittedSource = byId<HTMLElement>("join-admitted-source");
+  const admittedOwner = byId<HTMLElement>("join-admitted-owner");
   const admittedBlocked = byId<HTMLElement>("join-admitted-blocked");
   const admittedError = byId<HTMLElement>("join-admitted-error");
   const admittedSign = byId<HTMLButtonElement>("join-admitted-sign");
@@ -739,15 +785,21 @@ export function createOnboardingPanel(
 
   async function continueRoot(): Promise<void> {
     const raw = rootInput.value;
-    const id = parseRootInput(raw);
     rootError.hidden = true;
     rootError.textContent = "";
     rootInput.removeAttribute("aria-invalid");
     rootStatus.textContent = "";
 
+    const admissionText = admissionCodeFromInput(raw);
+    if (admissionText !== null) {
+      await showAdmissionCode(admissionText);
+      return;
+    }
+
+    const id = parseRootInput(raw);
     if (id === null) {
       showRootError(
-        "That is not a root link or id. Paste the link you were given, or the 64-character root id.",
+        "That is not a root link, root id, or admission code. Paste what you were given.",
       );
       rootInput.focus({ preventScroll: true });
       return;
@@ -796,6 +848,109 @@ export function createOnboardingPanel(
     rootInput.setAttribute("aria-invalid", "true");
     rootContinue.textContent = "Try again";
     rootStatus.textContent = "";
+  }
+
+  /**
+   * Admit from the owner's signed code instead of a zone read. The code is the
+   * designation; the owner-zone read is only a best-effort freshness check.
+   */
+  async function showAdmissionCode(text: string): Promise<void> {
+    const self = deps.selfId();
+    if (self === null) {
+      showRootError("Your identity is not ready yet. Try again in a moment.");
+      rootInput.focus({ preventScroll: true });
+      return;
+    }
+
+    // The zone the candidate actually asked, when the flow recorded it: the
+    // shared `?root=` can be an ancestor of the zone that admitted them.
+    const expectedOwner = expectedAdmissionOwner(
+      window.location.search,
+      rootId,
+    );
+    const generation = ++flowGeneration;
+    statusGeneration += 1;
+    busy = true;
+    statusBusy = true;
+    rootForm.setAttribute("aria-busy", "true");
+    rootContinue.disabled = true;
+    rootContinue.textContent = "Checking…";
+    rootStatus.textContent = "Checking that admission code…";
+    statusCheck.disabled = true;
+    statusCheck.textContent = "Checking…";
+
+    try {
+      const verify = deps.verifyAdmission ?? verifyAdmissionCode;
+      const verified = await verify(text, { candidate: self, expectedOwner });
+      if (generation !== flowGeneration) return;
+      if (!verified.ok) {
+        showRootError(admissionFailureText(verified.reason));
+        rootInput.focus({ preventScroll: true });
+        return;
+      }
+
+      const code = verified.code;
+      rootId = code.owner;
+      rootInput.removeAttribute("aria-invalid");
+      rootError.hidden = true;
+      rootError.textContent = "";
+
+      // A read is not proof: only a strictly newer, different slot blocks.
+      const view = await reader(code.owner).catch(() => null);
+      if (generation !== flowGeneration) return;
+      const localSlot =
+        view === null ? null : (view.state.slots[code.slot] ?? null);
+      const crossCheck = crossCheckAdmission(code, localSlot);
+
+      const ownZone =
+        self === code.owner
+          ? (view?.state ?? null)
+          : ((await reader(self))?.state ?? null);
+      if (generation !== flowGeneration) return;
+
+      statusModel = {
+        kind: "admitted",
+        targetId: code.owner,
+        targetZone: view?.state ?? null,
+        candidateState: null,
+        address: code.address,
+        ownZone,
+        request: null,
+        slot: code.slot,
+        completed: false,
+        admission: code,
+        source: "code",
+        crossCheck,
+        codeText: text,
+      };
+      interviewViews = new globalThis.Map();
+      interviewComposerErrorText = null;
+      admittedError.hidden = true;
+      admittedError.textContent = "";
+      admittedDone.hidden = true;
+      admittedBadge.hidden = true;
+      statusLoading.hidden = true;
+      statusError.hidden = true;
+      statusWatch.stop();
+      showStatus(true, true);
+    } catch (error) {
+      if (generation !== flowGeneration) return;
+      showRootError(
+        `That admission code could not be checked: ${errorMessage(error)}`,
+      );
+      rootInput.focus({ preventScroll: true });
+    } finally {
+      if (generation === flowGeneration) {
+        busy = false;
+        statusBusy = false;
+        rootForm.setAttribute("aria-busy", "false");
+        rootContinue.disabled = false;
+        rootContinue.textContent = "Continue";
+        statusCheck.disabled = false;
+        statusCheck.textContent = "Check again";
+        statusWatch.settled();
+      }
+    }
   }
 
   async function preparePlace(): Promise<void> {
@@ -1393,6 +1548,10 @@ export function createOnboardingPanel(
         request: check.kind === "queued" ? check.request : null,
         slot: check.kind === "admitted" ? check.slot : null,
         completed: false,
+        admission: null,
+        source: "zone",
+        crossCheck: null,
+        codeText: null,
       };
       interviewViews = new globalThis.Map();
       interviewComposerErrorText = null;
@@ -1451,8 +1610,10 @@ export function createOnboardingPanel(
     statusQueued.hidden = model.kind !== "queued";
     statusInvited.hidden = model.kind !== "invited";
     statusAdmitted.hidden = model.kind !== "admitted";
-    statusActions.hidden = model.kind === "admitted";
-    statusCheck.hidden = model.kind === "admitted";
+    const codeAdmitted = model.kind === "admitted" && model.source === "code";
+    statusActions.hidden = model.kind === "admitted" && !codeAdmitted;
+    // A code-based view keeps Check again available to re-read the owner zone.
+    statusCheck.hidden = model.kind === "admitted" && !codeAdmitted;
     statusCheck.disabled = statusBusy;
     statusCheck.textContent = statusBusy ? "Checking…" : "Check again";
 
@@ -1469,7 +1630,9 @@ export function createOnboardingPanel(
     } else {
       statusTitle.textContent = "You've been admitted";
       statusLede.textContent =
-        "The owner wrote a slot for you. Sign and join when you're ready.";
+        model.source === "code"
+          ? "This admission code names you. Sign and join when you're ready."
+          : "The owner wrote a slot for you. Sign and join when you're ready.";
       renderAdmitted(model);
     }
 
@@ -1504,6 +1667,17 @@ export function createOnboardingPanel(
 
   function renderInterview(model: StatusModel): void {
     const self = deps.selfId();
+    const zone = model.targetZone;
+    if (zone === null) {
+      // Only a zone read can produce an invited view. This guard exists because
+      // `targetZone` is nullable for code-based admitted views.
+      interviewMessages.replaceChildren();
+      interviewLoading.hidden = true;
+      interviewEmpty.hidden = true;
+      interviewInput.disabled = true;
+      interviewSend.disabled = true;
+      return;
+    }
     interviewTarget.textContent = shorten(model.targetId);
     interviewTarget.title = model.targetId;
     interviewTarget.setAttribute(
@@ -1528,7 +1702,7 @@ export function createOnboardingPanel(
 
     const lock = interviewMembershipLock(
       model.targetId,
-      model.targetZone,
+      zone,
       self,
       latest,
     );
@@ -1701,18 +1875,37 @@ export function createOnboardingPanel(
     }
   }
 
+  /** A reason the admitted view cannot sign yet, or null when it can. */
+  function admittedBlock(model: StatusModel): string | null {
+    if (model.completed) return null;
+    if (model.crossCheck?.kind === "changed") {
+      return "This zone now shows a different admission. Ask the owner for a new code, then check again.";
+    }
+    if (model.ownZone === null) {
+      return "Your zone could not be read, so the join cannot be signed yet. Check again.";
+    }
+    return admissionBlockReason(model.ownZone);
+  }
+
   function renderAdmitted(model: StatusModel): void {
     const slot = model.slot ?? 0;
     admittedSlot.textContent = admittedSlotLabel(slot);
     admittedDigit.textContent = admittedDigitLabel(slot);
-    const address = admittedAddressText(model.address, slot);
+    const address =
+      model.source === "code" && model.admission !== null
+        ? admissionCodeAddress(model.admission)
+        : admittedAddressText(model.address, slot);
     admittedAddressEl.textContent = address ?? "Unavailable";
 
-    const block = model.completed
-      ? null
-      : model.ownZone === null
-        ? "Your zone could not be read, so the join cannot be signed yet. Check again."
-        : admissionBlockReason(model.ownZone);
+    admittedOwner.textContent = model.targetId;
+    admittedOwner.title = model.targetId;
+    admittedSource.hidden = model.source !== "code";
+    admittedSource.textContent =
+      model.source === "code"
+        ? "Admission code signed by the owner, not read from their zone. This node may not show the owner's zone yet."
+        : "";
+
+    const block = admittedBlock(model);
     admittedBlocked.hidden = block === null;
     admittedBlocked.textContent = block ?? "";
 
@@ -1725,22 +1918,33 @@ export function createOnboardingPanel(
       : "";
 
     admittedBadge.hidden = true;
-    if (!model.completed && model.address !== null) {
+    if (!model.completed && address !== null) {
       void loadAdmittedBadge(model);
     }
   }
 
   async function loadAdmittedBadge(model: StatusModel): Promise<void> {
     const slot = model.slot;
-    const address = model.address;
-    if (slot === null || address === null) return;
+    if (slot === null) return;
+
+    let regionAddress: string | null;
+    let occupancy: SlotOccupancy[];
+    if (model.source === "code") {
+      regionAddress = model.admission?.address ?? null;
+      // The labels are irrelevant: only `children[slot].provisional` is read.
+      occupancy = Array<SlotOccupancy>(8).fill("free");
+    } else {
+      regionAddress = model.address;
+      if (model.targetZone === null) return;
+      occupancy = model.targetZone.slots.map((entry) =>
+        entry.entry === null ? "free" : "taken",
+      );
+    }
+    if (regionAddress === null) return;
     const generation = statusGeneration;
     try {
       const dataset = await ensureDataset();
-      const occupancy: SlotOccupancy[] = model.targetZone.slots.map((entry) =>
-        entry.entry === null ? "free" : "taken",
-      );
-      const region = await resolveZoneRegion(dataset, address, occupancy);
+      const region = await resolveZoneRegion(dataset, regionAddress, occupancy);
       if (generation !== statusGeneration || statusModel !== model) return;
       const child = region.children[slot];
       if (child === undefined) return;
@@ -1767,9 +1971,11 @@ export function createOnboardingPanel(
         : latestCandidateMembership(model.candidateState);
     if (latest === null) return;
 
+    const zone = model.targetZone;
+    if (zone === null) return;
     const lock = interviewMembershipLock(
       model.targetId,
-      model.targetZone,
+      zone,
       self,
       latest,
     );
@@ -1824,10 +2030,7 @@ export function createOnboardingPanel(
   async function signJoin(): Promise<void> {
     const model = statusModel;
     if (model === null || model.kind !== "admitted" || signingJoin) return;
-    const block =
-      model.ownZone === null
-        ? "Your zone could not be read, so the join cannot be signed yet."
-        : admissionBlockReason(model.ownZone);
+    const block = admittedBlock(model);
     if (block !== null) return;
 
     const generation = statusGeneration;
@@ -1882,6 +2085,10 @@ export function createOnboardingPanel(
     interviewComposerError.textContent = "";
     admittedBlocked.hidden = true;
     admittedBlocked.textContent = "";
+    admittedSource.hidden = true;
+    admittedSource.textContent = "";
+    admittedOwner.textContent = "";
+    admittedOwner.title = "";
     admittedError.hidden = true;
     admittedError.textContent = "";
     admittedDone.hidden = true;
@@ -2006,6 +2213,10 @@ export function createOnboardingPanel(
         request: check.kind === "queued" ? check.request : null,
         slot: check.kind === "admitted" ? check.slot : null,
         completed: false,
+        admission: null,
+        source: "zone",
+        crossCheck: null,
+        codeText: null,
       };
       interviewViews = new globalThis.Map();
       interviewComposerErrorText = null;
@@ -2192,6 +2403,23 @@ export function createOnboardingPanel(
 
   statusCheck.addEventListener("click", () => {
     if (statusBusy) return;
+    const model = statusModel;
+    if (
+      model !== null &&
+      model.kind === "admitted" &&
+      model.source === "code"
+    ) {
+      // Repeat the code path: a stale zone read must never regress this view.
+      const text =
+        model.codeText ??
+        (model.admission === null
+          ? null
+          : encodeAdmissionCode(model.admission));
+      if (text !== null) {
+        void showAdmissionCode(text);
+        return;
+      }
+    }
     void checkStatus({ focus: true, announceCheck: true });
   });
 

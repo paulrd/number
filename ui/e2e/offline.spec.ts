@@ -1982,6 +1982,51 @@ test("shows the candidate queued, invited, and admitted from the join link", asy
     })
     .toBe(false);
 
+  // The owner copies the portable admission code from the written designation.
+  await openAdvanced(page);
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await page.locator("#requests-refresh").click();
+  await expect(page.locator("#admission-code-section")).toBeVisible();
+  await expect(page.locator("#admission-code-result")).toHaveText(
+    "Slot 1 written",
+  );
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.locator("#admission-code-copy").click();
+  await expect(page.locator("#admission-code-copy-status")).toContainText(
+    "Copied",
+  );
+  const admissionCode = await page.evaluate(() => navigator.clipboard.readText());
+  expect(admissionCode.startsWith("tally-admit1.")).toBe(true);
+  await page.locator("#requests-done").click();
+  await expect(page.locator("#requests-dialog")).toBeHidden();
+
+  // The candidate admits from the code alone: no root id, no target-zone read.
+  await openAdvanced(page);
+  await page.locator("#join-open").click();
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await page.locator("#join-root-input").fill(admissionCode);
+  await page.locator("#join-root-continue").click();
+  await expect(page.locator("#join-status-title")).toHaveText(
+    "You've been admitted",
+  );
+  await expect(page.locator("#join-admitted-source")).toContainText(
+    "Admission code",
+  );
+  await expect(page.locator("#join-admitted-owner")).toHaveText(ownerId!);
+  await expect(page.locator("#join-admitted-slot")).toHaveText("Slot 1");
+  await expect(page.locator("#join-admitted-address")).toHaveText("0");
+  await expect(page.locator("#join-admitted-badge")).toHaveText("Published");
+  await expect(page.locator("#join-admitted-blocked")).toContainText(
+    "Your zone already has a parent or children",
+  );
+  // Check again keeps the code view; a matching zone read cannot regress it.
+  await page.locator("#join-status-check").click();
+  await expect(page.locator("#join-admitted-slot")).toHaveText("Slot 1");
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+  expect(new URL(page.url()).searchParams.has("admit")).toBe(false);
+
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
     accessibility.violations,
@@ -2027,7 +2072,7 @@ test("keeps a duplicate ?root= value and explains it", async ({ page }) => {
   await expect(page.locator("#join-dialog")).toBeVisible();
   await expect(page.locator("#join-root-error")).toBeVisible();
   await expect(page.locator("#join-root-error")).toContainText(
-    "not a root link or id",
+    "not a root link, root id, or admission code",
   );
   await expect(page.locator("#join-root-input")).toHaveValue(
     `${ownerId} ${ownerId}`,

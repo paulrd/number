@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CandidateTransport } from "./candidate-client";
 import {
   candidateRequestId,
   textToCandidateNote,
@@ -7,14 +9,18 @@ import {
   type CandidateRequestV1,
   type CandidateStateV1,
 } from "./candidate-state";
+import { decodeAdmissionCode } from "./admission";
 import { emptyState, type StateV3 } from "./state";
 import {
   REQUEST_NOTE_DISPLAY_LIMIT,
   ADMISSION_NO_FREE_SLOT,
   admissionAnnouncement,
+  admissionCodeCopyAnnouncement,
+  admissionCodeCopyStatus,
   admissionFinishMembers,
   admissionView,
   clearSummary,
+  createRequestsPanel,
   dismissSequentially,
   formatRequestCell,
   formatRequestTime,
@@ -602,5 +608,401 @@ describe("admissionFinishMembers", () => {
       CHILD,
       CANDIDATE,
     ]);
+  });
+});
+
+describe("admission code copy feedback", () => {
+  it("labels all four modes, keeping idle empty", () => {
+    expect(admissionCodeCopyStatus("idle")).toBe("");
+    const copying = admissionCodeCopyStatus("copying");
+    const copied = admissionCodeCopyStatus("copied");
+    const manual = admissionCodeCopyStatus("manual");
+    expect(copying).not.toBe("");
+    expect(copied).not.toBe("");
+    expect(manual).not.toBe("");
+    expect(copied).not.toBe(manual);
+    expect(copied).toContain("Send it to the candidate");
+    expect(copied).toContain("Join a zone");
+    expect(manual).toContain("manually");
+  });
+
+  it("tells the owner where the candidate uses the code", () => {
+    expect(admissionCodeCopyAnnouncement("idle")).toBe("");
+    expect(admissionCodeCopyAnnouncement("copied")).toContain(
+      "Send it to the candidate",
+    );
+    expect(admissionCodeCopyAnnouncement("copied")).toContain("Join a zone");
+    expect(admissionCodeCopyAnnouncement("manual")).toContain(
+      "manual copying",
+    );
+  });
+});
+
+/**
+ * A tiny DOM stand-in. The suite runs in the node environment (see
+ * `vite.config.ts`), so the panel's DOM wiring is exercised against just the
+ * properties it touches. The ids are read from the module so a new `byId` call
+ * cannot silently escape the fixture.
+ */
+class FakeElement {
+  hidden = false;
+  disabled = false;
+  checked = false;
+  open = false;
+  value = "";
+  textContent = "";
+  title = "";
+  type = "";
+  tabIndex = 0;
+  dateTime = "";
+  className = "";
+  readonly dataset: Record<string, string> = {};
+  readonly children: FakeElement[] = [];
+  private readonly attrs = new Map<string, string>();
+  private readonly listeners = new Map<
+    string,
+    Array<(event: { preventDefault(): void }) => void>
+  >();
+  private readonly classes = new Set<string>();
+  readonly classList = {
+    toggle: (token: string, force?: boolean): void => {
+      const on = force ?? !this.classes.has(token);
+      if (on) this.classes.add(token);
+      else this.classes.delete(token);
+    },
+    contains: (token: string): boolean => this.classes.has(token),
+  };
+
+  constructor(
+    readonly tagName: string,
+    readonly id = "",
+  ) {}
+
+  setAttribute(name: string, value: string): void {
+    this.attrs.set(name, value);
+  }
+
+  removeAttribute(name: string): void {
+    this.attrs.delete(name);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attrs.get(name) ?? null;
+  }
+
+  append(...nodes: FakeElement[]): void {
+    this.children.push(...nodes);
+  }
+
+  replaceChildren(...nodes: FakeElement[]): void {
+    this.children.length = 0;
+    this.children.push(...nodes);
+  }
+
+  addEventListener(
+    type: string,
+    listener: (event: { preventDefault(): void }) => void,
+  ): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+
+  dispatch(type: string): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ preventDefault: () => {} });
+    }
+  }
+
+  focus(): void {}
+
+  select(): void {}
+
+  showModal(): void {
+    this.open = true;
+  }
+
+  close(): void {
+    this.open = false;
+    this.dispatch("close");
+  }
+
+  hasClass(token: string): boolean {
+    return this.classes.has(token) || this.className.split(/\s+/).includes(token);
+  }
+
+  querySelectorAll<T>(selector: string): T[] {
+    const token = selector.startsWith(".") ? selector.slice(1) : selector;
+    const matches: FakeElement[] = [];
+    const walk = (node: FakeElement): void => {
+      for (const child of node.children) {
+        const hit = selector.startsWith(".")
+          ? child.hasClass(token)
+          : child.tagName === token;
+        if (hit) matches.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return matches as T[];
+  }
+}
+
+const PANEL_IDS = [
+  ...new Set(
+    [
+      ...readFileSync(
+        new URL("./requests-panel.ts", import.meta.url),
+        "utf-8",
+      ).matchAll(/byId<[^>]*>\(\s*"([^"]+)"\s*,?\s*\)/g),
+    ].map((match) => match[1]!),
+  ),
+];
+
+interface PanelFixture {
+  panel: ReturnType<typeof createRequestsPanel>;
+  elements: Map<string, FakeElement>;
+  announce: ReturnType<typeof vi.fn>;
+  clipboard: { writeText: ReturnType<typeof vi.fn> };
+  setZone(zone: StateV3): void;
+  setRoom(state: CandidateStateV1): void;
+}
+
+function setupPanel(
+  initialZone: StateV3,
+  initialRoom: CandidateStateV1,
+): PanelFixture {
+  let zone = initialZone;
+  let room = initialRoom;
+  const announce = vi.fn();
+  const clipboard = {
+    writeText: vi.fn(async (_text: string): Promise<void> => {}),
+  };
+  vi.stubGlobal("navigator", { clipboard });
+
+  const transport = {
+    read: async (): Promise<CandidateStateV1 | null> => room,
+    ensure: async (): Promise<void> => {},
+    request: async (): Promise<CandidateStateV1> => room,
+    setAccepting: async (): Promise<CandidateStateV1> => room,
+    dismiss: async (): Promise<CandidateStateV1> => room,
+    updateMembership: async (): Promise<CandidateStateV1> => room,
+    sendMessage: async (): Promise<CandidateStateV1> => room,
+    sealEpoch: async () => ({ epoch: 1, secrets: [] }),
+    openEpoch: async () => new Uint8Array(),
+    epochKeyFor: async () => null,
+    roomIdFor: () => "room",
+    close: () => {},
+  } as unknown as CandidateTransport;
+
+  const elements = new Map<string, FakeElement>();
+  for (const id of PANEL_IDS) elements.set(id, new FakeElement("div", id));
+  const doc = {
+    activeElement: null as FakeElement | null,
+    getElementById: (id: string): FakeElement | null =>
+      elements.get(id) ?? null,
+    createElement: (tag: string): FakeElement => new FakeElement(tag),
+  };
+  vi.stubGlobal("document", doc);
+  vi.stubGlobal("HTMLElement", FakeElement);
+
+  const panel = createRequestsPanel({
+    transport,
+    ownId: () => OWNER,
+    readOwnZone: async () => zone,
+    ownAddress: async () => "",
+    openAdmit: async () => {},
+    announce,
+  });
+
+  return {
+    panel,
+    elements,
+    announce,
+    clipboard,
+    setZone(next) {
+      zone = next;
+    },
+    setRoom(next) {
+      room = next;
+    },
+  };
+}
+
+function invitedRoom(): CandidateStateV1 {
+  return roomState([membership(1, [OWNER, CHILD, CANDIDATE])]);
+}
+
+/**
+ * Open the panel, start an interview with the candidate, then refresh into the
+ * written designation. Starting the interview sets the panel's `invited`
+ * fallback, which is what keeps the admitted candidate visible once the slot
+ * makes them a zone child.
+ */
+async function openWithAdmission(fixture: PanelFixture): Promise<void> {
+  fixture.panel.open();
+  await vi.waitFor(() => {
+    const candidateButton = fixture.elements
+      .get("requests-list")!
+      .querySelectorAll<FakeElement>(".requests-interview")[0];
+    expect(candidateButton).toBeDefined();
+    expect(candidateButton!.disabled).toBe(false);
+  });
+
+  fixture.setRoom(invitedRoom());
+  fixture.elements
+    .get("requests-list")!
+    .querySelectorAll<FakeElement>(".requests-interview")[0]!
+    .dispatch("click");
+  await vi.waitFor(() => {
+    expect(fixture.elements.get("interview-section")!.hidden).toBe(false);
+    expect(fixture.elements.get("interview-candidate")!.textContent).toBe(
+      shortRequester(CANDIDATE),
+    );
+  });
+
+  fixture.setZone(zoneWithCandidate());
+  fixture.panel.refresh();
+  await vi.waitFor(() => {
+    expect(fixture.elements.get("admission-code-section")!.hidden).toBe(false);
+  });
+}
+
+function requestFromCandidate(): CandidateStateV1 {
+  return state([
+    request({ requester: CANDIDATE, sig: "4".repeat(128) }),
+  ]);
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("admission code copy action", () => {
+  it("appears when a slot names the candidate and disappears when it does not", async () => {
+    const fixture = setupPanel(zoneWithChild(), requestFromCandidate());
+    await openWithAdmission(fixture);
+
+    const section = fixture.elements.get("admission-code-section")!;
+    const copy = fixture.elements.get("admission-code-copy")!;
+    expect(section.hidden).toBe(false);
+    expect(copy.hidden).toBe(false);
+    expect(copy.disabled).toBe(false);
+    expect(
+      fixture.elements.get("admission-code-result")!.textContent,
+    ).toBe("Slot 2 written");
+
+    fixture.setZone(zoneWithChild());
+    fixture.panel.refresh();
+    await vi.waitFor(() => {
+      expect(fixture.elements.get("admission-code-section")!.hidden).toBe(
+        true,
+      );
+    });
+    expect(
+      fixture.elements.get("admission-code-copy-status")!.textContent,
+    ).toBe("");
+    expect(fixture.elements.get("admission-code-field")!.hidden).toBe(true);
+  });
+
+  it("copies a portable code, shows Copied and announces it", async () => {
+    const fixture = setupPanel(zoneWithChild(), requestFromCandidate());
+    await openWithAdmission(fixture);
+
+    fixture.elements.get("admission-code-copy")!.dispatch("click");
+    await vi.waitFor(() => {
+      expect(fixture.clipboard.writeText).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => {
+      expect(
+        fixture.elements.get("admission-code-copy-status")!.textContent,
+      ).toContain("Copied.");
+    });
+
+    const copied = fixture.clipboard.writeText.mock.calls[0]![0] as string;
+    expect(copied.startsWith("tally-admit1.")).toBe(true);
+    expect(fixture.announce).toHaveBeenCalledWith(
+      admissionCodeCopyAnnouncement("copied"),
+    );
+  });
+
+  it("falls back to a readonly field when the clipboard is unavailable", async () => {
+    const fixture = setupPanel(zoneWithChild(), requestFromCandidate());
+    await openWithAdmission(fixture);
+    fixture.clipboard.writeText.mockRejectedValueOnce(
+      new Error("clipboard blocked"),
+    );
+
+    fixture.elements.get("admission-code-copy")!.dispatch("click");
+    const input = fixture.elements.get("admission-code-input")!;
+    await vi.waitFor(() => {
+      expect(input.value.startsWith("tally-admit1.")).toBe(true);
+    });
+    expect(fixture.elements.get("admission-code-field")!.hidden).toBe(false);
+    expect(
+      fixture.elements.get("admission-code-copy-status")!.textContent,
+    ).toContain("manually");
+    expect(fixture.announce).toHaveBeenCalledWith(
+      admissionCodeCopyAnnouncement("manual"),
+    );
+
+    // The next attempt clears the stale manual value.
+    fixture.elements.get("admission-code-copy")!.dispatch("click");
+    await vi.waitFor(() => {
+      expect(input.value).toBe("");
+      expect(fixture.elements.get("admission-code-field")!.hidden).toBe(true);
+    });
+  });
+
+  it("builds a code that decodes back to the written slot record", async () => {
+    const fixture = setupPanel(zoneWithChild(), requestFromCandidate());
+    await openWithAdmission(fixture);
+
+    fixture.elements.get("admission-code-copy")!.dispatch("click");
+    await vi.waitFor(() => {
+      expect(fixture.clipboard.writeText).toHaveBeenCalledTimes(1);
+    });
+
+    const copied = fixture.clipboard.writeText.mock.calls[0]![0] as string;
+    const decoded = decodeAdmissionCode(copied);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+
+    const record = zoneWithCandidate().slots[1]!;
+    expect(decoded.code.slot).toBe(1);
+    expect(decoded.code.seq).toBe(record.seq);
+    expect(decoded.code.entry.contact).toBe(record.entry!.contact);
+    expect(decoded.code.sig).toBe(record.sig);
+  });
+
+  it("keeps the code available after Finish admission", async () => {
+    const fixture = setupPanel(zoneWithChild(), requestFromCandidate());
+    await openWithAdmission(fixture);
+
+    // Finish admission directly through the confirmation action; the fixture
+    // transport keeps the written slot in the owner's zone.
+    fixture.elements.get("interview-finish-confirm-button")!.dispatch("click");
+    await vi.waitFor(() => {
+      expect(fixture.elements.get("interview-section")!.hidden).toBe(true);
+    });
+
+    const section = fixture.elements.get("admission-code-section")!;
+    expect(section.hidden).toBe(false);
+    expect(
+      fixture.elements.get("admission-code-result")!.textContent,
+    ).toBe("Slot 2 written");
+
+    fixture.elements.get("admission-code-copy")!.dispatch("click");
+    await vi.waitFor(() => {
+      expect(fixture.clipboard.writeText).toHaveBeenCalledTimes(1);
+    });
+
+    const copied = fixture.clipboard.writeText.mock.calls[0]![0] as string;
+    const decoded = decodeAdmissionCode(copied);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.code.slot).toBe(1);
+    expect(decoded.code.entry.contact).toBe(CANDIDATE);
   });
 });

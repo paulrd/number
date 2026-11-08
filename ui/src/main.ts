@@ -26,7 +26,7 @@ import {
 import { createDelegateDialog } from "./delegate-dialog";
 import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
-import { OfflineBoard } from "./mock";
+import { OfflineBoard, verifyOfflineAdmission } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
 import { createOnboardingPanel, stripJoinParams } from "./onboarding-panel";
 import { createRequestsPanel } from "./requests-panel";
@@ -3965,7 +3965,9 @@ function tryOpenRoomLink(): void {
  */
 function maybeOpenRootLink(): void {
   if (rootLinkSettled) return;
-  const values = new URLSearchParams(window.location.search).getAll("root");
+  const params = new URLSearchParams(window.location.search);
+  // One value only; duplicates deliberately fall through to the input error.
+  const values = [...params.getAll("root"), ...params.getAll("admit")];
   if (values.length === 0) return;
   pendingRootValue = values.length === 1 ? values[0]! : values.join(" ");
   tryOpenRootLink();
@@ -4260,6 +4262,7 @@ const joinPanel = createOnboardingPanel({
   transport: backend.candidateTransport,
   selfId: () => ownIdentity?.pubkey ?? null,
   watchBoard: (ownerId, onChange) => backend.watchBoard(ownerId, onChange),
+  verifyAdmission: isOffline ? verifyOfflineAdmission : undefined,
   saveParent: saveOwnParent,
   announce,
   onSettled: stripRootParam,

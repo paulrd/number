@@ -26,11 +26,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794152531`, bundle `assets/index-D7qqOsnp.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
+| Live site | version `1794155664`, bundle `assets/index-BswZAvDg.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794152531`, P4c onboarding UI + target-zone watch + pinned candidate WASM; delegate v13; contract unchanged |
+| Last UI publish | 2026-11-08; site `1794155664`, P4f portable admission code (owner copy / candidate paste, expected-owner precedence fix) + P4e target-zone watch; delegate v13 unchanged; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -44,7 +44,65 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4e zone watch
+## Where we left off (2026-11-08) — P4f portable admission code
+
+### P4f implemented and deployed (2026-11-08): signed admission code
+
+The P4e blocker is resolved without touching the delegate, the contracts or the
+signing domains. The owner hands over the record they already signed — the
+child-slot designation — and the candidate verifies it locally, so admission no
+longer depends on the owner's zone reaching the candidate's node.
+
+- **Credential.** `tally-admit1.<base64url JSON>` carrying `v, owner,
+  candidate, slot, seq, value, unit, note, address, sig`. `sig` is the delegate's
+  normal `number:v2:slot` signature over the contract's canonical bytes
+  (`state.ts`'s `signingBytes`), verified with the `owner` id as the Ed25519 key.
+  Browser verification uses `@noble/ed25519` with `zip215: false` (pure JS; the
+  sandboxed opaque origin rules out WebCrypto Ed25519). A delegate verify
+  command would have re-keyed the delegate for a pure function. Spec:
+  `DESIGN-candidates.md` §12.2.4.
+- **Owner.** Once a slot names the candidate, the requests dialog shows an
+  **Admission code** section (a sibling of the interview, so it survives **Finish
+  admission**) with the slot/region, **Copy admission code**, and a manual
+  readonly fallback. The code is built from the written slot record; no extra
+  signature or network write.
+- **Candidate.** The join field accepts the code (or `?admit=`). The app verifies
+  the signature, requires `entry.contact == candidate == self`, refuses a code
+  that would retarget an already-open flow, reads the candidate's own zone for
+  the §3.5 rule, and shows the existing admitted card with slot, owner-reported
+  address, full owner id and **Sign and join**. No owner-zone read is required.
+- **Freshness rule (seq only).** A readable owner zone is a hint, never
+  confirmation: unreadable or lower-seq proceeds silently (the P4e failure
+  mode); higher-seq with a different entry/tombstone blocks and asks for a new
+  code. **Check again** repeats the code path, so a stale read cannot regress the
+  view. `watchBoard` stays an accelerator for nodes in the same update mesh.
+- **Honest limits.** The signature binds the slot (index, seq, value, contact,
+  unit, note), not the address, a timestamp, or the owner's zone id. The address
+  is display-only ("reported by the owner"); a code stays valid until a
+  higher-seq read contradicts it (same class as an owner clearing a slot after
+  the child signs; the child can always clear their parent). A cold paste cannot
+  prove which zone the candidate meant, so the card shows the full owner id.
+- **Tests.** 18 `admission.ts` unit tests with real Ed25519 signatures (round
+  trip, i64 bounds, tampering, key/slot binding, owner/candidate mismatch,
+  malformed payloads, seq-only cross-check), plus request-panel and
+  candidate-panel suites. UI 593 tests / 36 files; offline e2e 37 (the owner
+  copies the code, the candidate pastes it cold, admits, Check again keeps the
+  view, axe and console clean); `make check`, `make check-artifacts` green.
+- **Deployed.** Site `1794155664` (15 files, `index-BswZAvDg.js`), the same
+  bundle on all four nodes; the smoke candidate/owner sites were published with
+  their own `WEBAPP_CONTRACT_ID` builds.
+
+**Two-node smoke passed (2026-11-08).** Owner `d75a09ba…` on 7511 (`number-smoke`),
+candidate `dbe04d14…` on 7512 (`number-smoke3`, freshly installed delegate and
+identity). The full flow ran cross-node: request → owner saw it → interview →
+**Admit** → Slot 3 / Region 2 → **Copy admission code** → Finish admission → the
+candidate opened `?admit=<code>` on its own node → admitted (not blocked) →
+**Sign and join** → address `2`; the owner's zone shows the candidate; no
+console errors. This is the first cross-node admission that did not depend on
+the owner's zone reaching the candidate's node. The candidate→owner request
+direction also worked in this run, but it still travels through the candidate
+room contract and remains subject to anti-entropy; if a future run stalls there,
+add the symmetric signed request code.
 
 ### P4e implemented; cross-node admission still not prompt (2026-11-08)
 
@@ -609,6 +667,21 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 
 ### Gotchas worth remembering
 
+- **Two identities on two nodes need two webapp origins.** A delegate instance
+  is published with the live webapp id in its parameters and refuses any other
+  webapp ("only serves BZBE…"). Each webapp origin gets its own delegate
+  instance and seed, so a smoke candidate site must be built for its own webapp:
+  `WEBAPP_CONTRACT_ID=<smoke-webapp> make build` changes the generated delegate
+  key (`BXotLc…` for `number-smoke3`), publish that `ui/dist` to the smoke site,
+  then rebuild normally (`delegate_key.txt` returns to `Cdhuw…`, production
+  bundle hash unchanged). Never publish the smoke-tuned `dist` to
+  `number-local`.
+- **The submission of a deployment's website update can lag on the publishing
+  node.** After `fdev website update` on 7509, 7511–7513 served the new bundle
+  while 7509's shell page still named the previous asset (the asset bytes were
+  present). Verify per-node by fetching `/?__sandbox=1` and hashing the named
+  bundle.
+
 - **The epoch secret is bound to the epoch it was sealed for.** If the delegate
   membership counter is ahead of room state, reseal at the seq you will sign;
   never store a blob sealed for a different epoch.
@@ -695,15 +768,20 @@ cd ui && npm run build && npm test && npm run test:e2e:offline
 
 Ranked by what a next session should care about.
 
-1. **Cross-node onboarding reads can be stale (blocker for multi-node P4).**
-   Evidence 2026-11-08: the owner's update reached two co-hosts; a candidate
-   node with a successful subscription/renewal still served the old local copy
-   after 6+ minutes. GET always serves the local copy; the update mesh relays
-   only across connected co-hosts; anti-entropy is 300 s+ (tens of minutes in
-   the field). Same-node flows pass. Choose a reliable handoff before calling
-   onboarding live: a signed admission link/message carrying the slot record,
-   a shared gateway, or explicit anti-entropy latency copy. Findings and
-   freenet-core citations: `reports/freenet-stale-contract-reads.md`.
+1. **Cross-node contract reads can be stale (owner→candidate solved by P4f;
+   residual: candidate→owner).** Evidence 2026-11-08: the owner's update reached
+   two co-hosts; a candidate node with a successful subscription/renewal still
+   served the old local copy after 6+ minutes. GET always serves the local copy;
+   the update mesh relays only across connected co-hosts; anti-entropy is 300 s+
+   (tens of minutes in the field). P4f removes the owner→candidate dependency:
+   the owner copies a signed admission code and the candidate verifies it
+   locally. The 2026-11-08 two-node run delivered the request and completed the
+   whole flow, so the residual is latency, not a demonstrated block: the join
+   request still travels through the candidate room contract, and the owner may
+   wait for anti-entropy before seeing one from another node. If that ever
+   stalls a run, add the symmetric signed request code rather than reopening
+   this. Findings and freenet-core citations:
+   `reports/freenet-stale-contract-reads.md`.
 
 1. **Address-book import marker cannot persist (#ours, small).** The app runs in
    a sandboxed, opaque-origin iframe where `localStorage` throws, so the
@@ -742,6 +820,12 @@ Ranked by what a next session should care about.
   transfer path and backup of record; there is no live sync. Decision
   2026-11-02: keep it that way — there is no server or shared private store to
   sync through.
+- **A signed admission code is not time-bounded.** It proves the owner
+  designated that slot at that seq, not that they still intend it. The
+  candidate's app compares a readable owner zone by seq and blocks on a newer,
+  different designation, and the candidate can always clear their parent. A
+  signed timestamp would need a new signing domain (a delegate re-key), which
+  the reuse of the existing slot signature deliberately avoids.
 - **Issued, not delivered.** A stalled downward payment leaves the amount issued
   at the payer until they withdraw or overwrite the slot; the UI says so. This
   follows from allowing an LCA endpoint.
@@ -804,7 +888,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 557, offline e2e 37, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 593, offline e2e 37, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -843,6 +927,32 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4f: portable admission code (site `1794155664`)**
+- Owner copies the already-signed child-slot record as
+  `tally-admit1.<base64url JSON>`; the candidate verifies the `number:v2:slot`
+  signature locally (`@noble/ed25519`, `zip215:false`) and signs `parent` on
+  their own node. No delegate, contract or signing-domain change; no re-key.
+- Owner UI: an **Admission code** section outside the interview (so it survives
+  Finish admission), Copy + manual readonly fallback.
+- Candidate UI: accepts the code (or `?admit=`) with no owner-zone read; §3.5 on
+  the candidate's own zone; seq-only freshness (stale/unreadable proceed, only
+  a higher different seq blocks); Check again repeats the code path so a stale
+  read cannot regress the view. `watchBoard` stays an accelerator.
+- 18 admission unit tests with real Ed25519 (round trip, i64, tampering, key/slot
+  binding, owner/candidate mismatch, malformed input, cross-check) plus the
+  expected-owner precedence test; UI 593/36;
+  offline e2e 37 (owner copies, candidate pastes cold, Check again); `make check`
+  and `make check-artifacts` green.
+- Deployed: 15 files, `index-BswZAvDg.js`, identical on all four nodes.
+  `number-smoke` and `number-smoke3` were rebuilt with their
+  own `WEBAPP_CONTRACT_ID` (each webapp gets its own delegate instance and seed)
+  for the owner/candidate origins and published from 7509.
+- **Two-node smoke passed:** owner on 7511, candidate on 7512 (fresh delegate
+  and identity), request → interview → admit → **Copy admission code** → finish
+  → candidate `?admit=` → **Sign and join** → address `2`; owner's zone names
+  the candidate; console clean. First cross-node admission independent of zone
+  propagation.
 
 **2026-11-08 — P4e: target-zone watch (necessary, not sufficient)**
 - `watchBoard` uses a dedicated viewer, an explicit Subscribe (not just a

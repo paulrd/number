@@ -12,6 +12,7 @@ import {
   candidateStatusLine,
   chainAddress,
   createStatusWatch,
+  expectedAdmissionOwner,
   formatWantCell,
   interviewAuthorLabel,
   interviewErrorText,
@@ -250,6 +251,28 @@ describe("parseTargetHint", () => {
   });
 });
 
+describe("expectedAdmissionOwner", () => {
+  const root = "a".repeat(64);
+  const target = "b".repeat(64);
+
+  it("prefers the requested target over the shared root", () => {
+    // The match walk can descend: the admitting zone need not be `?root=`.
+    expect(expectedAdmissionOwner(`?root=${root}&target=${target}`, root)).toBe(
+      target,
+    );
+  });
+
+  it("falls back to an open flow's root", () => {
+    expect(expectedAdmissionOwner("", root)).toBe(root);
+    expect(expectedAdmissionOwner(`?root=${root}`, root)).toBe(root);
+  });
+
+  it("is null when the flow names no owner", () => {
+    expect(expectedAdmissionOwner("", null)).toBeNull();
+    expect(expectedAdmissionOwner("?target=bad", null)).toBeNull();
+  });
+});
+
 describe("stripJoinParams", () => {
   it("removes root and target without disturbing other parameters", () => {
     const url = new URL(
@@ -259,6 +282,16 @@ describe("stripJoinParams", () => {
     stripJoinParams(url);
     expect(url.searchParams.has("root")).toBe(false);
     expect(url.searchParams.has("target")).toBe(false);
+    expect(url.searchParams.get("view")).toBe("advanced");
+    expect(url.hash).toBe("#top");
+  });
+
+  it("also removes an admission code parameter", () => {
+    const url = new URL(
+      `https://example.test/app?view=advanced&admit=tally-admit1.abc#top`,
+    );
+    stripJoinParams(url);
+    expect(url.searchParams.has("admit")).toBe(false);
     expect(url.searchParams.get("view")).toBe("advanced");
     expect(url.hash).toBe("#top");
   });
