@@ -1708,3 +1708,121 @@ test("opens a parent's members room from a ?room= deep link", async ({
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("joins a zone from Advanced with a root id, a point, and a signed request", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await openAdvanced(page);
+
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
+
+  await page.locator("#join-open").click();
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await expect(page.locator("#join-title")).toBeFocused();
+
+  await page.locator("#join-root-input").fill(ownerId!);
+  await page.locator("#join-root-continue").click();
+
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  await page.locator("#join-lat").fill("10");
+  await page.locator("#join-lng").fill("10");
+  await page.locator("#join-point").click();
+
+  await expect(page.locator("#join-result")).toBeVisible();
+  await expect(page.locator("#join-result-title")).toBeFocused();
+  await expect(page.locator("#join-chain")).toContainText("root");
+  await expect(
+    page.locator('#join-chain .onboarding-chain-row[data-target="true"]'),
+  ).toContainText("your target");
+  await expect(page.locator("#join-target-address")).toContainText(
+    "the root zone",
+  );
+  await expect(page.locator("#join-target-slots")).toHaveText("0 / 8 slots taken");
+  await expect(page.locator("#join-target-accepting")).toContainText(
+    "Accepting requests",
+  );
+
+  await expect(page.locator("#join-assigned-slot")).toHaveText("Slot 1");
+  await expect(page.locator("#join-assigned-digit")).toContainText(
+    "zero-based digit 0",
+  );
+  await expect(page.locator("#join-assigned-address")).toHaveText("0");
+  await expect(page.locator("#join-assigned-badge")).toHaveText("Published");
+
+  await expect(page.locator("#join-public-id")).toHaveText(ownerId!);
+  await expect(page.locator("#join-public-cell")).toHaveText("cell 01");
+  await page.locator("#join-note").fill("Hello from the offline test");
+  await expect(page.locator("#join-note-count")).toContainText("/ 256 bytes");
+  await expect(page.locator("#join-public-note")).toHaveText(
+    "Hello from the offline test",
+  );
+
+  await expect(page.locator("#join-submit")).toBeEnabled();
+  await page.locator("#join-submit").click();
+  await expect(page.locator("#join-request-success")).toBeVisible();
+  await expect(page.locator("#join-request-success")).toContainText(
+    "Waiting for the owner to interview you.",
+  );
+  await expect(page.locator("#join-request-id")).not.toHaveText("");
+  await expect(page.locator("#join-submit")).toBeDisabled();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("opens discovery from a ?root= link and clears it only when closed", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+
+  await page.goto(`/?root=${ownerId}`);
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await expect(page.locator("#join-root-input")).toHaveValue(ownerId!);
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("root")).toBe(ownerId);
+
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+  await expect(page).not.toHaveURL(/[?&]root=/);
+  expect(new URL(page.url()).searchParams.has("root")).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+test("keeps a duplicate ?root= value and explains it", async ({ page }) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+
+  await page.goto(`/?root=${ownerId}&root=${ownerId}`);
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await expect(page.locator("#join-root-error")).toBeVisible();
+  await expect(page.locator("#join-root-error")).toContainText(
+    "not a root link or id",
+  );
+  await expect(page.locator("#join-root-input")).toHaveValue(
+    `${ownerId} ${ownerId}`,
+  );
+  await expect(page.locator("#join-root-continue")).toBeEnabled();
+  expect(errors).toEqual([]);
+});

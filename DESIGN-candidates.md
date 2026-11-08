@@ -372,6 +372,86 @@ bytes, `id` is 32 lowercase hex, and `seq > 0`.
   build does not match the recorded hash.
 - No contract change: P4c adds the client, the `?root=` flow and the UI.
 
+## 11. Discovery flow (P4c2)
+
+The pure layer lives in `ui/src/region/onboarding.ts`; the surface (map, chain,
+target, request form) is P4c2 UI work built on it. The module takes callbacks so
+it is testable without a node.
+
+```ts
+export interface ZoneView { ownerId: string; state: StateV3 }
+export type ZoneReader = (ownerId: string) => Promise<ZoneView | null>;
+
+export function parseRootParam(search: string): string | null;
+export function parseRootInput(text: string): string | null; // URL/?root= or bare id
+
+export async function validateRoot(
+  read: ZoneReader,
+  rootId: string,
+): Promise<{ ok: true } | { ok: false; reason: string }>;
+
+export interface ChainZone {
+  ownerId: string;
+  address: string;          // "" for the root
+  freeSlots: number[];      // slots whose entry is null, ascending
+  occupied: number;
+}
+
+export interface AssignmentPreview {
+  slot: number;             // 0..7
+  address: string;          // target.address + slot
+  published: boolean;       // dataset has this cell
+  warning: string | null;   // assignmentWarning() for the point
+}
+
+export type MatchResult =
+  | { kind: "target"; chain: ChainZone[]; wantCell: string;
+      assigned: AssignmentPreview }
+  | { kind: "saturated"; chain: ChainZone[]; reason: "full" | "broken" }
+  | { kind: "invalid-root"; reason: string };
+
+export async function findTarget(
+  read: ZoneReader,
+  dataset: RegionDataset,
+  rootId: string,
+  point: { lat: number; lng: number },
+): Promise<MatchResult>;
+```
+
+Rules:
+
+- `parseRootParam` accepts exactly `?root=<64 lowercase hex>` (empty/duplicate/
+  wrong case are null). `parseRootInput` accepts either a URL carrying `root=`
+  or a bare 64-hex id, trimming whitespace.
+- `validateRoot` rejects a bad id, an unreadable zone, and a zone with a
+  **mutual** parent (read the named parent and require a slot whose contact is
+  the zone; a pending one-sided parent does not make it a child and is
+  accepted). A true root has an empty address by construction.
+- `findTarget`: resolve the point with the dataset to the deepest published
+  cell and keep its digits. Walk from the root:
+  1. Read the zone; on a missing/broken read at depth 0 return `invalid-root`,
+     deeper stop the chain.
+  2. `freeSlots` are slots with `entry === null`. The target is the **first
+     visited zone with a free slot** (the root wins even when its next-digit
+     slot is occupied).
+  3. Assignment: the next digit if that slot is free, otherwise the first free
+     slot from `rankAssignmentChoices(zoneRegion, point)`; use
+     `resolveZoneRegion` for the target's cell/children. `wantCell` is the
+     point's published digits (possibly empty), not the assigned address.
+  4. Descend into `slot[nextDigit].entry.contact` only when the child reads and
+     its `parent.userId` points back to the current zone (mutual edge). A
+     pending, missing or mismatched child stops the chain; if the current zone
+     is full, return `saturated` with `reason: "broken"`.
+  5. Past the published depth there is no digit: descend into the lowest
+     occupied slot (0..7) so a target still exists. Full zones with no
+     descendable child return `saturated` with `reason: "full"`.
+  6. Bound the walk at 32 zones; hitting the bound is `saturated` (`"broken"`).
+- The module never reads the candidate room. The UI separately reads the
+  target's candidate state for accepting/queue counts and posts the request.
+- Slot occupancy for display: `entry === null` is free; anything else is taken
+  (a written slot is the designation even before the child signs).
+
+
 ## 9. P4a acceptance
 
 Native tests (`candidate/src/lib.rs`):

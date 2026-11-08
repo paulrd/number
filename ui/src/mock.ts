@@ -48,6 +48,7 @@ import {
   type PaymentSlotWrite,
 } from "./board";
 import { OfflineRoomTransport } from "./room-offline";
+import { OfflineCandidateTransport } from "./candidate-offline";
 import type { DelegateIdentity, DelegateStatus } from "./delegate";
 
 const encoder = new TextEncoder();
@@ -176,6 +177,7 @@ export class OfflineBoard implements BoardBackend {
   readonly identity: DelegateIdentity;
   readonly contractKeyBase58: string;
   readonly roomTransport: OfflineRoomTransport;
+  readonly candidateTransport: OfflineCandidateTransport;
   currentState: StateV3 | null = null;
   /** A seeded delegate status, for offline tests of the background lane. */
   delegateStatus?: DelegateStatus;
@@ -210,6 +212,9 @@ export class OfflineBoard implements BoardBackend {
       this.pubkeyBytes,
     ).base58;
     this.roomTransport = new OfflineRoomTransport(this.identity.pubkey);
+    this.candidateTransport = new OfflineCandidateTransport(
+      this.identity.pubkey,
+    );
     // Offline e2e uses this to prove stored bodies are ciphertext, not text.
     (
       globalThis as {

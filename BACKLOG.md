@@ -44,7 +44,41 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c candidate client
+## Where we left off (2026-11-08) — P4c discovery
+
+### P4c2 implemented (2026-11-08): discovery UI
+
+- Pure layer `ui/src/region/onboarding.ts`: `?root=` parsing, root validation
+  (mutual parent vs pending), and the match walk — point → published digits →
+  first zone with a free slot, mutual-edge descent, slot-order fallback past the
+  published depth, 32-zone bound, saturated `full`/`broken`, ranked assignment
+  preview. 14 tests.
+- Candidate transport is now on both backends: `OnlineBoard` exposes a lazy
+  `candidateTransport` (closed with the board), and `OfflineBoard` uses a new
+  in-memory `OfflineCandidateTransport` (requests, config, dismiss, membership,
+  messages, deterministic epochs).
+- `ui/src/onboarding-panel.ts`: a `?root=` link opens a discovery dialog after
+  the first-run prompts (queued like `?room=`, parameter cleared only when the
+  flow settles); Advanced gains a quiet **Join a zone** action. The flow
+  validates a pasted link/id, lazily loads the Leaflet picker (click or lat/lng),
+  draws the chain and target, shows the target's address, `occupied/8` and
+  accepting/queue state, previews the assigned slot/cell with the §11 warning,
+  and posts a signed request with the exact public payload and a byte-capped
+  note. Saturated branches and read failures have explicit states.
+- Offline e2e covers Advanced join (request sent), the `?root=` entry and
+  parameter lifecycle, duplicate `root` values, console errors and axe.
+
+Verified: `make check` (UI 433 tests, 32 files; all Rust suites),
+`npm run test:e2e:offline` (33 tests) and `make check-artifacts` all pass.
+
+**Next is P4c3 (owner queue/interview/admit), then P4d (live smoke + republish).**
+
+- P4c3: own candidate-room panel (queue with requester/cell/note/time, dismiss
+  and clear, accepting toggle), one-candidate-per-epoch invite/interview with
+  encryption, and the admit handoff (owner writes the slot, the candidate sees
+  the assigned region and signs parent).
+- P4d: live two-identity onboarding smoke (no contacts → root link → request →
+  interview → admit) and site republish.
 
 ### P4c1 implemented (2026-11-08): candidate client layer
 
@@ -217,7 +251,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **398 UI**, **30 offline e2e** (the region/room
+candidate**, **104 delegate**, **433 UI**, **33 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -586,7 +620,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 398, offline e2e 30, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 433, offline e2e 33, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -625,6 +659,18 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c2: discovery UI**
+- Pure match walk (`region/onboarding.ts`): root parsing/validation, point →
+  published digits → shallowest free-slot zone, mutual-edge descent, slot-order
+  fallback, saturation; 14 tests.
+- Candidate transport on both backends (lazy online, in-memory offline).
+- Join-a-zone dialog: `?root=` queueing, pasted link/id, lazy map + lat/lng,
+  chain/target, accepting/queue state, assigned-region preview, public request
+  payload, signed request, saturated/error states. Advanced-only entry; simple
+  view unchanged. Offline e2e + axe.
+- UI 433 tests / 32 files; offline e2e 33; `make check` and
+  `make check-artifacts` green. No deploy.
 
 **2026-11-08 — P4c1: candidate client layer**
 - `candidate-state.ts` (contract mirror: codecs, digest, merge, queue/config

@@ -55,6 +55,10 @@ import {
 } from "./state";
 import { paymentId, type PaymentEntry, type PaymentsRecord } from "./payments";
 import { OnlineRoomTransport, type RoomTransport } from "./room-client";
+import {
+  OnlineCandidateTransport,
+  type CandidateTransport,
+} from "./candidate-client";
 import { errorMessage, hexToBytes, isLowerHex } from "./util";
 
 export { entryFromInputs };
@@ -259,6 +263,8 @@ export interface BoardBackend {
   readonly contractKeyBase58: string | null;
   /** Members-room transport; it opens its own connection only when used. */
   readonly roomTransport: RoomTransport;
+  /** Candidate-room transport; it opens its own connection only when used. */
+  readonly candidateTransport: CandidateTransport;
   readonly currentState: StateV3 | null;
   /** The owner's private address book, as last read from the delegate. */
   readonly contacts: ContactRecord[];
@@ -364,9 +370,21 @@ export class OnlineBoard implements BoardBackend {
     return this.roomTransportValue;
   }
 
+  /**
+   * The candidate room uses its own WebSocket. Creating the transport is inert;
+   * the connection is opened on the first read or write from the panel.
+   */
+  get candidateTransport(): CandidateTransport {
+    if (this.candidateTransportValue === null) {
+      this.candidateTransportValue = new OnlineCandidateTransport(this.delegate);
+    }
+    return this.candidateTransportValue;
+  }
+
   private contract: NumberContract | null = null;
   private readonly delegate: DelegateClient;
   private roomTransportValue: OnlineRoomTransport | null = null;
+  private candidateTransportValue: OnlineCandidateTransport | null = null;
   private readonly delegateClients: DelegateClient[] = [];
   /** Read-only viewers for other owners' boards, keyed by code hash. */
   private readonly viewers = new Map<string, NumberContract>();
@@ -1961,6 +1979,8 @@ export class OnlineBoard implements BoardBackend {
     this.viewers.clear();
     this.roomTransportValue?.close();
     this.roomTransportValue = null;
+    this.candidateTransportValue?.close();
+    this.candidateTransportValue = null;
     this.contract?.close();
     this.contract = null;
   }

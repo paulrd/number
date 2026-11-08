@@ -28,6 +28,7 @@ import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
+import { createOnboardingPanel } from "./onboarding-panel";
 import { createRoomPanel } from "./room-panel";
 import {
   advancePayment,
@@ -361,6 +362,10 @@ let receiveLinkSettled = false;
 let pendingRoomOwner: string | null = null;
 /** True once a room link has been opened or dismissed. */
 let roomLinkSettled = false;
+/** A raw `?root=` value captured at boot, waiting for the board to be ready. */
+let pendingRootValue: string | null = null;
+/** True once a root link has been opened or dismissed. */
+let rootLinkSettled = false;
 
 /** The last auto-advance status the local component reported. */
 let autoAdvanceStatus: DelegateStatus | null = null;
@@ -3066,6 +3071,7 @@ function setStatus(next: BoardStatus, detail?: string): void {
   }
   tryOpenReceiveLink();
   tryOpenRoomLink();
+  tryOpenRootLink();
 
   if (next === "disconnected" && previous === "ready") {
     showNotice(
@@ -3871,6 +3877,48 @@ function tryOpenRoomLink(): void {
 }
 
 /**
+ * A root link opens the discovery surface. It is queued exactly like `?room=`
+ * so it never appears over a first-run dialog. The raw value is kept: an
+ * invalid or duplicate parameter stays in the field with a readable error.
+ */
+function maybeOpenRootLink(): void {
+  if (rootLinkSettled) return;
+  const values = new URLSearchParams(window.location.search).getAll("root");
+  if (values.length === 0) return;
+  pendingRootValue = values.length === 1 ? values[0]! : values.join(" ");
+  tryOpenRootLink();
+}
+
+function rootLinkReady(): boolean {
+  if (pendingRootValue === null) return false;
+  if (ownIdentity === null || ownState === null) return false;
+  if (boardStatus !== "ready" && boardStatus !== "offline") return false;
+  return (
+    document.querySelector(
+      "#delegate-install[open], #identity-setup[open], #identity-manage[open]",
+    ) === null
+  );
+}
+
+function tryOpenRootLink(): void {
+  if (rootLinkSettled || pendingRootValue === null) return;
+  if (!rootLinkReady()) return;
+
+  const value = pendingRootValue;
+  rootLinkSettled = true;
+  pendingRootValue = null;
+  joinPanel.open(value);
+}
+
+/** Drop `root` without disturbing the view/history entry, once the flow settles. */
+function stripRootParam(): void {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("root")) return;
+  url.searchParams.delete("root");
+  window.history.replaceState(window.history.state, "", url);
+}
+
+/**
  * A repeat link opens the saved row. When it carries a different address, the
  * delegate updates the contact first so a corrected link is not ignored.
  */
@@ -4071,6 +4119,7 @@ const callbacks: BoardCallbacks = {
     parentDialog?.refresh();
     tryOpenReceiveLink();
     tryOpenRoomLink();
+    tryOpenRootLink();
     // A contacts write can land while the editor is open (the address book is
     // reachable from it). Keep the options honest without losing the selection.
     if (editor.open) {
@@ -4086,6 +4135,7 @@ const callbacks: BoardCallbacks = {
     renderAll();
     tryOpenReceiveLink();
     tryOpenRoomLink();
+    tryOpenRootLink();
   },
   onContractKey: (key) => {
     contractKeyFull = key;
@@ -4122,6 +4172,14 @@ const roomPanel = createRoomPanel({
   announce,
 });
 roomOpen.addEventListener("click", () => roomPanel.open());
+
+const joinPanel = createOnboardingPanel({
+  readBoard: (ownerId) => readBoardForView(ownerId),
+  transport: backend.candidateTransport,
+  selfId: () => ownIdentity?.pubkey ?? null,
+  announce,
+  onSettled: stripRootParam,
+});
 
 const delegateControls = createDelegateControls(backend);
 
@@ -4273,6 +4331,7 @@ if (!isOffline) {
 viewMode = initialViewMode();
 maybeOpenReceiveLink();
 maybeOpenRoomLink();
+maybeOpenRootLink();
 buildSlots();
 renderAll();
 paintViewMode();
@@ -4339,6 +4398,9 @@ contactsOpen.addEventListener("click", () => {
 viewToggle.addEventListener("click", () => {
   setViewMode(viewMode === "advanced" ? "simple" : "advanced");
 });
+byId<HTMLButtonElement>("join-open").addEventListener("click", () => {
+  joinPanel.open();
+});
 byId<HTMLButtonElement>("region-open").addEventListener("click", () => {
   void openZoneRegionPicker().catch((error) => {
     console.error("Could not open the region picker", error);
@@ -4375,6 +4437,9 @@ window.addEventListener("popstate", () => {
   roomLinkSettled = false;
   pendingRoomOwner = null;
   maybeOpenRoomLink();
+  rootLinkSettled = false;
+  pendingRootValue = null;
+  maybeOpenRootLink();
   const mode: ViewMode =
     new URLSearchParams(window.location.search).get("view") === "advanced"
       ? "advanced"
@@ -4566,6 +4631,7 @@ for (const id of [
 ]) {
   document.getElementById(id)?.addEventListener("close", () => {
     tryOpenReceiveLink();
+    tryOpenRootLink();
   });
 }
 
