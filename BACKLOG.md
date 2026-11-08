@@ -104,6 +104,14 @@ direction also worked in this run, but it still travels through the candidate
 room contract and remains subject to anti-entropy; if a future run stalls there,
 add the symmetric signed request code.
 
+**P4 is complete.** Discovery, designation, rooms and the cross-node handoff all
+work end to end, including a live two-node admission. What remains in this file
+is upstream-blocked (see Open items), accepted/documented, or the deliberately
+deferred growth/re-organization work (`DESIGN-network.md` §4). The only
+conditional backlog item is the symmetric signed request code, and only if the
+request direction is ever observed to stall; otherwise the next substantial
+work is the growth design.
+
 ### P4e implemented; cross-node admission still not prompt (2026-11-08)
 
 - `OnlineBoard.watchBoard(ownerId, onChange)` opens a dedicated viewer,
