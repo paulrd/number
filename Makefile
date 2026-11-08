@@ -21,7 +21,7 @@ ROOM := room
 CANDIDATE := candidate
 CONTRACT_WASM := $(BUILD_DIR)/contract/wasm32-unknown-unknown/release/number_contract.wasm
 
-.PHONY: all build wasm contract delegate room candidate regions-wasm regions-tool regions-sign regions-publish regions-verify regions-check check room-check candidate-check check-artifacts record-artifacts room-record room-check-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
+.PHONY: all build wasm contract delegate room candidate regions-wasm regions-tool regions-sign regions-publish regions-verify regions-check check room-check candidate-check check-artifacts record-artifacts room-record room-check-artifacts candidate-record candidate-check-artifacts test ui dev node node-network node-isolated node-network-isolated publish-delegate verify-merge e2e-offline e2e-gateway clean
 
 all: build
 
@@ -106,6 +106,7 @@ check:
 check-artifacts:
 	./scripts/check-artifacts.sh
 	$(MAKE) room-check-artifacts
+	$(MAKE) candidate-check-artifacts
 
 # Record the current build as the published artifact set (refuses to orphan a
 # generation that is missing from ui/src/migrations.ts).
@@ -119,6 +120,13 @@ room-record:
 
 room-check-artifacts:
 	./scripts/check-room-artifact.sh
+
+# Candidate artifact registry, independent of published/manifest.json.
+candidate-record:
+	./scripts/record-candidate.sh
+
+candidate-check-artifacts:
+	./scripts/check-candidate-artifact.sh
 
 ui:
 	cd $(UI) && npm run build

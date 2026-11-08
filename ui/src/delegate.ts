@@ -90,7 +90,7 @@ export interface RoomMembershipSignRequest {
   roomId: string;
   /** Room owner verifying key, 64 lowercase hex characters. */
   owner: string;
-  /** Room kind tag; only `"ZMR1"` (members room) is supported. */
+  /** Room kind tag: `"ZMR1"` or `"ZCR1"` (candidate room). */
   tag: string;
   seq: number;
   /** Strictly ascending, duplicate-free member keys; includes the owner. */
@@ -115,7 +115,7 @@ export interface RoomEpochSealRequest {
   roomId: string;
   /** Room owner and local delegate key, 64 lowercase hex characters. */
   owner: string;
-  /** Room kind tag; only `"ZMR1"` (members room) is supported. */
+  /** Room kind tag: `"ZMR1"` or `"ZCR1"` (candidate room). */
   tag: string;
   epoch: number;
   /** Strictly ascending, duplicate-free member keys; includes the owner. */
@@ -156,9 +156,61 @@ export interface SignedRoomMessage {
   sig: string;
 }
 
+/** Request for the delegate's `signCandidateRequest` command (v13). */
+export interface CandidateRequestSignRequest {
+  /** Target zone owner, 64 lowercase hex characters. */
+  owner: string;
+  /** Requester-supplied milliseconds; orders display and eviction only. */
+  time: number;
+  /** 0..32 characters from `0`..`7`; the empty string is the world. */
+  wantCell: string;
+  /** Opaque note, 0..256 decoded bytes as lowercase hex. */
+  note: string;
+}
+
+/** Request for the delegate's `signCandidateDismissal` command (v13). */
+export interface CandidateDismissalSignRequest {
+  /** Zone owner and local delegate key, 64 lowercase hex characters. */
+  owner: string;
+  /** Derived request id, 32 lowercase hex characters. */
+  id: string;
+}
+
+/** Request for the delegate's `signCandidateConfig` command (v13). */
+export interface CandidateConfigSignRequest {
+  /** Zone owner and local delegate key, 64 lowercase hex characters. */
+  owner: string;
+  /** Monotone sequence, always `> 0`. */
+  seq: number;
+  accepting: boolean;
+}
+
+/** Parsed `signCandidateRequest` response. */
+export interface SignedCandidateRequest {
+  requester: string;
+  requestId: string;
+  sig: string;
+}
+
+/** Parsed `signCandidateDismissal` response. */
+export interface SignedCandidateDismissal {
+  id: string;
+  sig: string;
+}
+
+/** Parsed `signCandidateConfig` response. */
+export interface SignedCandidateConfig {
+  seq: number;
+  sig: string;
+}
+
 const ROOM_TAG = "ZMR1";
+const CANDIDATE_TAG = "ZCR1";
 const ROOM_MAX_BODY_BYTES = 1024;
 const ROOM_MAX_SECRET_BLOB_BYTES = 256;
+const CANDIDATE_MAX_WANT_CELL_CHARS = 32;
+const CANDIDATE_MAX_NOTE_BYTES = 256;
+const CANDIDATE_DIGEST_HEX_LEN = 32;
 
 function isBase58Key32(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;
@@ -198,8 +250,11 @@ function validateRoomOwner(owner: unknown): asserts owner is string {
 }
 
 function validateRoomTag(tag: unknown): asserts tag is string {
-  if (tag !== ROOM_TAG) {
-    throw new DelegateError("Protocol", `room tag must be ${ROOM_TAG}.`);
+  if (tag !== ROOM_TAG && tag !== CANDIDATE_TAG) {
+    throw new DelegateError(
+      "Protocol",
+      `room tag must be ${ROOM_TAG} or ${CANDIDATE_TAG}.`,
+    );
   }
 }
 
@@ -232,6 +287,46 @@ function validateRoomMembers(
     throw new DelegateError(
       "Protocol",
       "room membership must include the room owner.",
+    );
+  }
+}
+
+function validateCandidateOwner(owner: unknown): asserts owner is string {
+  if (typeof owner !== "string" || !isLowerHex(owner, 64)) {
+    throw new DelegateError(
+      "Protocol",
+      "candidate owner must be 64 lowercase hex characters.",
+    );
+  }
+}
+
+function validateCandidateWantCell(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length > CANDIDATE_MAX_WANT_CELL_CHARS ||
+    !/^[0-7]*$/.test(value)
+  ) {
+    throw new DelegateError(
+      "Protocol",
+      `wantCell must be 0..${CANDIDATE_MAX_WANT_CELL_CHARS} characters from 0..7.`,
+    );
+  }
+}
+
+function validateCandidateNote(note: unknown): asserts note is string {
+  if (!isLowerHexBytes(note, 0, CANDIDATE_MAX_NOTE_BYTES)) {
+    throw new DelegateError(
+      "Protocol",
+      `candidate note must be 0..${CANDIDATE_MAX_NOTE_BYTES} decoded bytes as lowercase hex.`,
+    );
+  }
+}
+
+function validateCandidateId(id: unknown): asserts id is string {
+  if (typeof id !== "string" || !isLowerHex(id, CANDIDATE_DIGEST_HEX_LEN)) {
+    throw new DelegateError(
+      "Protocol",
+      "candidate request id must be 32 lowercase hex characters.",
     );
   }
 }
@@ -484,6 +579,9 @@ interface PendingRequest {
     | "roomMessage"
     | "roomSeal"
     | "roomOpen"
+    | "candidateRequest"
+    | "candidateDismissal"
+    | "candidateConfig"
     | "contacts"
     | "status"
     | "export"
@@ -1471,6 +1569,158 @@ export class DelegateClient {
     };
   }
 
+  /**
+   * Sign one candidate-room ask (`DESIGN-candidates.md` §3, v13). The requester
+   * is always this delegate's key; `owner` may be a different zone owner. No
+   * counter is read or written.
+   */
+  async signCandidateRequest(
+    request: CandidateRequestSignRequest,
+    timeoutMs = 15_000,
+  ): Promise<SignedCandidateRequest> {
+    const { owner, time, wantCell, note } = request;
+    validateCandidateOwner(owner);
+    if (!Number.isSafeInteger(time)) {
+      throw new DelegateError(
+        "Protocol",
+        `candidate request time must be a safe integer, got ${String(time)}.`,
+      );
+    }
+    validateCandidateWantCell(wantCell);
+    validateCandidateNote(note);
+
+    const payload = await this.request(
+      "candidateRequest",
+      { cmd: "signCandidateRequest", owner, time, wantCell, note },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signCandidateRequest was rejected",
+      );
+    }
+    const requester = payload.requester;
+    if (typeof requester !== "string" || !isLowerHex(requester, 64)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate requester.",
+      );
+    }
+    const requestId = payload.requestId;
+    if (typeof requestId !== "string" || !isLowerHex(requestId, CANDIDATE_DIGEST_HEX_LEN)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate request id.",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate request signature.",
+      );
+    }
+    return { requester, requestId, sig };
+  }
+
+  /**
+   * Sign one candidate-room dismissal (v13). Owner-only; the delegate refuses
+   * unless its local key equals `owner`. Idempotent, no counter.
+   */
+  async signCandidateDismissal(
+    request: CandidateDismissalSignRequest,
+    timeoutMs = 15_000,
+  ): Promise<SignedCandidateDismissal> {
+    const { owner, id } = request;
+    validateCandidateOwner(owner);
+    validateCandidateId(id);
+
+    const payload = await this.request(
+      "candidateDismissal",
+      { cmd: "signCandidateDismissal", owner, id },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signCandidateDismissal was rejected",
+      );
+    }
+    const returnedId = payload.id;
+    if (
+      typeof returnedId !== "string" ||
+      !isLowerHex(returnedId, CANDIDATE_DIGEST_HEX_LEN) ||
+      returnedId !== id
+    ) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate dismissal id.",
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate dismissal signature.",
+      );
+    }
+    return { id: returnedId, sig };
+  }
+
+  /**
+   * Sign one candidate-room accepting config (v13). Owner-only; `seq` is
+   * caller-supplied and monotone at merge time. No counter.
+   */
+  async signCandidateConfig(
+    request: CandidateConfigSignRequest,
+    timeoutMs = 15_000,
+  ): Promise<SignedCandidateConfig> {
+    const { owner, seq, accepting } = request;
+    validateCandidateOwner(owner);
+    if (!Number.isSafeInteger(seq) || seq <= 0) {
+      throw new DelegateError(
+        "Protocol",
+        `candidate config seq must be a positive integer, got ${String(seq)}.`,
+      );
+    }
+    if (typeof accepting !== "boolean") {
+      throw new DelegateError(
+        "Protocol",
+        "candidate config accepting must be a boolean.",
+      );
+    }
+
+    const payload = await this.request(
+      "candidateConfig",
+      { cmd: "signCandidateConfig", owner, seq, accepting },
+      timeoutMs,
+    );
+    if (payload.ok !== true) {
+      throw classifyDelegateFailure(
+        typeof payload.error === "string"
+          ? payload.error
+          : "signCandidateConfig was rejected",
+      );
+    }
+    if (payload.seq !== seq) {
+      throw new DelegateError(
+        "Protocol",
+        `Delegate returned candidate config seq ${String(payload.seq)}, expected ${seq}.`,
+      );
+    }
+    const sig = payload.sig;
+    if (typeof sig !== "string" || !isLowerHex(sig, 128)) {
+      throw new DelegateError(
+        "Protocol",
+        "Delegate returned a malformed candidate config signature.",
+      );
+    }
+    return { seq, sig };
+  }
+
   /** Feed an outbound DelegateResponse into the waiting request queue. */
   handleResponse(response: DelegateResponse): void {
     const payloads = parseDelegatePayloads(response);
@@ -1512,6 +1762,19 @@ export class DelegateClient {
       } else if (typeof payload.pubkey === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "identity");
       } else if (
+        typeof payload.requester === "string" &&
+        typeof payload.requestId === "string"
+      ) {
+        // signCandidateRequest: requester + derived id, no counter.
+        index = this.pending.findIndex(
+          (pending) => pending.kind === "candidateRequest",
+        );
+      } else if (typeof payload.id === "string" && typeof payload.sig === "string") {
+        // signCandidateDismissal: echoes the 32-hex request id.
+        index = this.pending.findIndex(
+          (pending) => pending.kind === "candidateDismissal",
+        );
+      } else if (
         payload.ok === true &&
         typeof payload.author === "string" &&
         typeof payload.seq === "number" &&
@@ -1521,6 +1784,16 @@ export class DelegateClient {
         // carries `sig`, but the author/seq fields identify it.
         index = this.pending.findIndex(
           (pending) => pending.kind === "roomMessage",
+        );
+      } else if (
+        typeof payload.seq === "number" &&
+        typeof payload.sig === "string" &&
+        this.pending.some((pending) => pending.kind === "candidateConfig")
+      ) {
+        // signCandidateConfig: {seq, sig}. Prefer it over the generic signing
+        // shape only when a candidate config request is actually waiting.
+        index = this.pending.findIndex(
+          (pending) => pending.kind === "candidateConfig",
         );
       } else if (typeof payload.sig === "string") {
         index = this.pending.findIndex((pending) => pending.kind === "sign");

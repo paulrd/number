@@ -338,10 +338,39 @@ bytes, `id` is 32 lowercase hex, and `seq > 0`.
 - `candidate/` is standalone with its own `Cargo.lock`, like `room/`.
 - `make candidate` builds it through `scripts/build.sh`; `make candidate-check`
   runs fmt/clippy/tests; `make check` includes it; CI gets a `candidate` job.
-- No `published/candidate/` yet. The UI constant and the artifact gate arrive
-  when the client pins the hash (P4c), so this phase does not freeze the
-  generation.
-- The zone, delegate and members-room artifacts are untouched.
+
+### 8.1 Client layer (P4c)
+
+- `ui/src/candidate-state.ts` mirrors the contract state/delta encoders, merge,
+  digest, request ids and config helpers. It reuses the members-room membership
+  and message shapes: `room-state.ts` exports its two record parsers and
+  encoders (no behaviour change) so the candidate codec has one implementation
+  of those records.
+- `ui/src/candidate-client.ts` mirrors `OnlineRoomTransport` with tag `ZCR1`
+  and its own pinned constants (`__CANDIDATE_CODE_HASH__`,
+  `__CANDIDATE_CODE_HASH_BYTES__`, `__CANDIDATE_WASM_URL__`). It creates a
+  missing instance from the bundled raw WASM, reads, and re-reads every write
+  to confirm it landed (the contract skips invalid deltas silently).
+- New client operations: `request(owner, {wantCell, note})` (builds the
+  requester-signed record with `time = Date.now()`, writes it, confirms),
+  `setAccepting(owner, accepting)` (owner only; `seq = latest.seq + 1`) and
+  `dismiss(owner, requestId)` (owner only). Membership/message/epoch methods
+  are the members-room ones with `ZCR1`.
+- `room-crypto.ts` gains an optional `tag` on `RoomBodyContext` (default
+  `ZMR1`); the candidate client passes `ZCR1` for both body AAD and epoch-secret
+  context.
+- `ui/src/delegate.ts` gains `signCandidateRequest`, `signCandidateDismissal`
+  and `signCandidateConfig` methods; the signer interface used by the client
+  requires them.
+- The one-candidate-per-epoch rule is a client invariant: the owner adds one
+  candidate to the membership for an interview and removes them on reject or
+  admit. The UI must not invite a second candidate into the same epoch.
+- Artifacts are pinned now: `published/candidate/` (raw WASM + manifest),
+  `make candidate-record` / `make candidate-check-artifacts`,
+  `make check-artifacts` includes the candidate gate, and `scripts/build.sh`
+  copies the raw WASM to `ui/public/number_candidate.wasm` and fails if the
+  build does not match the recorded hash.
+- No contract change: P4c adds the client, the `?root=` flow and the UI.
 
 ## 9. P4a acceptance
 

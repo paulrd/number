@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical build for the contract, delegate and room WASMs.
+# Canonical build for the contract, delegate, room and candidate WASMs.
 #
 # A contract's id is BLAKE3(BLAKE3(wasm) || parameters) and a delegate's key is
 # BLAKE3(BLAKE3(wasm) || parameters), so the WASM bytes ARE the address. This
@@ -167,8 +167,10 @@ if [ "$WITH_UI" -eq 1 ]; then
     "$TARGET_ROOT/contract/wasm32-unknown-unknown/release/number_contract.wasm" \
     "$TARGET_ROOT/delegate/wasm32-unknown-unknown/release/number_delegate.wasm" \
     "$TARGET_ROOT/room/wasm32-unknown-unknown/release/number_room.wasm" \
+    "$TARGET_ROOT/candidate/wasm32-unknown-unknown/release/number_candidate.wasm" \
     "$WEBAPP_ID" "$ROOT/delegate/webapp_contract_id.bin" \
-    "$ROOT/published/room/manifest.json" <<'NODE'
+    "$ROOT/published/room/manifest.json" \
+    "$ROOT/published/candidate/manifest.json" <<'NODE'
 import { readFileSync, writeFileSync } from "node:fs";
 import { blake3 } from "@noble/hashes/blake3";
 import bs58 from "bs58";
@@ -177,9 +179,11 @@ const [
   contractWasm,
   delegateWasm,
   roomWasm,
+  candidateWasm,
   webappIdB58,
   paramsPath,
   roomManifestPath,
+  candidateManifestPath,
 ] = process.argv.slice(2);
 const bytes = (b58, what) => {
   const b = bs58.decode(b58);
@@ -193,6 +197,7 @@ const webappId = bytes(webappIdB58, "webapp contract id");
 const contractCodeHash = codeHash(contractWasm);
 const delegateCodeHash = codeHash(delegateWasm);
 const roomCodeHash = codeHash(roomWasm);
+const candidateCodeHash = codeHash(candidateWasm);
 
 // The room is pinned to the published raw-WASM hash. Never hash the fdev
 // packaged file: its container bytes are not the contract id.
@@ -203,6 +208,20 @@ if (builtRoomCodeHash !== pinnedRoomCodeHash) {
   throw new Error(
     `room code hash ${builtRoomCodeHash} does not match the published ` +
       `manifest ${pinnedRoomCodeHash}; run \`make room-record\` only after ` +
+      "reviewing the new artifact",
+  );
+}
+
+// The candidate room is pinned the same way, in its own registry.
+const candidateManifest = JSON.parse(
+  readFileSync(candidateManifestPath, "utf-8"),
+);
+const pinnedCandidateCodeHash = candidateManifest?.candidate?.codeHash;
+const builtCandidateCodeHash = bs58.encode(candidateCodeHash);
+if (builtCandidateCodeHash !== pinnedCandidateCodeHash) {
+  throw new Error(
+    `candidate code hash ${builtCandidateCodeHash} does not match the published ` +
+      `manifest ${pinnedCandidateCodeHash}; run \`make candidate-record\` only after ` +
       "reviewing the new artifact",
   );
 }
@@ -222,9 +241,12 @@ writeFileSync("delegate_key.txt", bs58.encode(delegateKey));
 writeFileSync("delegate_key_bytes.json", json(delegateKey));
 writeFileSync("room_code_hash.txt", builtRoomCodeHash);
 writeFileSync("room_code_hash_bytes.json", json(roomCodeHash));
+writeFileSync("candidate_code_hash.txt", builtCandidateCodeHash);
+writeFileSync("candidate_code_hash_bytes.json", json(candidateCodeHash));
 
 console.log(`contract code hash: ${bs58.encode(contractCodeHash)}`);
 console.log(`room code hash:     ${builtRoomCodeHash}`);
+console.log(`candidate hash:     ${builtCandidateCodeHash}`);
 console.log(`webapp contract id: ${webappIdB58}`);
 console.log(`delegate params:    ${paramsPath}`);
 console.log(`delegate key:       ${bs58.encode(delegateKey)}`);
@@ -241,6 +263,10 @@ NODE
   # absent; its BLAKE3 must equal the pinned hash above.
   cp "$TARGET_ROOT/room/wasm32-unknown-unknown/release/number_room.wasm" \
      "$ROOT/ui/public/number_room.wasm"
+  # The candidate room WASM is fetched only when the candidate instance is
+  # absent; its BLAKE3 must equal the pinned candidate hash above.
+  cp "$TARGET_ROOT/candidate/wasm32-unknown-unknown/release/number_candidate.wasm" \
+     "$ROOT/ui/public/number_candidate.wasm"
 fi
 
 echo "==> done"

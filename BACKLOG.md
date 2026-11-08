@@ -23,7 +23,7 @@ changes the compiled bytes and re-keys every zone.
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
 | Delegate | **v13** `CdhuwP79DJ72jXNRooDqFbJtd2X6tY7HioayqRA69wuv`, code `BJQwHJqtpRavCn2xULWuAtsDDUtyu8x74ppb3d7amRKn` (live on all four nodes) |
 | Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the live UI |
-| Candidate contract | **P4a** `candidate/`, not recorded or deployed; raw hash `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh` |
+| Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
 | Live site | version `1794135174`, bundle `assets/index-CNI3c8J-.js` + lazy `assets/picker-XEjP6UmC.js`, identical on `7509`/`7511`/`7512`/`7513` |
@@ -44,7 +44,47 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4 delegate v13
+## Where we left off (2026-11-08) — P4c candidate client
+
+### P4c1 implemented (2026-11-08): candidate client layer
+
+The wire/client layer is in place; no UI flow or deployment yet.
+
+- `ui/src/candidate-state.ts` mirrors `candidate/src/lib.rs`: canonical state
+  and delta codecs, request ids, digest, merge semilattice, and queue/
+  dismissal/config rules. `room-state.ts` now exports the membership/message
+  record codecs so both kinds share one implementation.
+- `ui/src/candidate-client.ts` mirrors `OnlineRoomTransport` with tag `ZCR1`:
+  params/instance derivation, bundled-WASM `ensure`, `request`, `setAccepting`
+  and `dismiss` (owner-only), plus the membership/message/epoch methods. Every
+  write is re-read and confirmed because the contract skips invalid deltas.
+- `room-crypto.ts` accepts an optional `tag` on the body AAD context (default
+  `ZMR1`); the candidate client passes `ZCR1`, matching delegate v13's
+  tag-bound sealing.
+- `delegate.ts` has typed `signCandidateRequest` / `signCandidateDismissal` /
+  `signCandidateConfig` methods.
+- Artifact gate: `published/candidate/` (603,909 bytes, code `4P2HZkm…`),
+  `make candidate-record` / `candidate-check-artifacts`, included in
+  `make check-artifacts`; `scripts/build.sh` pins and copies
+  `ui/public/number_candidate.wasm`, and the UI gets the `__CANDIDATE_*`
+  constants.
+- One candidate per epoch remains a client invariant for the P4c2 UI.
+
+Verified: `make check` exit 0 (UI 398 tests, all Rust suites) and
+`make check-artifacts` OK for contract, delegate, room and candidate.
+
+**Next is P4c2 (the discovery UI), then P4c3 (owner queue/interview/admit),
+then P4d (live smoke).**
+
+- P4c2: parse `?root=`; validate the root by reading it (exists, no mutual
+  parent, empty address); ask for a root when absent; map click → published
+  cell path → shallowest zone with a free slot (slot order beyond the published
+  depth); target panel; request form with the exact public payload; saturated
+  branch message.
+- P4c3: own candidate-room panel (queue, dismiss/clear, accepting toggle),
+  invite/interview flow (one candidate per epoch), and the admit handoff
+  (owner writes the slot, candidate sees the region and signs parent).
+- P4d: live two-identity onboarding smoke and site republish.
 
 ### P4b implemented and deployed (2026-11-08): delegate v13
 
@@ -177,7 +217,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **366 UI**, **30 offline e2e** (the region/room
+candidate**, **104 delegate**, **398 UI**, **30 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -546,7 +586,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 366, offline e2e 30, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 398, offline e2e 30, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -585,6 +625,18 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c1: candidate client layer**
+- `candidate-state.ts` (contract mirror: codecs, digest, merge, queue/config
+  rules) and `candidate-client.ts` (`ZCR1` transport: ensure/request/
+  setAccepting/dismiss plus membership/message/epoch methods), with re-read
+  confirmation on every write.
+- Tag-aware body AAD (`room-crypto` optional tag); delegate v13 command
+  methods wired into `delegate.ts`.
+- Candidate artifact recorded and gated: `published/candidate/`, `make
+  candidate-record`, `candidate-check-artifacts`, build-time pin and bundled
+  WASM. UI 398 tests, 28 files; `make check-artifacts` OK on all four kinds.
+- No UI flow or deployment; that is P4c2/P4c3.
 
 **2026-11-08 — P4b: delegate v13, deployed**
 - Both room tags accepted; `sealRoomEpoch`/`openRoomSecret` bind the caller's

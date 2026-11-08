@@ -1,0 +1,17 @@
+{
+  "note": "Committed reproducible candidate artifact. `make candidate-check-artifacts` rebuilds and compares bytes; `make candidate-record` is the only supported way to change this file. This registry is independent of published/manifest.json.",
+  "toolchain": "1.98.0",
+  "remap": {
+    "cargoHome": "/cargo",
+    "rustupHome": "/rustup",
+    "repoRoot": "/build"
+  },
+  "candidate": {
+    "codeHash": "4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh",
+    "codeHashHex": "32374ace456c653ad49031bfba4fd5aa58de735c59d58904be5a66c03242ebac",
+    "file": "published/candidate/number_candidate.wasm",
+    "generations": [
+      "4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh"
+    ]
+  }
+}

@@ -9,4 +9,7 @@ declare const __DELEGATE_WASM_URL__: string;
 declare const __ROOM_CODE_HASH__: string;
 declare const __ROOM_CODE_HASH_BYTES__: number[];
 declare const __ROOM_WASM_URL__: string;
+declare const __CANDIDATE_CODE_HASH__: string;
+declare const __CANDIDATE_CODE_HASH_BYTES__: number[];
+declare const __CANDIDATE_WASM_URL__: string;
 declare const __OFFLINE_MODE__: boolean;

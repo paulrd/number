@@ -64,6 +64,11 @@ export interface RoomBodyContext {
   author: string;
   /** Membership epoch / seq, a positive safe integer. */
   epoch: number;
+  /**
+   * Room-kind tag bound into the AAD. Defaults to the members-room tag
+   * (`ZMR1`); the candidate client passes `ZCR1`.
+   */
+  tag?: string;
 }
 
 const encoder = new TextEncoder();
@@ -149,11 +154,11 @@ function roomIdBytes(roomId: string): Uint8Array {
   return bytes;
 }
 
-/** `"number:v1:room:body" || "ZMR1" || roomId || owner || author || epoch_le`. */
+/** `"number:v1:room:body" || tag || roomId || owner || author || epoch_le`. */
 export function roomBodyAad(context: RoomBodyContext): Uint8Array {
   return concat([
     encoder.encode(ROOM_BODY_DOMAIN),
-    encoder.encode(ROOM_CRYPTO_TAG),
+    encoder.encode(context.tag ?? ROOM_CRYPTO_TAG),
     roomIdBytes(context.roomId),
     ownerBytes(context.owner, "owner"),
     ownerBytes(context.author, "author"),

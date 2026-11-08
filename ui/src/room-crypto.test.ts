@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ROOM_BODY_OVERHEAD,
+  ROOM_CRYPTO_TAG,
   ROOM_ENCRYPTED_BODY_BYTE_LIMIT,
   RoomCryptoError,
   RoomEpochKeyCache,
@@ -10,6 +11,7 @@ import {
   epochKeyToHex,
   isEncryptedRoomBody,
   readRoomBody,
+  roomBodyAad,
   type RoomBodyContext,
 } from "./room-crypto";
 import { textToRoomBody } from "./room-state";
@@ -29,6 +31,25 @@ const CONTEXT: RoomBodyContext = {
 };
 
 describe("room body envelope", () => {
+  it("defaults the AAD tag to ZMR1 and accepts a caller tag", async () => {
+    expect(bytesToHex(roomBodyAad(CONTEXT))).toContain(
+      bytesToHex(new TextEncoder().encode(ROOM_CRYPTO_TAG)),
+    );
+
+    const candidate = { ...CONTEXT, tag: "ZCR1" };
+    expect(bytesToHex(roomBodyAad(candidate))).not.toBe(
+      bytesToHex(roomBodyAad(CONTEXT)),
+    );
+
+    const envelope = await encryptRoomBody(KEY, candidate, "candidate text");
+    await expect(
+      decryptRoomBody(KEY, candidate, bytesToHex(envelope)),
+    ).resolves.toBe("candidate text");
+    await expect(
+      decryptRoomBody(KEY, CONTEXT, bytesToHex(envelope)),
+    ).rejects.toBeInstanceOf(RoomCryptoError);
+  });
+
   it("round-trips text with the exact version || nonce || ciphertext || tag shape", async () => {
     const text = "hello encrypted room";
     const envelope = await encryptRoomBody(KEY, CONTEXT, text);

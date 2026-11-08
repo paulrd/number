@@ -133,6 +133,13 @@ const roomCodeHashBytes = readJsonArrayOrDefault(
   "room_code_hash_bytes.json",
   process.env.ROOM_CODE_HASH_BYTES,
 );
+const candidateCodeHash =
+  process.env.CANDIDATE_CODE_HASH?.trim() ||
+  readFileOrDefault("candidate_code_hash.txt", "");
+const candidateCodeHashBytes = readJsonArrayOrDefault(
+  "candidate_code_hash_bytes.json",
+  process.env.CANDIDATE_CODE_HASH_BYTES,
+);
 
 export default defineConfig(async ({ command, isPreview }) => {
   const proxy = await devProxy(command, isPreview === true);
@@ -148,6 +155,11 @@ export default defineConfig(async ({ command, isPreview }) => {
       __ROOM_CODE_HASH_BYTES__: roomCodeHashBytes,
       __ROOM_WASM_URL__: JSON.stringify(
         process.env.ROOM_WASM_URL?.trim() || "./number_room.wasm",
+      ),
+      __CANDIDATE_CODE_HASH__: JSON.stringify(candidateCodeHash),
+      __CANDIDATE_CODE_HASH_BYTES__: candidateCodeHashBytes,
+      __CANDIDATE_WASM_URL__: JSON.stringify(
+        process.env.CANDIDATE_WASM_URL?.trim() || "./number_candidate.wasm",
       ),
       __CONTRACT_WASM_URL__: JSON.stringify(
         process.env.CONTRACT_WASM_URL?.trim() || "./number_contract.wasm",

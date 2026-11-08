@@ -127,7 +127,11 @@ function parseSecret(raw: unknown, path: string): RoomSecretV1 {
   return { recipient: raw.recipient, blob: raw.blob };
 }
 
-function parseMembership(raw: unknown, path: string): RoomMembershipV1 {
+/** Decode and shape-check one membership record. */
+export function parseRoomMembership(
+  raw: unknown,
+  path: string,
+): RoomMembershipV1 {
   if (!isRecord(raw)) fail(path, "membership must be an object");
   if (!isPositiveSafeInteger(raw.seq)) {
     fail(`${path}.seq`, "expected a positive safe integer");
@@ -173,7 +177,11 @@ function parseMembership(raw: unknown, path: string): RoomMembershipV1 {
   return { seq: raw.seq, members, secrets, sig: raw.sig };
 }
 
-function parseMessage(raw: unknown, path: string): RoomMessageV1 {
+/** Decode and shape-check one message record. */
+export function parseRoomMessage(
+  raw: unknown,
+  path: string,
+): RoomMessageV1 {
   if (!isRecord(raw)) fail(path, "message must be an object");
   if (!isRoomKey(raw.author)) {
     fail(`${path}.author`, "expected 64 lowercase hex characters");
@@ -215,10 +223,10 @@ function parseStateValue(raw: unknown, path: string): RoomStateV1 {
   if (!Array.isArray(raw.messages)) fail(`${path}.messages`, "expected an array");
 
   const memberships = raw.memberships.map((record, index) =>
-    parseMembership(record, `${path}.memberships[${index}]`),
+    parseRoomMembership(record, `${path}.memberships[${index}]`),
   );
   const messages = raw.messages.map((message, index) =>
-    parseMessage(message, `${path}.messages[${index}]`),
+    parseRoomMessage(message, `${path}.messages[${index}]`),
   );
   if (messages.length > 0 && memberships.length === 0) {
     fail(path, "messages require at least one membership record");
@@ -255,26 +263,38 @@ export function encodeRoomState(state: RoomStateV1): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(encodeStateValue(state)));
 }
 
+/** Encode a membership record in the contract's field order. */
+export function encodeRoomMembership(
+  record: RoomMembershipV1,
+): object {
+  return {
+    seq: record.seq,
+    members: [...record.members],
+    secrets: record.secrets.map((secret) => ({
+      recipient: secret.recipient,
+      blob: secret.blob,
+    })),
+    sig: record.sig,
+  };
+}
+
+/** Encode a message record in the contract's field order. */
+export function encodeRoomMessage(message: RoomMessageV1): object {
+  return {
+    author: message.author,
+    epoch: message.epoch,
+    seq: message.seq,
+    time: message.time,
+    body: message.body,
+    sig: message.sig,
+  };
+}
+
 function encodeStateValue(state: RoomStateV1): object {
   return {
     v: 1 as const,
-    memberships: state.memberships.map((record) => ({
-      seq: record.seq,
-      members: [...record.members],
-      secrets: record.secrets.map((secret) => ({
-        recipient: secret.recipient,
-        blob: secret.blob,
-      })),
-      sig: record.sig,
-    })),
-    messages: state.messages.map((message) => ({
-      author: message.author,
-      epoch: message.epoch,
-      seq: message.seq,
-      time: message.time,
-      body: message.body,
-      sig: message.sig,
-    })),
+    memberships: state.memberships.map(encodeRoomMembership),
+    messages: state.messages.map(encodeRoomMessage),
   };
 }
 
@@ -296,7 +316,7 @@ export function parseRoomDelta(bytes: Uint8Array): RoomDeltaV1 {
             fail("room delta.memberships", "expected an array");
           }
           return raw.memberships.map((record, index) =>
-            parseMembership(record, `room delta.memberships[${index}]`),
+            parseRoomMembership(record, `room delta.memberships[${index}]`),
           );
         })();
   const messages =
@@ -307,7 +327,7 @@ export function parseRoomDelta(bytes: Uint8Array): RoomDeltaV1 {
             fail("room delta.messages", "expected an array");
           }
           return raw.messages.map((message, index) =>
-            parseMessage(message, `room delta.messages[${index}]`),
+            parseRoomMessage(message, `room delta.messages[${index}]`),
           );
         })();
 
@@ -331,25 +351,10 @@ export function encodeRoomDelta(delta: RoomDeltaV1): Uint8Array {
     value.full = encodeStateValue(delta.full);
   }
   if (delta.memberships !== undefined && delta.memberships.length > 0) {
-    value.memberships = delta.memberships.map((record) => ({
-      seq: record.seq,
-      members: [...record.members],
-      secrets: record.secrets.map((secret) => ({
-        recipient: secret.recipient,
-        blob: secret.blob,
-      })),
-      sig: record.sig,
-    }));
+    value.memberships = delta.memberships.map(encodeRoomMembership);
   }
   if (delta.messages !== undefined && delta.messages.length > 0) {
-    value.messages = delta.messages.map((message) => ({
-      author: message.author,
-      epoch: message.epoch,
-      seq: message.seq,
-      time: message.time,
-      body: message.body,
-      sig: message.sig,
-    }));
+    value.messages = delta.messages.map(encodeRoomMessage);
   }
   return new TextEncoder().encode(JSON.stringify(value));
 }
