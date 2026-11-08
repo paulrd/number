@@ -2258,6 +2258,24 @@
               </form>
 
               <div
+                id="interview-admission"
+                class="interview-admission"
+                hidden
+              >
+                <p
+                  id="interview-admission-result"
+                  class="interview-admission-result"
+                  tabindex="-1"
+                  role="status"
+                ></p>
+                <p
+                  id="interview-admission-region"
+                  class="interview-admission-region"
+                  hidden
+                ></p>
+              </div>
+
+              <div
                 id="interview-end-confirm"
                 class="requests-confirm"
                 role="alert"
@@ -2282,7 +2300,47 @@
                 </div>
               </div>
 
+              <div
+                id="interview-finish-confirm"
+                class="requests-confirm"
+                role="alert"
+                hidden
+              >
+                <p id="interview-finish-confirm-text"></p>
+                <div class="requests-confirm-actions">
+                  <button
+                    id="interview-finish-cancel"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="interview-finish-confirm-button"
+                    class="button button--small button--primary"
+                    type="button"
+                  >
+                    Finish admission
+                  </button>
+                </div>
+              </div>
+
               <div class="interview-actions">
+                <button
+                  id="interview-admit"
+                  class="button button--small button--primary"
+                  type="button"
+                >
+                  Admit
+                </button>
+                <button
+                  id="interview-finish"
+                  class="button button--small button--primary"
+                  type="button"
+                  hidden
+                >
+                  Finish admission
+                </button>
                 <button
                   id="interview-end"
                   class="button button--small button--quiet"

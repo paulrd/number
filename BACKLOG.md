@@ -44,7 +44,34 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c interviews
+## Where we left off (2026-11-08) — P4c admission handoff
+
+### P4c3b2a implemented (2026-11-08): owner admission handoff
+
+- The interview gains **Admit**: it hands off to the existing region
+  designation (`openAssignRegion` → slot editor) with the requester prefilled
+  as the contact; the owner still chooses the free cell. Without an address it
+  falls back to the first free slot's editor. Deployed builds still reject a
+  zone naming itself; only the offline harness (which can self-request) allows
+  a prefilled self contact.
+- After the slot is written, Refresh/re-render detects
+  `admissionSlot(zoneState, candidate)`, shows "Slot N written" and the
+  assigned address (`ownAddress + slot`), and offers **Finish admission**:
+  `updateMembership` with `interviewMembersAfterAdmit` (owner + children minus
+  the admitted candidate) rotates the room and drops the candidate. Ending an
+  interview after writing a slot leaves the one-sided slot and says so.
+- Helper `interviewMembersAfterAdmit` (33 helper tests). UI 519 tests / 34
+  files; offline e2e 36 (full request → interview → admit → slot editor →
+  finish, axe and console clean).
+
+**Next is P4c3b2b (candidate pending/interview/admission), then P4d.**
+
+- P4c3b2b: after a request, **Check again** re-reads the target candidate room
+  and zone: queued / invited (open the epoch key and chat) / admitted (show the
+  assigned slot, address and region, enforce `admissionBlockReason`, sign
+  `parent`) / none. The join link (`?root=`) remains the way back; no push.
+- P4d: live two-identity onboarding smoke (no contacts → root link → request →
+  interview → admit) and site republish.
 
 ### P4c3b1 implemented (2026-11-08): owner interview
 
@@ -303,7 +330,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **502 UI**, **35 offline e2e** (the region/room
+candidate**, **104 delegate**, **519 UI**, **36 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -510,6 +537,10 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 - **A room is opened with `?room=<owner-id>`**; owner-only membership controls
   and slot-derived mismatch checks apply only when the target is your own zone.
 
+- **Offline admission self-contact.** The offline harness has one identity, so
+  the candidate and owner are the same key. `childProblem` permits a self
+  contact only when `__OFFLINE_MODE__` is true and the contact came from the
+  admission prefill; deployed builds still reject a zone naming itself.
 - **A delegate re-key still needs an app-origin install.** `fdev publish`
   registers the code but arms nothing. On the publishing node the UI may skip
   the install dialog because the new key is already registered; then the
@@ -672,7 +703,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 502, offline e2e 35, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 519, offline e2e 36, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -711,6 +742,15 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c3b2a: owner admission handoff**
+- Interview **Admit** opens the existing assign picker with the requester
+  prefilled; the slot editor writes the designation. The panel detects the
+  written slot, shows the address, and **Finish admission** rotates the
+  candidate room with `interviewMembersAfterAdmit` (drops the candidate).
+- Offline self-contact seam only when offline and prefilled; deployed builds
+  still reject a zone naming itself.
+- UI 519 tests / 34 files, offline e2e 36.
 
 **2026-11-08 — P4c3b1: owner interview**
 - Pure interview helpers (children, members, active candidate, block reasons,

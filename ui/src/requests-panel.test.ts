@@ -10,6 +10,10 @@ import {
 import { emptyState, type StateV3 } from "./state";
 import {
   REQUEST_NOTE_DISPLAY_LIMIT,
+  ADMISSION_NO_FREE_SLOT,
+  admissionAnnouncement,
+  admissionFinishMembers,
+  admissionView,
   clearSummary,
   dismissSequentially,
   formatRequestCell,
@@ -459,5 +463,131 @@ describe("interview errors", () => {
     expect(requestsErrorText({ code: "connection" }, "zone")).toContain(
       "offline",
     );
+  });
+
+  it("names the admission writes", () => {
+    expect(requestsErrorText({ code: "connection" }, "admit")).toContain(
+      "slot editor could not be opened",
+    );
+    expect(requestsErrorText({ code: "connection" }, "finish")).toContain(
+      "Admission was not finished",
+    );
+    expect(requestsErrorText(new Error("full"), "finish")).toContain("full");
+  });
+
+  it("explains a full zone without a free slot", () => {
+    expect(ADMISSION_NO_FREE_SLOT).toContain("no free slot");
+    expect(ADMISSION_NO_FREE_SLOT).toContain("Clear a slot");
+  });
+});
+
+const ASSIGNED = "ee".repeat(32);
+
+function zoneWithCandidate(contact = CANDIDATE): StateV3 {
+  const zone = zoneWithChild(CHILD);
+  zone.slots[1] = {
+    seq: 1,
+    entry: { value: 0n, contact, unit: null, note: null },
+    sig: "3".repeat(128),
+  };
+  return zone;
+}
+
+describe("admissionView", () => {
+  it("is null until a slot names the candidate", () => {
+    expect(admissionView(zoneWithChild(), CANDIDATE, "")).toBeNull();
+    expect(admissionView(zoneWithCandidate(), null, "")).toBeNull();
+    expect(admissionView(null, CANDIDATE, "")).toBeNull();
+  });
+
+  it("labels the slot one-based and the digit zero-based", () => {
+    expect(admissionView(zoneWithCandidate(), CANDIDATE, "")).toEqual({
+      slot: 1,
+      label: "Slot 2 written",
+      digit: "1",
+      address: "1",
+      region: "Region 1",
+    });
+  });
+
+  it("appends the root or nested owner address", () => {
+    expect(admissionView(zoneWithCandidate(), CANDIDATE, "02")).toMatchObject({
+      address: "021",
+      region: "Region 021",
+    });
+    expect(admissionView(zoneWithCandidate(), CANDIDATE, "")).toMatchObject({
+      address: "1",
+      region: "Region 1",
+    });
+  });
+
+  it("keeps the label when the owner address is unknown", () => {
+    expect(admissionView(zoneWithCandidate(), CANDIDATE, null)).toEqual({
+      slot: 1,
+      label: "Slot 2 written",
+      digit: "1",
+      address: null,
+      region: null,
+    });
+  });
+
+  it("does not confuse another admission with the candidate", () => {
+    expect(admissionView(zoneWithCandidate(ASSIGNED), CANDIDATE, "")).toBeNull();
+  });
+});
+
+describe("admission transitions", () => {
+  it("keeps the invited candidate visible once the slot makes them a child", () => {
+    const room = roomState([membership(2, [OWNER, CHILD, CANDIDATE])]);
+    const before = interviewCandidateView(
+      room,
+      zoneWithChild(),
+      OWNER,
+      CANDIDATE,
+    );
+    expect(before.candidate).toBe(CANDIDATE);
+    expect(admissionView(zoneWithChild(), before.candidate, "0")).toBeNull();
+
+    const after = interviewCandidateView(
+      room,
+      zoneWithCandidate(),
+      OWNER,
+      CANDIDATE,
+    );
+    expect(after).toEqual({ candidate: CANDIDATE, warning: null });
+    expect(admissionView(zoneWithCandidate(), after.candidate, "0")).toMatchObject({
+      slot: 1,
+      address: "01",
+    });
+  });
+
+  it("clears the designation when the slot is cleared", () => {
+    expect(admissionView(zoneWithCandidate(), CANDIDATE, "0")).not.toBeNull();
+    expect(admissionView(zoneWithChild(), CANDIDATE, "0")).toBeNull();
+  });
+
+  it("announces the slot and the address together", () => {
+    expect(
+      admissionAnnouncement(admissionView(zoneWithCandidate(), CANDIDATE, "02")!),
+    ).toBe("Slot 2 written. Region 021.");
+    expect(
+      admissionAnnouncement(admissionView(zoneWithCandidate(), CANDIDATE, null)!),
+    ).toBe("Slot 2 written.");
+  });
+});
+
+describe("admissionFinishMembers", () => {
+  it("drops the admitted candidate and keeps the other children", () => {
+    expect(
+      admissionFinishMembers(OWNER, zoneWithCandidate(), CANDIDATE),
+    ).toEqual([OWNER, CHILD]);
+  });
+
+  it("keeps the owner even in the defensive self-admit case", () => {
+    expect(admissionFinishMembers(OWNER, zoneWithCandidate(), OWNER)).toEqual([
+      OWNER,
+      CHILD,
+      CANDIDATE,
+    ]);
   });
 });

@@ -554,6 +554,15 @@ export function interviewBlockReason(
   ownerId: string,
   candidate: string,
 ): string | null;
+export function interviewRemainingMembers(
+  ownerId: string,
+  zoneState: StateV3,
+): string[];
+export function interviewMembersAfterAdmit(
+  ownerId: string,
+  zoneState: StateV3,
+  admitted: string,
+): string[];
 export function admissionSlot(zoneState: StateV3, candidateId: string): number | null;
 export function admissionAddress(ownAddress: string, slot: number): string;
 export function admissionBlockReason(ownState: StateV3): string | null;
@@ -571,6 +580,9 @@ Rules:
   candidate, is full (eight children), or the requester is already a child.
 - `admissionSlot` returns the first slot whose `entry.contact` is the
   candidate; null when the owner has not written it.
+- `interviewMembersAfterAdmit` is `[owner, ...children]` with the newly admitted
+  candidate removed: the zone slot already names them, but the candidates room
+  drops them and rotates once the designation is written.
 - `admissionBlockReason` returns the §3.5 sentence when the candidate's own
   zone already has a parent or any occupied child; null when it may join.
 - No DOM, transport or crypto in this module.

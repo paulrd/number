@@ -8,7 +8,9 @@
  * encrypted candidate room. Every write passes the owner's own id to the
  * transport; there is no way to point this panel at another zone's queue.
  *
- * Admission (writing a zone slot) is P4c3b2 and does not live here.
+ * Admission's zone write is P4c3b2 and does not live here. This panel hands off
+ * to the region designation, then detects the written slot and finishes
+ * admission by rotating the candidate room without the candidate.
  */
 
 import type { CandidateTransport } from "./candidate-client";
@@ -23,8 +25,11 @@ import {
   type CandidateStateV1,
 } from "./candidate-state";
 import {
+  admissionAddress,
+  admissionSlot,
   interviewBlockReason,
   interviewMembers,
+  interviewMembersAfterAdmit,
   interviewState,
   zoneChildren,
 } from "./candidate-interview";
@@ -58,6 +63,10 @@ export interface RequestsPanelDeps {
   ownId(): string | null;
   /** Read the owner's own zone state; null when it is not available. */
   readOwnZone(): Promise<StateV3 | null>;
+  /** The owner's own octal address, or null when it is not settled. */
+  ownAddress(): Promise<string | null>;
+  /** Open the region designation with this candidate prefilled. */
+  openAdmit(candidateId: string): Promise<void>;
   announce(message: string): void;
 }
 
@@ -227,7 +236,9 @@ export type RequestsAction =
   | "dismiss"
   | "interview"
   | "message"
-  | "end";
+  | "end"
+  | "admit"
+  | "finish";
 
 /** Readable sentences for queue actions; contract detail stays out of them. */
 export function requestsErrorText(
@@ -260,7 +271,11 @@ export function requestsErrorText(
           ? "The message was not sent."
           : action === "end"
             ? "The interview was not ended."
-            : "The request was not dismissed.";
+            : action === "admit"
+              ? "The slot editor could not be opened."
+              : action === "finish"
+                ? "Admission was not finished."
+                : "The request was not dismissed.";
   switch (code) {
     case "connection":
       return `${prefix} Check your connection and try again.`;
@@ -385,9 +400,12 @@ export function interviewCandidateView(
 
   if (
     invited !== null &&
-    ownerId === invited &&
+    outsiders.length === 0 &&
     latest.members.includes(invited)
   ) {
+    // Covers a deduped self invite and the admission handoff: once the zone
+    // slot names the candidate, they stop counting as an outsider but the
+    // interview round is still active until admission finishes.
     return { candidate: invited, warning: null };
   }
   if (invited !== null && outsiders.includes(invited)) {
@@ -429,6 +447,64 @@ export function interviewRemainingMembers(
 ): string[] {
   return [...new Set([ownerId, ...zoneChildren(ownerId, zoneState)])].sort();
 }
+
+/**
+ * Membership to sign when admission finishes: the zone's members with the
+ * newly admitted candidate dropped from the candidate room.
+ */
+export function admissionFinishMembers(
+  ownerId: string,
+  zoneState: StateV3,
+  admitted: string,
+): string[] {
+  return interviewMembersAfterAdmit(ownerId, zoneState, admitted);
+}
+
+/** A written designation, ready to show in the interview section. */
+export interface AdmissionView {
+  /** Zero-based slot index. */
+  slot: number;
+  /** "Slot 3 written" with a one-based slot label. */
+  label: string;
+  /** The zero-based slot digit. */
+  digit: string;
+  /** `ownAddress + digit`, or null while the owner address is unknown. */
+  address: string | null;
+  /** "Region 25", or null while the owner address is unknown. */
+  region: string | null;
+}
+
+/**
+ * Derive the admission result from the zone the owner just wrote. Null until a
+ * slot names the candidate, which is how the panel notices the handoff landed.
+ */
+export function admissionView(
+  zoneState: StateV3 | null,
+  candidate: string | null,
+  ownAddress: string | null,
+): AdmissionView | null {
+  if (zoneState === null || candidate === null) return null;
+  const slot = admissionSlot(zoneState, candidate);
+  if (slot === null) return null;
+  const address =
+    ownAddress === null ? null : admissionAddress(ownAddress, slot);
+  return {
+    slot,
+    label: `Slot ${slot + 1} written`,
+    digit: String(slot),
+    address,
+    region: address === null ? null : `Region ${address}`,
+  };
+}
+
+/** The screen-reader sentence for a newly detected designation. */
+export function admissionAnnouncement(view: AdmissionView): string {
+  return view.region === null ? `${view.label}.` : `${view.label}. ${view.region}.`;
+}
+
+/** A read sentence when admission cannot start because the zone is full. */
+export const ADMISSION_NO_FREE_SLOT =
+  "Your zone has no free slot. Clear a slot in the editor before admitting.";
 
 /**
  * How a stored body renders. Legacy bodies decode as plaintext; a `0x01`
@@ -513,6 +589,28 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     "interview-end-confirm-button",
   );
 
+  const interviewAdmit = byId<HTMLButtonElement>("interview-admit");
+  const interviewAdmission = byId<HTMLElement>("interview-admission");
+  const interviewAdmissionResult = byId<HTMLParagraphElement>(
+    "interview-admission-result",
+  );
+  const interviewAdmissionRegion = byId<HTMLParagraphElement>(
+    "interview-admission-region",
+  );
+  const interviewFinish = byId<HTMLButtonElement>("interview-finish");
+  const interviewFinishConfirm = byId<HTMLDivElement>(
+    "interview-finish-confirm",
+  );
+  const interviewFinishConfirmText = byId<HTMLParagraphElement>(
+    "interview-finish-confirm-text",
+  );
+  const interviewFinishCancel = byId<HTMLButtonElement>(
+    "interview-finish-cancel",
+  );
+  const interviewFinishConfirmButton = byId<HTMLButtonElement>(
+    "interview-finish-confirm-button",
+  );
+
   let current: CandidateStateV1 | null = null;
   /** A successful read happened; `current === null` is then a missing room. */
   let loaded = false;
@@ -539,14 +637,17 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   let zoneState: StateV3 | null = null;
   let zoneLoaded = false;
   let zoneError: string | null = null;
+  /** The owner's octal address, used only to spell the admitted address. */
+  let ownAddressValue: string | null = null;
 
   /** Set after an invite so a deduped candidate (the offline self flow) shows. */
   let invitedCandidate: string | null = null;
-  /** A membership write (invite or end) is in flight. */
+  /** A membership write (invite, end or finish) is in flight. */
   let interviewWriting = false;
   let interviewStartingId: string | null = null;
   let interviewActionError: string | null = null;
   let interviewEndingConfirm = false;
+  let finishingConfirm = false;
   let sendingInterviewMessage = false;
   let interviewComposerErrorText: string | null = null;
   /** Decrypted/plaintext bodies keyed by message id; epoch keys stay in crypto. */
@@ -558,6 +659,11 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   let interviewFocusWanted = false;
   /** The last active interview announced by a read, to avoid repeating it. */
   let announcedInterview: string | null = null;
+  /** The last designation announced by a read, to avoid repeating it. */
+  let announcedAdmission: string | null = null;
+  /** The designation key that already took focus. */
+  let admissionFocusKey: string | null = null;
+  let admissionFocusPending = false;
 
   let lastFocus: HTMLElement | null = null;
   let liveStatus = "";
@@ -594,6 +700,15 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
 
   function candidateId(): string | null {
     return candidateView().candidate;
+  }
+
+  /** The designation written for the active candidate, if any. */
+  function currentAdmission(): AdmissionView | null {
+    return admissionView(zoneState, candidateId(), ownAddressValue);
+  }
+
+  function hasFreeSlot(): boolean {
+    return zoneState?.slots.some((slot) => slot.entry === null) ?? false;
   }
 
   function interviewVisible(): boolean {
@@ -901,6 +1016,13 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     if (!visible) {
       interviewEndConfirm.hidden = true;
       interviewEndingConfirm = false;
+      interviewFinishConfirm.hidden = true;
+      finishingConfirm = false;
+      interviewAdmission.hidden = true;
+      interviewAdmit.hidden = true;
+      interviewFinish.hidden = true;
+      admissionFocusKey = null;
+      admissionFocusPending = false;
       interviewMessages.replaceChildren();
       interviewEmpty.hidden = true;
       interviewWarning.hidden = true;
@@ -919,10 +1041,31 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
       id === null ? "Candidate unknown" : `Candidate ${id}`,
     );
     interviewStateLabel.textContent =
-      id === null ? "Needs attention" : "Interviewing";
+      id === null
+        ? "Needs attention"
+        : currentAdmission() !== null
+          ? "Slot written"
+          : "Interviewing";
     interviewStateLabel.dataset.state = id === null ? "warning" : "active";
     interviewWarning.hidden = view.warning === null;
     interviewWarning.textContent = view.warning ?? "";
+
+    const admission = id === null ? null : currentAdmission();
+    interviewAdmission.hidden = admission === null;
+    interviewAdmissionResult.textContent = admission?.label ?? "";
+    interviewAdmissionRegion.hidden = admission?.region === null ||
+      admission?.region === undefined;
+    interviewAdmissionRegion.textContent = admission?.region ?? "";
+
+    if (admission === null) {
+      admissionFocusKey = null;
+    } else {
+      const key = `${id}:${admission.slot}`;
+      if (key !== admissionFocusKey) {
+        admissionFocusKey = key;
+        if (dialog.open) admissionFocusPending = true;
+      }
+    }
 
     const latest = latestInterview();
     const allMessages = current?.messages ?? [];
@@ -1049,20 +1192,47 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     interviewComposerError.textContent = interviewComposerErrorText ?? "";
 
     const canEnd = id !== null && latest !== null && !busy && !loading;
-    interviewEnd.hidden = interviewEndingConfirm;
+    interviewEnd.hidden = interviewEndingConfirm || finishingConfirm;
     interviewEnd.disabled = !canEnd;
     interviewEndConfirm.hidden = !interviewEndingConfirm;
     interviewEndConfirmText.textContent =
       id === null
         ? ""
-        : `End the interview with ${shorten(id)}? This removes them from the candidate room. Old messages stay in the room.`;
+        : `End the interview with ${shorten(id)}? This removes them from the candidate room. Old messages stay in the room.${
+            admission === null
+              ? ""
+              : ` Slot ${admission.slot + 1} stays written in your zone; clear it from the editor if they do not join.`
+          }`;
     interviewEndCancel.disabled = busy;
     interviewEndConfirmButton.disabled = busy;
     interviewEndConfirmButton.textContent = interviewWriting
       ? "Ending…"
       : "End interview";
+
+    const canAdmit = id !== null && latest !== null && !busy && !loading;
+    interviewAdmit.hidden = admission !== null || finishingConfirm;
+    interviewAdmit.disabled = !canAdmit;
+    interviewAdmit.setAttribute("aria-busy", "false");
+    interviewFinish.hidden = admission === null || finishingConfirm;
+    interviewFinish.disabled = admission === null || busy || loading;
+    interviewFinishConfirm.hidden = !finishingConfirm;
+    interviewFinishConfirmText.textContent =
+      id === null
+        ? ""
+        : `Finish admission for ${shorten(id)}? The written slot stays in your zone. The candidate room drops them and rotates its keys; old messages stay as history.`;
+    interviewFinishCancel.disabled = busy;
+    interviewFinishConfirmButton.disabled = busy;
+    interviewFinishConfirmButton.textContent = interviewWriting
+      ? "Finishing…"
+      : "Finish admission";
+
     interviewRefresh.disabled = busy || loading;
     interviewRefresh.textContent = loading ? "Refreshing…" : "Refresh";
+
+    if (admissionFocusPending) {
+      admissionFocusPending = false;
+      interviewAdmissionResult.focus({ preventScroll: true });
+    }
 
     if (id !== null) void ensureInterviewDecryption();
   }
@@ -1091,10 +1261,12 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     render();
 
     try {
-      const [candidateResult, zoneResult] = await Promise.allSettled([
-        deps.transport.read(owner),
-        deps.readOwnZone(),
-      ]);
+      const [candidateResult, zoneResult, addressResult] =
+        await Promise.allSettled([
+          deps.transport.read(owner),
+          deps.readOwnZone(),
+          deps.ownAddress(),
+        ]);
       if (token !== readToken || run !== generation) return;
 
       if (candidateResult.status === "fulfilled") {
@@ -1126,6 +1298,9 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
         deps.announce(zoneError);
       }
 
+      ownAddressValue =
+        addressResult.status === "fulfilled" ? addressResult.value : null;
+
       const active = candidateView();
       const key =
         active.candidate === null
@@ -1137,6 +1312,16 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
         );
       }
       announcedInterview = key;
+
+      const admission = currentAdmission();
+      const admissionKey =
+        admission === null || active.candidate === null
+          ? null
+          : `${active.candidate}:${admission.slot}`;
+      if (admission !== null && admissionKey !== announcedAdmission) {
+        deps.announce(admissionAnnouncement(admission));
+      }
+      announcedAdmission = admissionKey;
 
       if (announceResult) {
         if (candidateResult.status === "fulfilled") {
@@ -1303,10 +1488,96 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     }
   }
 
+  async function admitCandidate(): Promise<void> {
+    if (anyWriteBusy()) return;
+    const candidate = candidateId();
+    if (candidate === null) return;
+
+    if (zoneState !== null && !hasFreeSlot()) {
+      interviewActionError = ADMISSION_NO_FREE_SLOT;
+      deps.announce(interviewActionError);
+      render();
+      return;
+    }
+
+    interviewActionError = null;
+    finishingConfirm = false;
+    render();
+
+    try {
+      await deps.openAdmit(candidate);
+    } catch (error) {
+      interviewActionError = requestsErrorText(error, "admit");
+      deps.announce(interviewActionError);
+      render();
+    }
+  }
+
+  async function finishAdmission(): Promise<void> {
+    if (anyWriteBusy()) return;
+    const owner = ownId();
+    const candidate = candidateId();
+    if (owner === null || candidate === null) return;
+    const run = generation;
+
+    interviewWriting = true;
+    finishingConfirm = false;
+    interviewActionError = null;
+    interviewComposerErrorText = null;
+    render();
+
+    try {
+      const nextZone = await deps.readOwnZone();
+      if (run !== generation || ownId() !== owner) return;
+      if (nextZone === null) {
+        interviewActionError =
+          "Your zone could not be read, so admission was not finished.";
+        deps.announce(interviewActionError);
+        return;
+      }
+
+      zoneState = nextZone;
+      zoneLoaded = true;
+      zoneError = null;
+      const members = admissionFinishMembers(owner, nextZone, candidate);
+      const state = await deps.transport.updateMembership(owner, members, {
+        encrypt: true,
+      });
+      if (run !== generation || ownId() !== owner) return;
+      current = state;
+      loaded = true;
+      loadError = null;
+      invitedCandidate = null;
+      announcedInterview = null;
+      announcedAdmission = null;
+      admissionFocusKey = null;
+      admissionFocusPending = false;
+      clearInterviewViews();
+      deps.announce("Admission finished.");
+    } catch (error) {
+      if (run !== generation || ownId() !== owner) return;
+      interviewActionError = requestsErrorText(error, "finish");
+      deps.announce(interviewActionError);
+    } finally {
+      if (run === generation) {
+        interviewWriting = false;
+        render();
+        if (dialog.open) {
+          if (!interviewVisible()) {
+            queueTitle.focus({ preventScroll: true });
+          } else {
+            interviewFinish.focus({ preventScroll: true });
+          }
+        }
+      }
+    }
+  }
+
   async function endInterview(): Promise<void> {
     if (anyWriteBusy()) return;
     const owner = ownId();
     if (owner === null) return;
+    const candidate = candidateId();
     const run = generation;
 
     interviewWriting = true;
@@ -1337,8 +1608,15 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
       loadError = null;
       invitedCandidate = null;
       announcedInterview = null;
+      announcedAdmission = null;
       clearInterviewViews();
-      deps.announce("Interview ended.");
+      const writtenSlot =
+        candidate === null ? null : admissionSlot(nextZone, candidate);
+      deps.announce(
+        writtenSlot === null
+          ? "Interview ended."
+          : `Interview ended. Slot ${writtenSlot + 1} stays written in your zone; clear it from the editor if they do not join.`,
+      );
     } catch (error) {
       if (run !== generation || ownId() !== owner) return;
       interviewActionError = requestsErrorText(error, "end");
@@ -1583,15 +1861,21 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     zoneState = null;
     zoneLoaded = false;
     zoneError = null;
-    invitedCandidate = null;
+    ownAddressValue = null;
+    // Keep `invitedCandidate`: closing and reopening the panel must not lose an
+    // admission handoff once the written slot makes the candidate a child.
     interviewWriting = false;
     interviewStartingId = null;
     interviewActionError = null;
     interviewEndingConfirm = false;
+    finishingConfirm = false;
     sendingInterviewMessage = false;
     interviewComposerErrorText = null;
     interviewFocusWanted = true;
     announcedInterview = null;
+    announcedAdmission = null;
+    admissionFocusKey = null;
+    admissionFocusPending = false;
     clearInterviewViews();
     acceptingBusy = false;
     acceptingPending = null;
@@ -1627,6 +1911,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     interviewActionError = null;
     interviewComposerErrorText = null;
     interviewEndingConfirm = false;
+    finishingConfirm = false;
     void load(true);
   }
 
@@ -1679,6 +1964,7 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
   interviewEnd.addEventListener("click", () => {
     if (interviewEnd.hidden || interviewEnd.disabled) return;
     interviewEndingConfirm = true;
+    finishingConfirm = false;
     render();
     interviewEndConfirmButton.focus({ preventScroll: true });
   });
@@ -1691,6 +1977,29 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
 
   interviewEndConfirmButton.addEventListener("click", () => {
     void endInterview();
+  });
+
+  interviewAdmit.addEventListener("click", () => {
+    if (interviewAdmit.hidden || interviewAdmit.disabled) return;
+    void admitCandidate();
+  });
+
+  interviewFinish.addEventListener("click", () => {
+    if (interviewFinish.hidden || interviewFinish.disabled) return;
+    finishingConfirm = true;
+    interviewEndingConfirm = false;
+    render();
+    interviewFinishConfirmButton.focus({ preventScroll: true });
+  });
+
+  interviewFinishCancel.addEventListener("click", () => {
+    finishingConfirm = false;
+    render();
+    interviewFinish.focus({ preventScroll: true });
+  });
+
+  interviewFinishConfirmButton.addEventListener("click", () => {
+    void finishAdmission();
   });
 
   interviewComposer.addEventListener("submit", (event) => {
@@ -1735,8 +2044,10 @@ export function createRequestsPanel(deps: RequestsPanelDeps): RequestsPanel {
     interviewWriting = false;
     interviewStartingId = null;
     interviewEndingConfirm = false;
+    finishingConfirm = false;
     sendingInterviewMessage = false;
     interviewFocusWanted = false;
+    admissionFocusPending = false;
     clearInterviewViews();
     const target = lastFocus;
     lastFocus = null;

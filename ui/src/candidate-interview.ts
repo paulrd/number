@@ -44,6 +44,24 @@ export function interviewMembers(
   return [...new Set([ownerId, ...zoneChildren(ownerId, state), candidate])].sort();
 }
 
+/**
+ * Membership after admission: owner plus zone children, minus the admitted
+ * candidate, deduped and ascending.
+ *
+ * The slot write already names the admitted candidate, but the candidates
+ * room drops them and rotates. The owner is always kept, even when `admitted`
+ * is the owner (defensive).
+ */
+export function interviewMembersAfterAdmit(
+  ownerId: string,
+  zoneState: StateV3,
+  admitted: string,
+): string[] {
+  const members = new Set([ownerId, ...zoneChildren(ownerId, zoneState)]);
+  if (admitted !== ownerId) members.delete(admitted);
+  return [...members].sort();
+}
+
 /** The latest candidate membership plus its single active candidate. */
 export interface InterviewState {
   seq: number;

@@ -344,6 +344,12 @@ let busy = false;
 let adjusting = false;
 let currentSlot = 0;
 let editorRequest = 0;
+/**
+ * A contact supplied by an admission handoff. The candidate need not be in the
+ * address book yet, so the slot editor carries them as an extra option for
+ * this opening only.
+ */
+let editorPrefillContact: ContactRecord | null = null;
 let parentStatusRequest = 0;
 let addressRequest = 0;
 let parentValueRequest = 0;
@@ -1328,6 +1334,31 @@ async function openAssign(): Promise<void> {
     address,
     slots: ownSlotOccupancy(),
     onChoose: (slot) => openEditor(slot),
+  });
+}
+
+/**
+ * Admission handoff: the owner still chooses the free cell, but the slot
+ * editor opens with the candidate already selected as its child.
+ */
+async function openAdmit(candidateId: string): Promise<void> {
+  if (!view || !ownState) return;
+  const address = await ownRegionAddress();
+  if (address === null) {
+    const index = ownState.slots.findIndex((slot) => slot.entry === null);
+    if (index === -1) {
+      throw new Error(
+        "Your zone has no free slot. Clear a slot in the editor before admitting.",
+      );
+    }
+    openEditor(index, candidateId);
+    return;
+  }
+  const module = await import("./region/picker");
+  module.openAssignRegion({
+    address,
+    slots: ownSlotOccupancy(),
+    onChoose: (slot) => openEditor(slot, candidateId),
   });
 }
 
@@ -3231,14 +3262,21 @@ function populateContactOptions(
   blank.textContent = "Select a contact…";
   options.push(blank);
 
-  const add = (contact: ContactRecord): void => {
+  const add = (contact: ContactRecord, admission = false): void => {
     if (known.has(contact.userId)) return;
     known.add(contact.userId);
-    options.push(contactOption(contact));
+    const option = contactOption(contact);
+    if (admission) {
+      // An admission handoff's candidate is not an address-book contact yet.
+      option.dataset.admission = "true";
+      option.textContent = `Requester · ${shortUserId(contact.userId)}`;
+    }
+    options.push(option);
   };
 
   for (const contact of entries) add(contact);
   if (extra) add(extra);
+  if (editorPrefillContact) add(editorPrefillContact, true);
 
   // A slot keeps the key it was signed with. Show it even after the contact was
   // removed, and keep it unselectable for saving until a current one is picked.
@@ -3258,6 +3296,10 @@ function populateContactOptions(
 /** Guidance for a child id that cannot be written into this slot. */
 function childProblem(contact: string): string | null {
   if (ownIdentity && contact === ownIdentity.pubkey) {
+    // The offline harness can only ask to join its own zone, so admission there
+    // would prefill this zone as its own child. A deployed zone still cannot
+    // name itself; keep that rejection outside offline mode.
+    if (isOffline && editorPrefillContact?.userId === contact) return null;
     return "A slot's child must be a different zone. Choose another contact.";
   }
   const otherIndex =
@@ -3273,12 +3315,15 @@ function childProblem(contact: string): string | null {
 function updateContactState(): void {
   const entries = ownContacts();
   const selected = contactSelect.value;
+  const selectedOption = contactSelect.selectedOptions[0];
   const known =
-    selected !== "" && entries.some((contact) => contact.userId === selected);
+    selected !== "" &&
+    (entries.some((contact) => contact.userId === selected) ||
+      selectedOption?.dataset.admission === "true");
 
   let hint = "";
   let invalid = false;
-  if (entries.length === 0) {
+  if (entries.length === 0 && !known) {
     hint = "No contacts yet. Add one to save a slot.";
   } else if (selected === "") {
     hint = "Choose a contact before saving.";
@@ -3604,12 +3649,25 @@ async function handleAdjust(): Promise<void> {
   }
 }
 
-function openEditor(index: number): void {
+function openEditor(index: number, prefillContact?: string): void {
   if (!ownState || !ownIdentity || busy || !view) return;
 
   currentSlot = index;
   const slot = ownState.slots[index];
   const entry = slot.entry;
+
+  // An admission handoff prefills a free slot with the candidate. An occupied
+  // slot keeps the key it was signed with.
+  const prefill =
+    entry === null && prefillContact !== undefined && prefillContact !== ""
+      ? {
+          label: shortUserId(prefillContact),
+          userId: prefillContact,
+          address: null,
+        }
+      : null;
+  editorPrefillContact = prefill;
+  const selectedContact = entry?.contact ?? prefill?.userId ?? "";
 
   editorSlot.textContent = String(index + 1).padStart(2, "0");
   editorTitle.textContent = `Slot ${index + 1}`;
@@ -3627,9 +3685,9 @@ function openEditor(index: number): void {
   adjustStatus.textContent = "";
   adjustIssue.checked = true;
   adjustBurn.checked = false;
-  populateContactOptions(entry?.contact ?? "");
+  populateContactOptions(selectedContact);
   renderAdjust();
-  setChildLink(entry?.contact ?? null);
+  setChildLink(selectedContact === "" ? null : selectedContact);
 
   if (!editor.open) editor.showModal();
   if (adjustControls.hidden) contactSelect.focus();
@@ -3638,6 +3696,7 @@ function openEditor(index: number): void {
 
 function closeEditor(): void {
   if (editor.open) editor.close();
+  editorPrefillContact = null;
 }
 
 function showEditorError(message: string, focus: HTMLElement | null): void {
@@ -4191,6 +4250,8 @@ createRequestsPanel({
     const snapshot = await backend.readBoard(ownerId);
     return snapshot?.state ?? null;
   },
+  ownAddress: ownRegionAddress,
+  openAdmit,
   announce,
 });
 

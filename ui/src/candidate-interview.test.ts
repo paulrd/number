@@ -9,6 +9,7 @@ import {
   admissionSlot,
   interviewBlockReason,
   interviewMembers,
+  interviewMembersAfterAdmit,
   interviewState,
   zoneChildren,
 } from "./candidate-interview";
@@ -112,6 +113,54 @@ describe("interviewMembers", () => {
     const state = stateWith({ 0: occupied(OWNER) });
     expect(interviewMembers(OWNER, state, CANDIDATE)).toEqual([
       CANDIDATE,
+      OWNER,
+    ]);
+  });
+});
+
+describe("interviewMembersAfterAdmit", () => {
+  it("returns owner and the other zone children, excluding the admitted candidate", () => {
+    const state = stateWith({
+      0: occupied(CANDIDATE),
+      1: occupied(CHILD_B),
+      2: occupied(CHILD_A),
+    });
+    expect(interviewMembersAfterAdmit(OWNER, state, CANDIDATE)).toEqual([
+      CHILD_A,
+      CHILD_B,
+      OWNER,
+    ]);
+  });
+
+  it("returns just the owner when the candidate was the only child", () => {
+    const state = stateWith({ 0: occupied(CANDIDATE) });
+    expect(interviewMembersAfterAdmit(OWNER, state, CANDIDATE)).toEqual([
+      OWNER,
+    ]);
+  });
+
+  it("dedupes a candidate that appears in two slots", () => {
+    const state = stateWith({
+      0: occupied(CANDIDATE),
+      4: occupied(CANDIDATE),
+      5: occupied(CHILD_A),
+    });
+    expect(interviewMembersAfterAdmit(OWNER, state, CANDIDATE)).toEqual([
+      CHILD_A,
+      OWNER,
+    ]);
+  });
+
+  it("keeps the owner when the admitted candidate is the owner", () => {
+    const state = stateWith({ 0: occupied(OWNER), 1: occupied(CHILD_A) });
+    expect(interviewMembersAfterAdmit(OWNER, state, OWNER)).toEqual([
+      CHILD_A,
+      OWNER,
+    ]);
+  });
+
+  it("returns the owner for a root zone with no children", () => {
+    expect(interviewMembersAfterAdmit(OWNER, emptyState(), CANDIDATE)).toEqual([
       OWNER,
     ]);
   });

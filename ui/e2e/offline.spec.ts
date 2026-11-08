@@ -2027,3 +2027,131 @@ test("interviews a requester in the candidate room and ends the round", async ({
   ).toEqual([]);
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("admits a requester through the slot editor and finishes admission", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await openAdvanced(page);
+
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
+
+  // The offline harness can only request its own zone, so the requester is the
+  // owner id; the slot prefill and the admission summary use that id.
+  await page.locator("#join-open").click();
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await page.locator("#join-root-input").fill(ownerId!);
+  await page.locator("#join-root-continue").click();
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  await page.locator("#join-lat").fill("10");
+  await page.locator("#join-lng").fill("10");
+  await page.locator("#join-point").click();
+  await expect(page.locator("#join-result")).toBeVisible();
+  await page.locator("#join-note").fill("Offline admission check");
+  await page.locator("#join-submit").click();
+  await expect(page.locator("#join-request-success")).toBeVisible();
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await page.locator("#requests-list .requests-row .requests-interview").click();
+  await expect(page.locator("#interview-section")).toBeVisible();
+  await expect(page.locator("#interview-state")).toHaveText("Interviewing");
+  await expect(page.locator("#interview-admit")).toBeVisible();
+  await expect(page.locator("#interview-admit")).toBeEnabled();
+  await expect(page.locator("#interview-finish")).toBeHidden();
+
+  // Admit opens the existing region designation flow; choose the lowest free
+  // cell, then the slot editor opens prefilled with the candidate.
+  await page.locator("#interview-admit").click();
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  await expect(page.locator("#region-assign-panel")).toBeVisible();
+  await expect(
+    page.locator("#region-assign-cards .region-assign-card").first(),
+  ).toBeVisible();
+  for (let index = 0; index < 8; index += 1) {
+    const input = page.locator(
+      `#region-assign-cards .region-assign-card[data-slot="${index}"] input`,
+    );
+    if ((await input.count()) > 0 && (await input.isEnabled())) {
+      await input.check();
+      break;
+    }
+  }
+  await expect(page.locator("#region-assign-choose")).toBeEnabled();
+  await page.locator("#region-assign-choose").click();
+  await expect(page.locator("#region-dialog")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#contact-select")).toHaveValue(ownerId!);
+  await expect(page.locator("#contact-select option:checked")).toHaveText(
+    `Requester · ${ownerId!.slice(0, 8)}`,
+  );
+  await expect(page.locator("#contact-hint")).toBeHidden();
+
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+
+  // The refresh reads the zone again and notices the written designation.
+  await page.locator("#interview-refresh").click();
+  await expect(page.locator("#interview-admission")).toBeVisible();
+  await expect(page.locator("#interview-admission-result")).toHaveText(
+    "Slot 1 written",
+  );
+  await expect(page.locator("#interview-admission-result")).toBeFocused();
+  await expect(page.locator("#interview-admission-region")).toHaveText(
+    "Region 0",
+  );
+  await expect(page.locator("#interview-state")).toHaveText("Slot written");
+  await expect(page.locator("#interview-admit")).toBeHidden();
+  await expect(page.locator("#interview-finish")).toBeVisible();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  // Finishing is confirmed and rotates the candidate room without the
+  // candidate. The written slot intentionally stays in the owner's zone.
+  await page.locator("#interview-finish").click();
+  await expect(page.locator("#interview-finish-confirm")).toBeVisible();
+  await expect(page.locator("#interview-finish-confirm-button")).toBeFocused();
+  await page.locator("#interview-finish-confirm-button").click();
+  await expect(page.locator("#interview-section")).toBeHidden();
+  await expect(page.locator("#requests-count")).toHaveText("No open requests");
+  await expect(page.locator("#requests-list .requests-row")).toHaveCount(0);
+  await expect(page.locator("#requests-queue-title")).toBeFocused();
+
+  // Reopening cannot resurrect the interview: the candidate room no longer
+  // lists the candidate.
+  await page.locator("#requests-done").click();
+  await expect(page.locator("#requests-dialog")).toBeHidden();
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await expect(page.locator("#interview-section")).toBeHidden();
+  await expect(page.locator("#requests-count")).toHaveText("No open requests");
+  await page.locator("#requests-done").click();
+
+  // The one-sided slot is written with the requester as its contact, visible
+  // in the advanced surface's unconfirmed list.
+  const unconfirmed = page.locator("#unconfirmed-list .unconfirmed-row");
+  await expect(unconfirmed).toHaveCount(1);
+  await expect(unconfirmed.locator(".unconfirmed-name")).toHaveAttribute(
+    "title",
+    ownerId!,
+  );
+
+  const afterAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    afterAccessibility.violations,
+    `axe violations:\n${JSON.stringify(afterAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

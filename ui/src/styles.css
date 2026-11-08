@@ -7763,10 +7763,47 @@ body:has(#join-dialog[open]) {
   margin-top: 0.1rem;
 }
 
+.interview-admission {
+  display: grid;
+  gap: 0.12rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 0.55rem;
+  background:
+    linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--accent-soft) 70%, transparent),
+      transparent 70%
+    ),
+    var(--surface-raised, var(--surface));
+}
+
+.interview-admission-result {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.interview-admission-result:focus {
+  outline: none;
+}
+
+.interview-admission-region {
+  margin: 0;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
 .interview-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
+  gap: 0.45rem;
 }
 
 .interview-dialog h2[tabindex="-1"]:focus,
