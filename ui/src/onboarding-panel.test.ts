@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   candidateRequestId,
   textToCandidateNote,
@@ -11,6 +11,7 @@ import {
   admittedSlotLabel,
   candidateStatusLine,
   chainAddress,
+  createStatusWatch,
   formatWantCell,
   interviewAuthorLabel,
   interviewErrorText,
@@ -266,5 +267,107 @@ describe("stripJoinParams", () => {
     const url = new URL("https://example.test/app?view=simple");
     stripJoinParams(url);
     expect(url.toString()).toBe("https://example.test/app?view=simple");
+  });
+});
+
+describe("createStatusWatch", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function setup() {
+    const cleanups: Array<{ id: string; stop: ReturnType<typeof vi.fn> }> = [];
+    const callbacks = new Map<string, () => void>();
+    const recheck = vi.fn();
+    let busy = false;
+    const watch = createStatusWatch({
+      watchBoard: (id, onChange) => {
+        const stop = vi.fn();
+        cleanups.push({ id, stop });
+        callbacks.set(id, onChange);
+        return stop;
+      },
+      recheck,
+      isBusy: () => busy,
+      debounceMs: 500,
+    });
+    return {
+      watch,
+      recheck,
+      callbacks,
+      cleanups,
+      setBusy: (value: boolean) => {
+        busy = value;
+      },
+    };
+  }
+
+  it("starts one watch per target and cleans up when it changes", () => {
+    const { watch, cleanups } = setup();
+    watch.setTarget("a");
+    watch.setTarget("a");
+    expect(cleanups.map((entry) => entry.id)).toEqual(["a"]);
+    expect(watch.target()).toBe("a");
+
+    watch.setTarget("b");
+    expect(cleanups[0]!.stop).toHaveBeenCalledTimes(1);
+    expect(cleanups.map((entry) => entry.id)).toEqual(["a", "b"]);
+    expect(watch.target()).toBe("b");
+  });
+
+  it("debounces multiple notifications into one re-check", () => {
+    vi.useFakeTimers();
+    const { watch, recheck, callbacks } = setup();
+    watch.setTarget("a");
+    callbacks.get("a")!();
+    callbacks.get("a")!();
+    vi.advanceTimersByTime(499);
+    expect(recheck).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(recheck).toHaveBeenCalledWith("a");
+  });
+
+  it("waits for an in-flight check and re-checks after it settles", () => {
+    vi.useFakeTimers();
+    const { watch, recheck, callbacks, setBusy } = setup();
+    watch.setTarget("a");
+    setBusy(true);
+    callbacks.get("a")!();
+    vi.advanceTimersByTime(1000);
+    expect(recheck).not.toHaveBeenCalled();
+
+    setBusy(false);
+    watch.settled();
+    vi.advanceTimersByTime(500);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(recheck).toHaveBeenCalledWith("a");
+  });
+
+  it("stops on null and ignores late notifications", () => {
+    vi.useFakeTimers();
+    const { watch, recheck, callbacks, cleanups } = setup();
+    watch.setTarget("a");
+    const notify = callbacks.get("a")!;
+    watch.setTarget(null);
+    expect(cleanups[0]!.stop).toHaveBeenCalledTimes(1);
+    expect(watch.target()).toBeNull();
+
+    notify();
+    vi.advanceTimersByTime(1000);
+    expect(recheck).not.toHaveBeenCalled();
+
+    watch.stop();
+    expect(cleanups[0]!.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a pending re-check when stopped", () => {
+    vi.useFakeTimers();
+    const { watch, recheck, callbacks } = setup();
+    watch.setTarget("a");
+    callbacks.get("a")!();
+    watch.stop();
+    vi.advanceTimersByTime(1000);
+    expect(recheck).not.toHaveBeenCalled();
   });
 });

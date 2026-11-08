@@ -644,6 +644,36 @@ export function joinCheck(
 - `joinCheck` precedence: admitted slot, then membership, then the requester's
   request in the queue, then none.
 
+### 12.2.3 Cross-node visibility (P4e)
+
+A Freenet GET on a node that already holds the contract returns its local copy;
+it never refreshes. An owner's update is broadcast only to advertised co-hosts,
+so a candidate on another node can stay stale until anti-entropy (minutes to
+tens of minutes). The candidate must therefore **subscribe to the target zone
+before the owner writes the designation** and keep that subscription open:
+
+- `BoardBackend.watchBoard(ownerId, onChange): () => void` (online only; the
+  offline backend returns a no-op). It opens a dedicated `NumberContract`
+  viewer for the target parameters, sends a GET with `subscribe` and
+  `blocking_subscribe` (blocking so the upstream registration exists before the
+  response), and calls `onChange` on every update notification. The cleanup
+  closes the viewer. Use `fetch_contract` only for the WASM, never as a
+  freshness control.
+- The join panel starts the watch when the status is **queued** or **invited**,
+  debounces notifications (~500 ms), and re-runs the status check. It stops the
+  watch on admitted/none, on close, and when the target changes.
+- Check again remains available and is the fallback. This supersedes the
+  "no push" wording for zone state: room chat still has no push, but the
+  target-zone subscription is what makes the admission visible promptly.
+- If a candidate opens the app after the owner's write and is already stale,
+  only a re-PUT/broadcast by the owner or a local eviction + re-GET recovers it;
+  do not pretend `Check again` alone can. Document the limitation in the UI if
+  the status stays queued after a reasonable time.
+
+Reference: freenet-core `client_events.rs` local-serve gate, `update.rs`
+advertised-cohost broadcast targets, and the 300 s interest heartbeat.
+
+
 
 
 

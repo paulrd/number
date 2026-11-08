@@ -4259,6 +4259,7 @@ const joinPanel = createOnboardingPanel({
   readBoard: (ownerId) => readBoardForView(ownerId),
   transport: backend.candidateTransport,
   selfId: () => ownIdentity?.pubkey ?? null,
+  watchBoard: (ownerId, onChange) => backend.watchBoard(ownerId, onChange),
   saveParent: saveOwnParent,
   announce,
   onSettled: stripRootParam,

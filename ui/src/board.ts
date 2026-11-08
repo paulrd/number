@@ -312,6 +312,8 @@ export interface BoardBackend {
   issueOrBurn?(slotIndex: number, delta: bigint, note: string): Promise<void>;
   /** Read one board by owner id; null when no instance/state exists. */
   readBoard(ownerId: string): Promise<BoardSnapshot | null>;
+  /** Subscribe to another owner's zone; returns cleanup. */
+  watchBoard(ownerId: string, onChange: () => void): () => void;
   retry(): Promise<StateV3>;
   /** Export the owner seed and counters for a backup. */
   exportIdentity(): Promise<ExportedSecrets>;
@@ -388,6 +390,8 @@ export class OnlineBoard implements BoardBackend {
   private readonly delegateClients: DelegateClient[] = [];
   /** Read-only viewers for other owners' boards, keyed by code hash. */
   private readonly viewers = new Map<string, NumberContract>();
+  /** Dedicated subscription viewers, one per watchBoard call. */
+  private readonly watchViewers = new Set<NumberContract>();
   private migrating = false;
   private started = false;
   private startPromise: Promise<StateV3> | null = null;
@@ -1613,6 +1617,54 @@ export class OnlineBoard implements BoardBackend {
     return null;
   }
 
+  /**
+   * Subscribe to another owner's zone so an owner write reaches this node.
+   *
+   * Uses a dedicated viewer (never the shared read-only one) and no repainting
+   * callbacks: only `onNotification` is wired, so the join panel decides how to
+   * refresh. `subscribeState` registers a blocking subscription, which keeps a
+   * write made after the initial GET from slipping past. Connect/subscribe
+   * failures are logged and ignored; the returned cleanup is always callable.
+   */
+  watchBoard(ownerId: string, onChange: () => void): () => void {
+    if (!isLowerHex(ownerId, 64)) {
+      throw new Error(
+        `The zone owner must be a 64-character lowercase hex user id, got ${JSON.stringify(ownerId)}`,
+      );
+    }
+
+    const viewer = new NumberContract(
+      this.config.contractCodeHash,
+      this.config.contractWasmUrl,
+      { onNotification: () => onChange() },
+    );
+    this.watchViewers.add(viewer);
+
+    let closed = false;
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      this.watchViewers.delete(viewer);
+      viewer.close();
+    };
+
+    void (async () => {
+      try {
+        await viewer.connect();
+        await viewer.subscribeState(hexToBytes(ownerId));
+      } catch (error) {
+        // Cleanup or board.close() already stopped this watch: stay quiet.
+        if (!this.watchViewers.has(viewer)) return;
+        console.warn(
+          `Could not subscribe to zone ${ownerId}: ${errorMessage(error)}`,
+        );
+        cleanup();
+      }
+    })();
+
+    return cleanup;
+  }
+
   private async viewerFor(codeHash: string): Promise<NumberContract> {
     const existing = this.viewers.get(codeHash);
     if (existing) {
@@ -1977,6 +2029,8 @@ export class OnlineBoard implements BoardBackend {
     this.delegate.failAll();
     for (const viewer of this.viewers.values()) viewer.close();
     this.viewers.clear();
+    for (const viewer of this.watchViewers) viewer.close();
+    this.watchViewers.clear();
     this.roomTransportValue?.close();
     this.roomTransportValue = null;
     this.candidateTransportValue?.close();

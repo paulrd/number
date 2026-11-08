@@ -15,6 +15,41 @@ const CONFIG = {
   delegateParamsBytes: Array.from({ length: 32 }, () => 3),
 };
 
+const OWNER = "aa".repeat(32);
+
+// A pending connection keeps `watchBoard`'s background setup from racing the
+// assertions; the fake lets the test observe the viewer the cleanup closes.
+const { FakeNumberContract } = vi.hoisted(() => {
+  class FakeNumberContract {
+    static readonly instances: FakeNumberContract[] = [];
+    closed = 0;
+
+    constructor() {
+      FakeNumberContract.instances.push(this);
+    }
+
+    connect(): Promise<void> {
+      return new Promise<void>(() => {
+        // Never resolves: the watch setup stays pending until cleanup.
+      });
+    }
+
+    subscribeState(): Promise<never> {
+      return new Promise<never>(() => {});
+    }
+
+    close(): void {
+      this.closed += 1;
+    }
+  }
+  return { FakeNumberContract };
+});
+
+vi.mock("./freenet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./freenet")>();
+  return { ...actual, NumberContract: FakeNumberContract };
+});
+
 function callbacks() {
   return {
     onStatus: vi.fn(),
@@ -45,5 +80,31 @@ describe("board transports", () => {
     expect(board.candidateTransport).toBeDefined();
     expect(board.candidateTransport).toBe(board.candidateTransport);
     expect(typeof board.candidateTransport.request).toBe("function");
+  });
+
+  it("exposes watchBoard on both backends and cleans up idempotently", () => {
+    const online = new OnlineBoard(CONFIG, callbacks());
+    expect(typeof online.watchBoard).toBe("function");
+
+    const before = FakeNumberContract.instances.length;
+    const stop = online.watchBoard(OWNER, vi.fn());
+    expect(typeof stop).toBe("function");
+    expect(FakeNumberContract.instances.length).toBe(before + 1);
+
+    const viewer = FakeNumberContract.instances[before];
+    stop();
+    expect(viewer.closed).toBe(1);
+    // A second cleanup is a no-op, not a second close.
+    stop();
+    expect(viewer.closed).toBe(1);
+
+    online.close();
+
+    const offline = new OfflineBoard(callbacks());
+    expect(typeof offline.watchBoard).toBe("function");
+    const stopOffline = offline.watchBoard(OWNER, vi.fn());
+    expect(typeof stopOffline).toBe("function");
+    expect(() => stopOffline()).not.toThrow();
+    expect(() => stopOffline()).not.toThrow();
   });
 });

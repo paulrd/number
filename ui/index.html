@@ -2546,9 +2546,9 @@
                     <dd><code id="join-request-id"></code></dd>
                   </div>
                 </dl>
-                <p class="field-hint">
-                  Keep this link. Checking again reads the same queue; nothing
-                  is pushed to you.
+                <p id="join-queued-watch" class="field-hint">
+                  Keep this link. Checking again reads the same queue. The app
+                  is listening for the owner's update while this dialog is open.
                 </p>
               </div>
 
@@ -2578,6 +2578,10 @@
                 <p class="onboarding-meta">
                   Interview with
                   <code id="join-interview-target" class="onboarding-owner"></code>
+                </p>
+                <p id="join-invited-watch" class="field-hint">
+                  The app is listening for the owner's update while this dialog
+                  is open.
                 </p>
                 <p id="join-interview-empty" class="onboarding-help" hidden>
                   No messages yet. Say hello.

@@ -595,6 +595,13 @@ export class OfflineBoard implements BoardBackend {
     return fixture === null ? null : this.snapshot(ownerId, fixture);
   }
 
+  /** Offline mode has no push transport; the watch is a no-op. */
+  watchBoard(_ownerId: string, _onChange: () => void): () => void {
+    return () => {
+      // Nothing to stop.
+    };
+  }
+
   async exportIdentity(): Promise<never> {
     throw new Error("Offline mode has no identity to export.");
   }

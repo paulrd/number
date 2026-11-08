@@ -1841,6 +1841,9 @@ test("shows the candidate queued, invited, and admitted from the join link", asy
   );
   await expect(page.locator("#join-request-id")).not.toHaveText("");
   await expect(page.locator("#join-status-invited")).toBeHidden();
+  await expect(page.locator("#join-queued-watch")).toContainText(
+    "listening for the owner's update",
+  );
   const queuedUrl = new URL(page.url());
   expect(queuedUrl.searchParams.get("root")).toBe(ownerId!);
   expect(queuedUrl.searchParams.get("target")).toBe(ownerId);
@@ -1890,6 +1893,9 @@ test("shows the candidate queued, invited, and admitted from the join link", asy
   await expect(page.locator("#join-interview-target")).toHaveAttribute(
     "title",
     ownerId!,
+  );
+  await expect(page.locator("#join-invited-watch")).toContainText(
+    "listening for the owner's update",
   );
   await expect(page.locator("#join-interview-input")).toBeEnabled();
   await page.locator("#join-interview-input").fill("Hello from the candidate");

@@ -90,6 +90,8 @@ export interface OnboardingPanelDeps {
   transport: CandidateTransport;
   /** The requester's own owner id, or null while the identity is not ready. */
   selfId(): string | null;
+  /** Subscribe to a target zone's updates; the returned cleanup is idempotent. */
+  watchBoard(ownerId: string, onChange: () => void): () => void;
   /** Write the consent signature: this zone's parent is the target zone. */
   saveParent(targetOwnerId: string): Promise<void>;
   announce(message: string): void;
@@ -376,6 +378,111 @@ type StatusSearchResult =
   | { kind: "none" }
   | { kind: "error"; error: unknown };
 
+export interface StatusWatchOptions {
+  /** Subscribe to one target zone; the returned cleanup is called once. */
+  watchBoard(ownerId: string, onChange: () => void): () => void;
+  /** Re-read the watched target after a debounced notification. */
+  recheck(targetId: string): void;
+  /** True while a status check is in flight, so a notification can wait. */
+  isBusy(): boolean;
+  debounceMs?: number;
+  setTimeout?(callback: () => void, milliseconds: number): number;
+  clearTimeout?(handle: number): void;
+}
+
+export interface StatusWatch {
+  /** Watch one target, or null to stop. Repeating a target is a no-op. */
+  setTarget(targetId: string | null): void;
+  /** Schedule a re-check that arrived while a status check was in flight. */
+  settled(): void;
+  /** Stop the watch and cancel any pending re-check. Idempotent. */
+  stop(): void;
+  /** The currently watched target, or null. */
+  target(): string | null;
+}
+
+/**
+ * One target-zone watch at a time, with a debounce and a single pending
+ * re-check. DOM-free so the lifecycle is unit-testable; the panel supplies the
+ * real subscription and status check.
+ */
+export function createStatusWatch(options: StatusWatchOptions): StatusWatch {
+  const schedule =
+    options.setTimeout ??
+    ((callback, milliseconds) =>
+      globalThis.setTimeout(callback, milliseconds) as unknown as number);
+  const cancel = options.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
+  const debounceMs = options.debounceMs ?? 500;
+
+  let cleanup: (() => void) | null = null;
+  let active: string | null = null;
+  let timer: number | null = null;
+  let pending = false;
+
+  function clearTimer(): void {
+    if (timer !== null) {
+      cancel(timer);
+      timer = null;
+    }
+  }
+
+  function stop(): void {
+    clearTimer();
+    pending = false;
+    active = null;
+    if (cleanup !== null) {
+      const run = cleanup;
+      cleanup = null;
+      run();
+    }
+  }
+
+  function arm(): void {
+    if (timer !== null || active === null) return;
+    timer = schedule(() => {
+      timer = null;
+      if (active === null) return;
+      if (options.isBusy()) {
+        pending = true;
+        return;
+      }
+      pending = false;
+      options.recheck(active);
+    }, debounceMs);
+  }
+
+  function onUpdate(): void {
+    if (active === null) return;
+    if (options.isBusy()) {
+      pending = true;
+      return;
+    }
+    arm();
+  }
+
+  function setTarget(targetId: string | null): void {
+    if (targetId === active) return;
+    stop();
+    if (targetId === null) return;
+    active = targetId;
+    try {
+      const stopFn = options.watchBoard(targetId, onUpdate);
+      cleanup = typeof stopFn === "function" ? stopFn : null;
+    } catch {
+      // A failed subscription leaves Check again as the fallback.
+      cleanup = null;
+    }
+  }
+
+  function settled(): void {
+    if (!pending || options.isBusy()) return;
+    pending = false;
+    arm();
+  }
+
+  return { setTarget, settled, stop, target: () => active };
+}
+
 export function createOnboardingPanel(
   deps: OnboardingPanelDeps,
 ): OnboardingPanel {
@@ -498,6 +605,18 @@ export function createOnboardingPanel(
   let sending = false;
   let interviewComposerErrorText: string | null = null;
   let signingJoin = false;
+
+  const statusWatch = createStatusWatch({
+    watchBoard: deps.watchBoard,
+    isBusy: () => statusBusy,
+    recheck: (targetId) => {
+      void checkStatus({
+        focus: false,
+        announceCheck: false,
+        targetId,
+      });
+    },
+  });
 
   let datasetPromise: Promise<RegionDataset> | null = null;
   let mapPromise: Promise<boolean> | null = null;
@@ -1171,9 +1290,12 @@ export function createOnboardingPanel(
   async function checkStatus(options: {
     focus: boolean;
     announceCheck: boolean;
+    /** A watch re-check names its target even when the URL has no hint. */
+    targetId?: string | null;
   }): Promise<void> {
     const root = rootId;
     if (root === null) return;
+    if (statusBusy) return;
     const self = deps.selfId();
     if (self === null) {
       await preparePlace();
@@ -1183,7 +1305,7 @@ export function createOnboardingPanel(
       return;
     }
 
-    const hint = parseTargetHint(window.location.search);
+    const hint = options.targetId ?? parseTargetHint(window.location.search);
     if (hint === null && !options.announceCheck) {
       // A fresh link with no hint: offer the place step without a tree walk.
       await preparePlace();
@@ -1192,6 +1314,8 @@ export function createOnboardingPanel(
       return;
     }
 
+    const previousKind = statusModel?.kind ?? null;
+    const previousTarget = statusModel?.targetId ?? null;
     const generation = ++statusGeneration;
     statusBusy = true;
     statusLoading.hidden = false;
@@ -1231,6 +1355,7 @@ export function createOnboardingPanel(
 
       if (found.kind === "none") {
         statusModel = null;
+        statusWatch.stop();
         statusBusy = false;
         statusLoading.hidden = true;
         await preparePlace();
@@ -1280,7 +1405,13 @@ export function createOnboardingPanel(
       statusBusy = false;
       statusCheck.disabled = false;
       statusCheck.textContent = "Check again";
-      showStatus(options.focus || options.announceCheck);
+      const changed =
+        previousKind !== statusModel.kind ||
+        previousTarget !== statusModel.targetId;
+      showStatus(
+        options.focus || options.announceCheck,
+        options.focus || options.announceCheck || changed,
+      );
     } catch (error) {
       if (generation !== statusGeneration) return;
       const message = statusErrorText(error);
@@ -1292,10 +1423,17 @@ export function createOnboardingPanel(
       statusError.hidden = false;
       setStep("status", true);
       deps.announce(message);
+    } finally {
+      if (generation === statusGeneration) {
+        statusBusy = false;
+        statusCheck.disabled = false;
+        statusCheck.textContent = "Check again";
+        statusWatch.settled();
+      }
     }
   }
 
-  function showStatus(focus: boolean): void {
+  function showStatus(focus: boolean, announce: boolean): void {
     const model = statusModel;
     if (model === null) return;
     statusLoading.hidden = true;
@@ -1303,7 +1441,7 @@ export function createOnboardingPanel(
     setStep("status", false);
     renderStatus();
     if (focus) statusTitle.focus({ preventScroll: false });
-    deps.announce(joinStatusMessage(model.kind));
+    if (announce) deps.announce(joinStatusMessage(model.kind));
   }
 
   function renderStatus(): void {
@@ -1333,6 +1471,24 @@ export function createOnboardingPanel(
       statusLede.textContent =
         "The owner wrote a slot for you. Sign and join when you're ready.";
       renderAdmitted(model);
+    }
+
+    updateStatusWatch(model);
+  }
+
+  /**
+   * Keep one target-zone subscription while the queued or invited view is
+   * showing. The dialog must stay open for it to be useful.
+   */
+  function updateStatusWatch(model: StatusModel): void {
+    if (!dialog.open) {
+      statusWatch.stop();
+      return;
+    }
+    if (model.kind === "queued" || model.kind === "invited") {
+      statusWatch.setTarget(model.targetId);
+    } else {
+      statusWatch.stop();
     }
   }
 
@@ -1705,6 +1861,7 @@ export function createOnboardingPanel(
   }
 
   function resetStatusView(): void {
+    statusWatch.stop();
     statusModel = null;
     statusBusy = false;
     statusLoading.hidden = true;
@@ -1852,7 +2009,7 @@ export function createOnboardingPanel(
       };
       interviewViews = new globalThis.Map();
       interviewComposerErrorText = null;
-      showStatus(true);
+      showStatus(true, true);
     } catch (error) {
       if (generation !== flowGeneration) return;
       requestError.textContent = requestErrorText(error);
@@ -2089,6 +2246,7 @@ export function createOnboardingPanel(
     statusBusy = false;
     interviewDecrypting = false;
     pending = false;
+    statusWatch.stop();
     deps.onSettled();
     const target = lastFocus;
     lastFocus = null;

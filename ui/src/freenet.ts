@@ -485,6 +485,29 @@ export class NumberContract {
     return this.getState(timeoutMs);
   }
 
+  /**
+   * Subscribe to another owner's zone and read its current state.
+   *
+   * The GET registers a blocking subscription before it returns, so an owner
+   * update after this call reaches this node and fires `onNotification`. The
+   * returned state is the node's local copy, not proof of freshness: a stale
+   * node still serves what it has.
+   */
+  async subscribeState(
+    parameters: Uint8Array,
+    timeoutMs: number = GET_TIMEOUT_MS,
+  ): Promise<StateV3> {
+    if (parameters.length !== 32) {
+      throw new Error(
+        `contract parameters must be 32 bytes, got ${parameters.length}`,
+      );
+    }
+    this.key = deriveContractKey(this.codeHashBase58, parameters);
+    return decodeState(
+      await this.getRawStateForKey(this.key, timeoutMs, true, true),
+    );
+  }
+
   private async getStateForKey(
     key: ContractKey,
     timeoutMs: number,
@@ -492,9 +515,19 @@ export class NumberContract {
     return decodeState(await this.getRawStateForKey(key, timeoutMs));
   }
 
+  /**
+   * GET one key, optionally registering a subscription with the node.
+   *
+   * `subscribe` asks the node to advertise updates; `blockingSubscribe` makes it
+   * wait for the upstream registration before answering, so an owner update
+   * after this response cannot slip past us. Existing readers keep both off and
+   * behave exactly as before.
+   */
   private async getRawStateForKey(
     key: ContractKey,
     timeoutMs: number,
+    subscribe = false,
+    blockingSubscribe = false,
   ): Promise<Uint8Array> {
     const api = this.requireApi();
     let signalMissing!: () => void;
@@ -504,7 +537,10 @@ export class NumberContract {
     this.missingListener = signalMissing;
     try {
       const response = await withTimeout(
-        Promise.race([api.get(new GetRequest(key, true)), missing]),
+        Promise.race([
+          api.get(new GetRequest(key, true, subscribe, blockingSubscribe)),
+          missing,
+        ]),
         timeoutMs,
         "Timed out fetching the contract state",
       );
