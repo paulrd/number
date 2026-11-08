@@ -26,11 +26,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794145739`, bundle `assets/index-CNH7TjIE.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
+| Live site | version `1794152531`, bundle `assets/index-D7qqOsnp.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794145739`, P4c onboarding UI + pinned candidate WASM; delegate v13; contract unchanged |
+| Last UI publish | 2026-11-08; site `1794152531`, P4c onboarding UI + target-zone watch + pinned candidate WASM; delegate v13; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
