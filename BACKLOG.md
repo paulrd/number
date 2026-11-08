@@ -44,7 +44,31 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c discovery
+## Where we left off (2026-11-08) — P4c owner side
+
+### P4c3a implemented (2026-11-08): owner request queue
+
+- Advanced **Join requests** panel over the owner's own candidate room:
+  accepting toggle (absent config = accepting, writes `seq+1`), newest-first
+  queue with requester/cell/note/time, per-row Dismiss, Clear all with
+  confirmation and failure retention, refresh, and a **Copy join link**
+  (`?root=<ownId>`) with a manual fallback.
+- Reads and writes go through `board.candidateTransport` with the owner id;
+  a missing room is an empty queue. Every write is confirmed by the transport's
+  re-read; failures keep the row and show a readable error.
+- No interview/admit control yet (P4c3b).
+- Offline e2e: a request posted through the join flow appears in the owner
+  queue, accepting toggles, dismiss empties it, join-link copy, axe and console
+  clean. UI 457 tests / 33 files; offline e2e 34.
+
+**Next is P4c3b (interview/admit), then P4d (live smoke + republish).**
+
+- P4c3b: invite one requester per epoch (membership = owner ∪ children ∪
+  requester, fresh secrets), encrypted interview chat, reject/rotate, and the
+  admit handoff (owner writes the slot, candidate sees the region and signs
+  parent). Spec is `DESIGN-candidates.md` §12.2.
+- P4d: live two-identity onboarding smoke (no contacts → root link → request →
+  interview → admit) and site republish.
 
 ### P4c2 implemented (2026-11-08): discovery UI
 
@@ -251,7 +275,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **433 UI**, **33 offline e2e** (the region/room
+candidate**, **104 delegate**, **457 UI**, **34 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -620,7 +644,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 433, offline e2e 33, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 457, offline e2e 34, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -659,6 +683,14 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c3a: owner join-request queue**
+- Advanced Join requests dialog: accepting toggle, newest-first public queue
+  (requester/cell/note/time), Dismiss, Clear all with confirmation, refresh,
+  and Copy join link with a manual fallback. Missing room = empty queue; every
+  write is confirmed by the transport.
+- No interview/admit action yet; spec for that is §12.2.
+- UI 457 tests / 33 files, offline e2e 34, axe and console clean.
 
 **2026-11-08 — P4c2: discovery UI**
 - Pure match walk (`region/onboarding.ts`): root parsing/validation, point →

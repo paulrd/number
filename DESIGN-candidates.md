@@ -451,6 +451,84 @@ Rules:
 - Slot occupancy for display: `entry === null` is free; anything else is taken
   (a written slot is the designation even before the child signs).
 
+## 12. Owner side (P4c3)
+
+### 12.1 Request queue (P4c3a)
+
+The owner's Advanced surface gains a **Join requests** block and dialog for the
+owner's own candidate room. It is owner-only: every write passes `ownId` to
+`board.candidateTransport`.
+
+- **Accepting toggle.** A labelled switch, on by default (an absent config is
+  accepting). Writing it calls `setAccepting(ownId, value)`; the transport
+  picks `seq = latest + 1`. Show the resulting state and disable the control
+  while a write is in flight.
+- **Queue.** `read(ownId)`; a missing room is an empty queue, not an error.
+  Each row shows the requester's shortened id (full key in `title`), the
+  requested cell (`world` when `want_cell` is empty, otherwise the digits), the
+  note as text (empty shown as a quiet "No note"), and the request time (full
+  timestamp in `title`). Newest first, matching the contract order.
+- **Dismiss.** `dismiss(ownId, requestId)`; the row disappears after the
+  transport's confirmed re-read. Errors keep the row and show a readable
+  message.
+- **Clear all.** Dismiss every current id, one write at a time, keeping the
+  rows that fail; ask for confirmation first and report the count cleared.
+- **Join link.** A "Copy join link" action copies
+  `<origin><path>?root=<ownId>` (the root link defined in §3.2) with a visible
+  "Copied." result; if the clipboard is unavailable, show the URL for manual
+  copy. This is the link the owner shares so others can ask.
+- **States.** Loading, empty ("No open requests yet"), read failure with retry,
+  write failure per row, and a refresh action. Announce state changes; the map
+  is not involved.
+- No interview or admission action in this pass; those are §12.2. Do not add a
+  control that cannot complete.
+
+### 12.2 Interview and admit (P4c3b)
+
+One admission round per epoch. The client, not the contract, enforces the
+one-candidate rule: the owner derives the zone members
+`[owner] ∪ occupied slot contacts` and treats any candidate-room member outside
+that set as the current candidate.
+
+- **Invite.** From a queue row, the owner starts an interview with the
+  requester. The candidate-room membership becomes
+  `[owner] ∪ zone children ∪ requester` (deduped, ascending, at most 9); if the
+  zone already has eight children the zone is full and the invite is refused
+  with a readable message. Seal a fresh epoch key to those members, sign the
+  next membership `seq`, write it, then dismiss the request. If a second
+  candidate is already in the room, refuse until that round ends.
+- **Interview.** The owner and the candidate exchange encrypted candidate-room
+  messages at the new epoch. The owner opens the interview from the requests
+  panel. The candidate sees it from their pending request surface: after
+  submitting a request they can **Check again**, which re-reads the target's
+  candidate room; if they are in the current membership, they open the epoch
+  key with `openRoomSecret` and the chat becomes available. No push or polling
+  loop is promised; a manual check is the phase-1 transport.
+- **Reject / end.** Remove the candidate from the membership with fresh secrets
+  for the remaining members (rotation). Old epochs stay readable history. The
+  candidate then sees "not admitted" on their next check.
+- **Admit.** Order matters: the owner writes the zone slot first (the region
+  designation), then the candidate signs `parent` after seeing the assigned
+  cell. The owner starts from the slot editor's **Assign a child region** flow
+  with the requester as the contact; on save, the slot is written and the
+  candidate-room membership rotates without the candidate. The candidate's
+  pending surface reads the target zone, finds a slot whose contact is their
+  id, shows the assigned address/cell (published or provisional), and offers
+  the existing parent-signing action. If they refuse, the owner clears the slot
+  and the edge never becomes mutual.
+- Admission is only offered for an unparented zone with no children. If the
+  candidate's own zone already has a parent or children, refuse with the §3.5
+  message (moving a subtree is deferred to re-organization).
+- The candidate room never stores secrets; bodies and epoch secrets stay
+  opaque and client-encrypted.
+
+UI decision: the requests panel owns the queue and the interview entry; the
+candidate pending surface lives in the join dialog after a successful request,
+with a manual **Check again** action. The existing slot editor remains the
+designation step; do not duplicate region ranking in the queue.
+
+
+
 
 ## 9. P4a acceptance
 

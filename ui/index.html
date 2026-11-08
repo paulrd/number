@@ -493,6 +493,30 @@
           </section>
 
           <section
+            id="requests-block"
+            class="advanced-block requests-block"
+            aria-labelledby="requests-block-title"
+          >
+            <h3 id="requests-block-title" class="advanced-block-title">
+              Join requests
+            </h3>
+            <p id="requests-block-hint" class="advanced-hint">
+              People can ask to join this zone. Requests are public, so only
+              share what you would say in the open.
+            </p>
+            <button
+              id="requests-open"
+              class="button button--small button--quiet"
+              type="button"
+              aria-haspopup="dialog"
+              aria-controls="requests-dialog"
+              aria-describedby="requests-block-hint"
+            >
+              Review requests
+            </button>
+          </section>
+
+          <section
             id="join-block"
             class="advanced-block join-block"
             aria-labelledby="join-block-title"
@@ -1956,6 +1980,233 @@
               Refresh
             </button>
             <button id="room-done" class="button button--small" type="button">
+              Done
+            </button>
+          </footer>
+        </div>
+      </dialog>
+
+      <dialog
+        id="requests-dialog"
+        class="editor requests-dialog"
+        aria-labelledby="requests-title"
+        aria-describedby="requests-intro"
+      >
+        <div class="requests-shell">
+          <header class="editor-header">
+            <div>
+              <p class="eyebrow">Join requests</p>
+              <h2 id="requests-title" tabindex="-1">Join requests</h2>
+              <p id="requests-intro" class="requests-intro">
+                People ask to join this zone with a public request. Anyone who
+                can read the zone's request room can see who asked, the cell
+                they want, and their note.
+              </p>
+            </div>
+            <button
+              id="requests-close"
+              class="icon-button"
+              type="button"
+              aria-label="Close join requests"
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="editor-body requests-body">
+            <section
+              class="requests-section"
+              aria-labelledby="requests-accepting-title"
+            >
+              <h3 id="requests-accepting-title" class="requests-section-title">
+                Accepting requests
+              </h3>
+              <form
+                id="requests-accepting-form"
+                class="requests-accepting-form"
+                novalidate
+              >
+                <label class="requests-switch">
+                  <input
+                    id="requests-accepting"
+                    type="checkbox"
+                    checked
+                    aria-labelledby="requests-accepting-switch-title"
+                    aria-describedby="requests-accepting-switch-hint requests-accepting-state requests-accepting-error"
+                  />
+                  <span class="requests-switch-track" aria-hidden="true"></span>
+                  <span class="requests-switch-copy">
+                    <span
+                      id="requests-accepting-switch-title"
+                      class="requests-switch-title"
+                    >
+                      Accepting join requests
+                    </span>
+                    <span
+                      id="requests-accepting-switch-hint"
+                      class="requests-switch-hint"
+                    >
+                      Requests are public. Anyone who can read this zone's
+                      request room can see them.
+                    </span>
+                  </span>
+                </label>
+                <p
+                  id="requests-accepting-state"
+                  class="requests-accepting-state"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+                <p
+                  id="requests-accepting-error"
+                  class="form-error requests-inline-error"
+                  role="alert"
+                  hidden
+                ></p>
+              </form>
+            </section>
+
+            <section
+              class="requests-section"
+              aria-labelledby="requests-queue-title"
+            >
+              <div class="requests-section-head">
+                <h3 id="requests-queue-title" class="requests-section-title">
+                  Request queue
+                </h3>
+                <span id="requests-count" class="requests-count">
+                  No open requests
+                </span>
+                <div class="requests-head-actions">
+                  <button
+                    id="requests-refresh"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    id="requests-clear"
+                    class="button button--small button--quiet requests-clear"
+                    type="button"
+                  >
+                    Clear all
+                  </button>
+                </div>
+              </div>
+
+              <div
+                id="requests-clear-confirm"
+                class="requests-confirm"
+                role="alert"
+                hidden
+              >
+                <p id="requests-clear-confirm-text"></p>
+                <div class="requests-confirm-actions">
+                  <button
+                    id="requests-clear-cancel"
+                    class="button button--small button--quiet"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="requests-clear-confirm-button"
+                    class="button button--small button--primary"
+                    type="button"
+                  >
+                    Clear all requests
+                  </button>
+                </div>
+              </div>
+
+              <p
+                id="requests-clear-status"
+                class="requests-clear-status"
+                role="status"
+                aria-live="polite"
+                hidden
+              ></p>
+              <p id="requests-loading" class="requests-loading" hidden>
+                Reading requests…
+              </p>
+              <p
+                id="requests-error"
+                class="form-error requests-error"
+                role="alert"
+                hidden
+              ></p>
+              <button
+                id="requests-retry"
+                class="button button--small requests-retry"
+                type="button"
+                hidden
+              >
+                Retry
+              </button>
+              <p id="requests-empty" class="requests-empty" hidden>
+                No open requests yet. Share the join link so people can ask.
+              </p>
+
+              <ul
+                id="requests-list"
+                class="requests-list"
+                aria-labelledby="requests-queue-title"
+              ></ul>
+            </section>
+
+            <section
+              class="requests-section"
+              aria-labelledby="requests-link-title"
+            >
+              <h3 id="requests-link-title" class="requests-section-title">
+                Share the join link
+              </h3>
+              <p class="requests-link-copy">
+                This zone is shared by its link; there is no directory. Share
+                the link so people can find this zone and ask to join.
+              </p>
+              <div class="requests-link-actions">
+                <button
+                  id="requests-copy-link"
+                  class="button button--small"
+                  type="button"
+                >
+                  Copy join link
+                </button>
+                <p
+                  id="requests-copy-status"
+                  class="requests-copy-status"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+              </div>
+              <label
+                id="requests-link-field"
+                class="field requests-link-field"
+                hidden
+              >
+                <span>Join link</span>
+                <input
+                  id="requests-link-input"
+                  type="text"
+                  readonly
+                  spellcheck="false"
+                  aria-describedby="requests-copy-status"
+                />
+              </label>
+            </section>
+
+            <p
+              id="requests-status"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+            ></p>
+          </div>
+
+          <footer class="editor-actions requests-actions">
+            <button id="requests-done" class="button button--small" type="button">
               Done
             </button>
           </footer>

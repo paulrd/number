@@ -1826,3 +1826,107 @@ test("keeps a duplicate ?root= value and explains it", async ({ page }) => {
   await expect(page.locator("#join-root-continue")).toBeEnabled();
   expect(errors).toEqual([]);
 });
+
+test("reviews and moderates the owner's join-request queue", async ({ page }) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await openAdvanced(page);
+
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
+
+  // Use the real join flow to put one request into the own zone's queue.
+  await page.locator("#join-open").click();
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await page.locator("#join-root-input").fill(ownerId!);
+  await page.locator("#join-root-continue").click();
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  await page.locator("#join-lat").fill("10");
+  await page.locator("#join-lng").fill("10");
+  await page.locator("#join-point").click();
+  await expect(page.locator("#join-result")).toBeVisible();
+  await page.locator("#join-note").fill("Offline queue check");
+  await page.locator("#join-submit").click();
+  await expect(page.locator("#join-request-success")).toBeVisible();
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+
+  await expect(page.locator("#requests-block")).toBeVisible();
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await expect(page.locator("#requests-title")).toBeFocused();
+
+  await expect(page.locator("#requests-count")).toHaveText("1 open request");
+  const row = page.locator("#requests-list .requests-row");
+  await expect(row).toHaveCount(1);
+  const requester = row.locator(".requests-requester");
+  await expect(requester).toHaveText(
+    `${ownerId!.slice(0, 8)}…${ownerId!.slice(-8)}`,
+  );
+  await expect(requester).toHaveAttribute("title", ownerId!);
+  await expect(row.locator(".requests-cell")).toHaveText("cell 01");
+  await expect(row.locator(".requests-note")).toHaveText("Offline queue check");
+  await expect(row.locator(".requests-time")).toHaveAttribute(
+    "title",
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+  );
+
+  // The switch reflects the stored state and writes through the transport.
+  const accepting = page.locator("#requests-accepting");
+  await expect(accepting).toBeChecked();
+  await accepting.uncheck();
+  await expect(page.locator("#requests-accepting-state")).toHaveText(
+    "Not accepting join requests.",
+  );
+  await accepting.check();
+  await expect(page.locator("#requests-accepting-state")).toHaveText(
+    "Accepting join requests.",
+  );
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  // Dismiss the only row and land on the empty queue.
+  await row.locator(".requests-dismiss").click();
+  await expect(page.locator("#requests-list .requests-row")).toHaveCount(0);
+  await expect(page.locator("#requests-empty")).toBeVisible();
+  await expect(page.locator("#requests-empty")).toContainText(
+    "No open requests yet",
+  );
+  await expect(page.locator("#requests-count")).toHaveText("No open requests");
+
+  // Copy the join link, or accept the manual field when the clipboard is
+  // unavailable in this browser context.
+  await page.locator("#requests-copy-link").click();
+  await expect
+    .poll(async () => {
+      const status = (await page.locator("#requests-copy-status").textContent())?.trim();
+      if (status === "Copied.") return "copied";
+      if (await page.locator("#requests-link-field").isVisible()) return "manual";
+      return "pending";
+    })
+    .not.toBe("pending");
+
+  if (await page.locator("#requests-link-field").isVisible()) {
+    const link = new URL(
+      await page.locator("#requests-link-input").inputValue(),
+    );
+    expect(link.searchParams.get("root")).toBe(ownerId);
+    expect([...link.searchParams.keys()]).toEqual(["root"]);
+  } else {
+    await expect(page.locator("#requests-copy-status")).toHaveText("Copied.");
+  }
+
+  await page.locator("#requests-done").click();
+  await expect(page.locator("#requests-dialog")).toBeHidden();
+  await expect(page.locator("#requests-open")).toBeFocused();
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+

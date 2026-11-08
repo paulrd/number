@@ -29,6 +29,7 @@ import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
 import { createOnboardingPanel } from "./onboarding-panel";
+import { createRequestsPanel } from "./requests-panel";
 import { createRoomPanel } from "./room-panel";
 import {
   advancePayment,
@@ -4179,6 +4180,12 @@ const joinPanel = createOnboardingPanel({
   selfId: () => ownIdentity?.pubkey ?? null,
   announce,
   onSettled: stripRootParam,
+});
+
+createRequestsPanel({
+  transport: backend.candidateTransport,
+  ownId: () => ownIdentity?.pubkey ?? null,
+  announce,
 });
 
 const delegateControls = createDelegateControls(backend);
