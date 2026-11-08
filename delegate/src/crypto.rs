@@ -12,9 +12,10 @@
 //! - Ed25519 → X25519 private: `clamp(SHA-512(seed)[0..32])`, matching
 //!   libsodium's `crypto_sign_ed25519_sk_to_curve25519`.
 //! - HKDF-SHA256 with `salt = eph_pk || recipient_u` and
-//!   `info = "number:v1:room:secret" || "ZMR1" || roomId || owner ||
-//!   epoch_le || recipient`, where `recipient_u` is the converted X25519
-//!   public key and `recipient` is the original Ed25519 public key.
+//!   `info = "number:v1:room:secret" || tag || roomId || owner ||
+//!   epoch_le || recipient`, where `tag` is the caller-supplied room tag
+//!   (`ZMR1` or `ZCR1`), `recipient_u` is the converted X25519 public key and
+//!   `recipient` is the original Ed25519 public key.
 //! - AES-256-GCM over the 32-byte epoch key, with
 //!   `aad = version || eph_pk || nonce`.
 //!
@@ -128,10 +129,16 @@ pub fn ed25519_seed_to_x25519_public(seed: &[u8; 32]) -> [u8; 32] {
     PublicKey::from(&secret).to_bytes()
 }
 
-fn secret_info(room_id: &[u8; 32], owner: &[u8; 32], epoch: u64, recipient: &[u8; 32]) -> Vec<u8> {
+fn secret_info(
+    tag: &[u8; 4],
+    room_id: &[u8; 32],
+    owner: &[u8; 32],
+    epoch: u64,
+    recipient: &[u8; 32],
+) -> Vec<u8> {
     let mut info = Vec::with_capacity(SECRET_INFO_PREFIX.len() + 4 + 32 + 32 + 8 + 32);
     info.extend_from_slice(SECRET_INFO_PREFIX);
-    info.extend_from_slice(crate::room::ROOM_TAG.as_bytes());
+    info.extend_from_slice(tag);
     info.extend_from_slice(room_id);
     info.extend_from_slice(owner);
     info.extend_from_slice(&epoch.to_le_bytes());
@@ -139,7 +146,9 @@ fn secret_info(room_id: &[u8; 32], owner: &[u8; 32], epoch: u64, recipient: &[u8
     info
 }
 
+#[allow(clippy::too_many_arguments)]
 fn derive_secret_key(
+    tag: &[u8; 4],
     shared: &[u8; 32],
     eph_public: &[u8; 32],
     recipient: &[u8; 32],
@@ -151,7 +160,7 @@ fn derive_secret_key(
     let mut salt = [0u8; X25519_PUBLIC_LEN * 2];
     salt[..X25519_PUBLIC_LEN].copy_from_slice(eph_public);
     salt[X25519_PUBLIC_LEN..].copy_from_slice(recipient_u);
-    let info = secret_info(room_id, owner, epoch, recipient);
+    let info = secret_info(tag, room_id, owner, epoch, recipient);
 
     let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared);
     let mut key = [0u8; 32];
@@ -162,10 +171,12 @@ fn derive_secret_key(
 
 /// Seal one 32-byte epoch key to `recipient` (an Ed25519 verifying key).
 ///
-/// `room_id` and `owner` are raw 32-byte values. A fresh ephemeral X25519 key
-/// and nonce are drawn from `rng` for every call, so every recipient gets an
-/// independent 93-byte blob.
+/// `tag` binds the blob to the room kind (`ZMR1` or `ZCR1`). `room_id` and
+/// `owner` are raw 32-byte values. A fresh ephemeral X25519 key and nonce are
+/// drawn from `rng` for every call, so every recipient gets an independent
+/// 93-byte blob.
 pub fn seal_with_rng(
+    tag: &[u8; 4],
     room_id: &[u8; 32],
     owner: &[u8; 32],
     epoch: u64,
@@ -191,6 +202,7 @@ pub fn seal_with_rng(
     }
 
     let key = derive_secret_key(
+        tag,
         shared.as_bytes(),
         &ephemeral_public,
         recipient,
@@ -234,10 +246,11 @@ pub fn seal_with_rng(
 /// Open a 93-byte epoch-secret blob addressed to `recipient_seed`.
 ///
 /// Returns the epoch key. Every input is authenticated: the version byte,
-/// ephemeral key and nonce are the AEAD associated data; the room id, owner,
-/// epoch and recipient are bound into the HKDF info. A blob sealed for another
-/// member, room, owner or epoch fails to open.
+/// ephemeral key and nonce are the AEAD associated data; the room kind tag,
+/// room id, owner, epoch and recipient are bound into the HKDF info. A blob
+/// sealed for another tag, member, room, owner or epoch fails to open.
 pub fn open(
+    tag: &[u8; 4],
     room_id: &[u8; 32],
     owner: &[u8; 32],
     epoch: u64,
@@ -278,6 +291,7 @@ pub fn open(
     }
 
     let key = derive_secret_key(
+        tag,
         shared.as_bytes(),
         &ephemeral_public,
         &recipient_ed25519,
@@ -390,6 +404,7 @@ mod tests {
         // Sealing to a weak recipient fails rather than deriving a usable key.
         assert!(
             seal_with_rng(
+                b"ZMR1",
                 &ROOM_ID,
                 &OWNER,
                 EPOCH,
@@ -409,7 +424,10 @@ mod tests {
             let mut blobs = Vec::new();
             for (_, public) in &members {
                 blobs.push(
-                    seal_with_rng(&ROOM_ID, &OWNER, EPOCH, public, &EPOCH_KEY, &mut rng).unwrap(),
+                    seal_with_rng(
+                        b"ZMR1", &ROOM_ID, &OWNER, EPOCH, public, &EPOCH_KEY, &mut rng,
+                    )
+                    .unwrap(),
                 );
             }
             assert!(blobs.iter().all(|blob| blob.len() == SECRET_BLOB_LEN));
@@ -417,7 +435,15 @@ mod tests {
             assert!(blobs.windows(2).all(|pair| pair[0] != pair[1]));
 
             for (index, (key, _)) in members.iter().enumerate() {
-                let opened = open(&ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &blobs[index]).unwrap();
+                let opened = open(
+                    b"ZMR1",
+                    &ROOM_ID,
+                    &OWNER,
+                    EPOCH,
+                    &key.to_bytes(),
+                    &blobs[index],
+                )
+                .unwrap();
                 assert_eq!(opened, EPOCH_KEY);
 
                 // A member can only open their own blob.
@@ -425,6 +451,7 @@ mod tests {
                     let (other_key, _) = &members[(index + 1) % members.len()];
                     assert!(
                         open(
+                            b"ZMR1",
                             &ROOM_ID,
                             &OWNER,
                             EPOCH,
@@ -442,6 +469,7 @@ mod tests {
     fn open_binds_room_owner_epoch_and_blob_bytes() {
         let (key, public) = member(5);
         let blob = seal_with_rng(
+            b"ZMR1",
             &ROOM_ID,
             &OWNER,
             EPOCH,
@@ -451,29 +479,60 @@ mod tests {
         )
         .unwrap();
 
-        assert!(open(&[0x12; 32], &OWNER, EPOCH, &key.to_bytes(), &blob).is_err());
-        assert!(open(&ROOM_ID, &[0x23; 32], EPOCH, &key.to_bytes(), &blob).is_err());
-        assert!(open(&ROOM_ID, &OWNER, EPOCH + 1, &key.to_bytes(), &blob).is_err());
+        assert!(open(b"ZMR1", &[0x12; 32], &OWNER, EPOCH, &key.to_bytes(), &blob).is_err());
+        assert!(
+            open(
+                b"ZMR1",
+                &ROOM_ID,
+                &[0x23; 32],
+                EPOCH,
+                &key.to_bytes(),
+                &blob
+            )
+            .is_err()
+        );
+        assert!(open(b"ZMR1", &ROOM_ID, &OWNER, EPOCH + 1, &key.to_bytes(), &blob).is_err());
 
         for index in 0..blob.len() {
             let mut tampered = blob;
             tampered[index] ^= 0x01;
             assert!(
-                open(&ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &tampered).is_err(),
+                open(b"ZMR1", &ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &tampered).is_err(),
                 "tampering byte {index} should fail"
             );
         }
 
-        assert!(open(&ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &blob[..92]).is_err());
+        assert!(
+            open(
+                b"ZMR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &blob[..92]
+            )
+            .is_err()
+        );
         let mut oversized = blob.to_vec();
         oversized.push(0);
-        assert!(open(&ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &oversized).is_err());
+        assert!(
+            open(
+                b"ZMR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &oversized
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn blob_layout_is_frozen() {
         let (key, public) = member(5);
         let blob = seal_with_rng(
+            b"ZMR1",
             &ROOM_ID,
             &OWNER,
             EPOCH,
@@ -496,6 +555,78 @@ mod tests {
         let mut nonce = [0u8; 12];
         SequenceRng::new(33).fill_bytes(&mut nonce);
         assert_eq!(&blob[33..45], &nonce);
-        assert!(open(&ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &blob).is_ok());
+        assert!(open(b"ZMR1", &ROOM_ID, &OWNER, EPOCH, &key.to_bytes(), &blob).is_ok());
+    }
+
+    #[test]
+    fn tags_are_bound_into_the_secret_blob() {
+        let (key, public) = member(5);
+
+        let members_blob = seal_with_rng(
+            b"ZMR1",
+            &ROOM_ID,
+            &OWNER,
+            EPOCH,
+            &public,
+            &EPOCH_KEY,
+            &mut SequenceRng::new(1),
+        )
+        .unwrap();
+        assert!(
+            open(
+                b"ZMR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &members_blob
+            )
+            .is_ok()
+        );
+        assert!(
+            open(
+                b"ZCR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &members_blob
+            )
+            .is_err()
+        );
+
+        let candidate_blob = seal_with_rng(
+            b"ZCR1",
+            &ROOM_ID,
+            &OWNER,
+            EPOCH,
+            &public,
+            &EPOCH_KEY,
+            &mut SequenceRng::new(1),
+        )
+        .unwrap();
+        assert!(
+            open(
+                b"ZCR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &candidate_blob
+            )
+            .is_ok()
+        );
+        assert!(
+            open(
+                b"ZMR1",
+                &ROOM_ID,
+                &OWNER,
+                EPOCH,
+                &key.to_bytes(),
+                &candidate_blob
+            )
+            .is_err()
+        );
+        assert_ne!(members_blob, candidate_blob);
     }
 }

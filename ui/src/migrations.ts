@@ -37,6 +37,15 @@ export interface LegacyDelegate {
 
 export const LEGACY_DELEGATES: LegacyDelegate[] = [
   {
+    // v12: delegated members-room epoch encryption (sealRoomEpoch/
+    // openRoomSecret). Superseded by v13, which adds candidate-room signing
+    // (request/dismissal/config) and tag-bound seal/open. Its seed and counters
+    // carry forward; epoch keys are never persisted.
+    key: "C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb",
+    codeHash: "zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd",
+    webappId: "BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k",
+  },
+  {
     // v11: members-room membership and message signing. Superseded by v12,
     // which adds delegated epoch encryption (`sealRoomEpoch`/`openRoomSecret`).
     // Its seed and all counters carry forward; epoch keys are never persisted.

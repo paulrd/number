@@ -46,10 +46,11 @@ pub const USER_ID_HEX_LEN: usize = 64;
 /// Length of the webapp contract instance id carried in the delegate params.
 pub const WEBAPP_ID_LEN: usize = 32;
 
-/// The delegate protocol version; v12 adds delegated members-room epoch
-/// encryption (`DESIGN-rooms.md` §7) alongside the v11 membership and message
-/// signing and the v10 payment routing.
-pub const DELEGATE_VERSION: u32 = 12;
+/// The delegate protocol version; v13 adds candidate-room record signing
+/// (`DESIGN-candidates.md` §7.1) and tag-bound epoch-secret sealing, on top of
+/// the v12 delegated members-room epoch encryption, the v11 membership and
+/// message signing and the v10 payment routing.
+pub const DELEGATE_VERSION: u32 = 13;
 
 /// Version of the export/import payload shape (independent of the wire state
 /// version). Version 1 payloads are accepted by `import`.
@@ -857,6 +858,29 @@ enum Request {
         epoch: u64,
         blob: String,
     },
+    /// Sign a candidate-room request (`DESIGN-candidates.md` §3). The
+    /// requester is always this delegate's key; the owner may differ.
+    #[serde(rename = "signCandidateRequest")]
+    SignCandidate {
+        owner: String,
+        time: i64,
+        #[serde(rename = "wantCell")]
+        want_cell: String,
+        note: String,
+    },
+    /// Sign a candidate-room request dismissal (owner only).
+    #[serde(rename = "signCandidateDismissal")]
+    SignCandidateDismissal {
+        owner: String,
+        id: String,
+    },
+    /// Sign a candidate-room config record (owner only).
+    #[serde(rename = "signCandidateConfig")]
+    SignCandidateConfig {
+        owner: String,
+        seq: u64,
+        accepting: bool,
+    },
     /// Report whether this delegate has already created a seed, without
     /// creating one. The UI uses this before attempting a migration.
     Status,
@@ -1008,6 +1032,34 @@ pub struct OpenRoomSecretResponse {
     pub epoch_key: String,
 }
 
+/// `{"ok":true,"requester":"<64 hex>","requestId":"<32 hex>","sig":"<128 hex>"}`
+/// from `signCandidateRequest`. The requester is always this delegate's key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateRequestResponse {
+    pub ok: bool,
+    pub requester: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub sig: String,
+}
+
+/// `{"ok":true,"id":"<32 hex>","sig":"<128 hex>"}` from
+/// `signCandidateDismissal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateDismissalResponse {
+    pub ok: bool,
+    pub id: String,
+    pub sig: String,
+}
+
+/// `{"ok":true,"seq":N,"sig":"<128 hex>"}` from `signCandidateConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateConfigResponse {
+    pub ok: bool,
+    pub seq: u64,
+    pub sig: String,
+}
+
 /// `{"ok":true,"hasSeed":false}` before first use, or
 /// `{"ok":true,"hasSeed":true,"pubkey":"<64 hex>","nextSeq":[...],"contactsNextSeq":1,"parentNextSeq":1,"paymentsNextSeq":1}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1115,6 +1167,9 @@ pub enum Response {
     RoomMessage(RoomMessageResponse),
     SealRoomEpoch(SealRoomEpochResponse),
     OpenRoomSecret(OpenRoomSecretResponse),
+    CandidateRequest(CandidateRequestResponse),
+    CandidateDismissal(CandidateDismissalResponse),
+    CandidateConfig(CandidateConfigResponse),
     Contacts(ContactsResponse),
     Status(Box<StatusResponse>),
     Export(ExportResponse),
@@ -1435,6 +1490,38 @@ pub fn handle_request(store: &mut impl SecretStore, payload: &[u8]) -> Response 
                 recipient,
                 epoch_key: hex::encode(epoch_key),
             }),
+            Err(error) => Response::error(error),
+        },
+        Request::SignCandidate {
+            owner,
+            time,
+            want_cell,
+            note,
+        } => match sign_candidate_request_with(store, &owner, time, &want_cell, &note) {
+            Ok((requester, request_id, sig)) => {
+                Response::CandidateRequest(CandidateRequestResponse {
+                    ok: true,
+                    requester,
+                    request_id,
+                    sig,
+                })
+            }
+            Err(error) => Response::error(error),
+        },
+        Request::SignCandidateDismissal { owner, id } => {
+            match sign_candidate_dismissal_with(store, &owner, &id) {
+                Ok(sig) => {
+                    Response::CandidateDismissal(CandidateDismissalResponse { ok: true, id, sig })
+                }
+                Err(error) => Response::error(error),
+            }
+        }
+        Request::SignCandidateConfig {
+            owner,
+            seq,
+            accepting,
+        } => match sign_candidate_config_with(store, &owner, seq, accepting) {
+            Ok(sig) => Response::CandidateConfig(CandidateConfigResponse { ok: true, seq, sig }),
             Err(error) => Response::error(error),
         },
         Request::Configure {
@@ -2171,6 +2258,7 @@ pub fn seal_room_epoch_with(
 
     let next_membership_seq = read_room_next_seq(store, room_id, "membershipSeq")?;
 
+    let tag = room::tag_bytes(tag)?;
     let mut epoch_key = [0u8; crypto::EPOCH_KEY_LEN];
     rng.fill_bytes(&mut epoch_key);
 
@@ -2178,6 +2266,7 @@ pub fn seal_room_epoch_with(
     for member in members {
         let recipient = room::decode_key("room epoch member", member)?;
         let blob = crypto::seal_with_rng(
+            &tag,
             &room_bytes,
             &owner_bytes,
             epoch,
@@ -2217,8 +2306,95 @@ pub fn open_room_secret_with(
 
     let seed = load_seed(store)?;
     let local = hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
-    let epoch_key = crypto::open(&room_bytes, &owner_bytes, epoch, &seed, &blob)?;
+    let epoch_key = crypto::open(
+        &room::tag_bytes(tag)?,
+        &room_bytes,
+        &owner_bytes,
+        epoch,
+        &seed,
+        &blob,
+    )?;
     Ok((local, epoch_key))
+}
+
+/// Validate and sign one candidate-room request (`DESIGN-candidates.md` §3).
+///
+/// The requester is always this delegate's key; `owner` is the target zone's
+/// owner key and may differ. There is no room id and no counter: a request is a
+/// standalone signed record, so the candidate may ask several targets and a
+/// replay is harmless. The returned id is `BLAKE3(raw sig)[0..16]`.
+pub fn sign_candidate_request_with(
+    store: &mut impl SecretStore,
+    owner: &str,
+    time: i64,
+    want_cell: &str,
+    note: &str,
+) -> Result<(String, String, String), String> {
+    room::validate_key("owner", owner)?;
+
+    let seed = load_or_create_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let requester = hex::encode(signing_key.verifying_key().to_bytes());
+
+    let bytes = room::request_signing_bytes(owner, &requester, time, want_cell, note)?;
+    let signature = signing_key.sign(&bytes);
+    let sig = hex::encode(signature.to_bytes());
+    let request_id = room::request_id(&sig)?;
+
+    Ok((requester, request_id, sig))
+}
+
+/// Validate and sign one candidate-room dismissal (`DESIGN-candidates.md` §3).
+///
+/// Owner-only: the delegate refuses unless its local key is `owner`. There is
+/// no counter; a dismissal is idempotent and covered entirely by its signature.
+pub fn sign_candidate_dismissal_with(
+    store: &impl SecretStore,
+    owner: &str,
+    id: &str,
+) -> Result<String, String> {
+    room::validate_key("owner", owner)?;
+    room::dismissal_error(id)?;
+
+    let seed = load_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let local = hex::encode(signing_key.verifying_key().to_bytes());
+    if local != owner {
+        return Err(format!(
+            "refused candidate dismissal for owner {owner}: this delegate's key is {local}"
+        ));
+    }
+
+    let bytes = room::dismissal_signing_bytes(owner, id)?;
+    Ok(hex::encode(signing_key.sign(&bytes).to_bytes()))
+}
+
+/// Validate and sign one candidate-room config record
+/// (`DESIGN-candidates.md` §3).
+///
+/// Owner-only: the delegate refuses unless its local key is `owner`. `seq` is
+/// caller-supplied and monotone at merge time; a replay of an old signature is
+/// harmless. No counter is read or written.
+pub fn sign_candidate_config_with(
+    store: &impl SecretStore,
+    owner: &str,
+    seq: u64,
+    accepting: bool,
+) -> Result<String, String> {
+    room::validate_key("owner", owner)?;
+    room::config_error(seq)?;
+
+    let seed = load_seed(store)?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let local = hex::encode(signing_key.verifying_key().to_bytes());
+    if local != owner {
+        return Err(format!(
+            "refused candidate config for owner {owner}: this delegate's key is {local}"
+        ));
+    }
+
+    let bytes = room::config_signing_bytes(owner, seq, accepting)?;
+    Ok(hex::encode(signing_key.sign(&bytes).to_bytes()))
 }
 
 /// Decode a lowercase-hex room secret blob and enforce the exact 93-byte
@@ -6318,10 +6494,10 @@ mod tests {
 
         let mut store = store_with_seed(owner_seed);
 
-        // ZCR1 is a different room kind.
+        // A third tag is never accepted; the delegate signs only ZMR1 and ZCR1.
         let response = call(
             &mut store,
-            &room_membership_payload(ROOM_ID, owner, "ZCR1", 3, &[author, owner], &valid_secrets),
+            &room_membership_payload(ROOM_ID, owner, "ZCX1", 3, &[author, owner], &valid_secrets),
         );
         assert!(!is_ok(&response));
         assert!(error_text(&response).contains("ZMR1"), "{response}");
@@ -6434,10 +6610,10 @@ mod tests {
         let owner = ROOM_OWNER;
         let mut store = store_with_seed(author_seed);
 
-        // ZCR1 is rejected here too.
+        // A third tag is rejected here too.
         let response = call(
             &mut store,
-            &room_message_payload(ROOM_ID, owner, "ZCR1", 3, 0, "00"),
+            &room_message_payload(ROOM_ID, owner, "ZCX1", 3, 0, "00"),
         );
         assert!(!is_ok(&response));
 
@@ -6725,7 +6901,7 @@ mod tests {
                 blob,
             ),
             open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZMR1", 0, blob),
-            open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZCR1", P3C_EPOCH, blob),
+            open_room_secret_with(&author_store, ROOM_ID, owner_hex, "ZCX1", P3C_EPOCH, blob),
         ] {
             assert!(result.is_err());
         }
@@ -6778,7 +6954,7 @@ mod tests {
         // Tag, room id, owner and epoch bounds.
         let mut rng = crypto::SequenceRng::new(1);
         assert!(
-            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZCR1", 1, &valid, &mut rng).is_err()
+            seal_room_epoch_with(&store, ROOM_ID, owner_hex, "ZCX1", 1, &valid, &mut rng).is_err()
         );
         assert!(
             seal_room_epoch_with(
@@ -7007,5 +7183,349 @@ mod tests {
         verifying
             .verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&signature))
             .expect("room-crate membership signature verifies");
+    }
+
+    // --- v13 candidate-room signing ----------------------------------------
+
+    const CANDIDATE_GOLDEN_JSON: &str = include_str!("../../fixtures/candidate/golden_v1.json");
+
+    fn candidate_golden() -> Value {
+        serde_json::from_str(CANDIDATE_GOLDEN_JSON).expect("golden candidate fixture is valid JSON")
+    }
+
+    fn candidate_request_payload(owner: &str, time: i64, want_cell: &str, note: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "signCandidateRequest",
+            "owner": owner,
+            "time": time,
+            "wantCell": want_cell,
+            "note": note,
+        }))
+        .expect("candidate request serializes")
+    }
+
+    fn candidate_dismissal_payload(owner: &str, id: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "signCandidateDismissal",
+            "owner": owner,
+            "id": id,
+        }))
+        .expect("candidate dismissal serializes")
+    }
+
+    fn candidate_config_payload(owner: &str, seq: u64, accepting: bool) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "cmd": "signCandidateConfig",
+            "owner": owner,
+            "seq": seq,
+            "accepting": accepting,
+        }))
+        .expect("candidate config serializes")
+    }
+
+    fn verify_signature(public_hex: &str, bytes: &[u8], sig_hex: &str) {
+        let public: [u8; 32] = hex::decode(public_hex)
+            .expect("key is hex")
+            .try_into()
+            .expect("key is 32 bytes");
+        let signature: [u8; 64] = hex::decode(sig_hex)
+            .expect("signature is hex")
+            .try_into()
+            .expect("signature is 64 bytes");
+        ed25519_dalek::VerifyingKey::from_bytes(&public)
+            .expect("key is a valid point")
+            .verify_strict(bytes, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("signature verifies over the canonical bytes");
+    }
+
+    #[test]
+    fn golden_candidate_membership_and_message_vectors() {
+        let golden = candidate_golden();
+        let owner_seed = seed_from_hex(golden["owner_seed_hex"].as_str().unwrap());
+        let owner = golden["owner_vk_hex"].as_str().unwrap();
+        let membership = &golden["membership"];
+        let record = &golden["state"]["memberships"][0];
+        let seq = record["seq"].as_u64().unwrap();
+        let members: Vec<String> = record["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let secrets: Vec<RoomSecret> = record["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| RoomSecret {
+                recipient: value["recipient"].as_str().unwrap().into(),
+                blob: value["blob"].as_str().unwrap().into(),
+            })
+            .collect();
+
+        let mut store = store_with_seed(owner_seed);
+        let payload = serde_json::to_vec(&json!({
+            "cmd": "signRoomMembership",
+            "roomId": ROOM_ID,
+            "owner": owner,
+            "tag": "ZCR1",
+            "seq": seq,
+            "members": members,
+            "secrets": secrets,
+        }))
+        .expect("candidate membership request serializes");
+
+        let response = call(&mut store, &payload);
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"], membership["sig_hex"]);
+
+        let bytes = room::membership_signing_bytes("ZCR1", owner, seq, &members, &secrets).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            membership["signing_bytes_hex"].as_str().unwrap()
+        );
+        verify_signature(owner, &bytes, membership["sig_hex"].as_str().unwrap());
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "membershipSeq")),
+            Some(4u64.to_le_bytes().to_vec())
+        );
+
+        let author_seed = seed_from_hex(golden["author_seed_hex"].as_str().unwrap());
+        let message = &golden["message"];
+        let message_record = &golden["state"]["messages"][0];
+        let epoch = message_record["epoch"].as_u64().unwrap();
+        let time = message_record["time"].as_i64().unwrap();
+        let body = message_record["body"].as_str().unwrap();
+        let author = message_record["author"].as_str().unwrap();
+
+        let mut store = store_with_seed(author_seed);
+        assert!(store.set_secret(
+            &room_counter_key(ROOM_ID, "messageSeq"),
+            &7u64.to_le_bytes()
+        ));
+        let payload = room_message_payload(ROOM_ID, owner, "ZCR1", epoch, time, body);
+        let response = call(&mut store, &payload);
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["author"], author);
+        assert_eq!(response["seq"], 7u64);
+        assert_eq!(response["sig"], message["sig_hex"]);
+        assert_eq!(
+            room::message_id(response["sig"].as_str().unwrap()).unwrap(),
+            message["id"].as_str().unwrap()
+        );
+
+        let bytes =
+            room::message_signing_bytes("ZCR1", owner, author, epoch, 7, time, body).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            message["signing_bytes_hex"].as_str().unwrap()
+        );
+        verify_signature(author, &bytes, message["sig_hex"].as_str().unwrap());
+        assert_eq!(
+            store.get_secret(&room_counter_key(ROOM_ID, "messageSeq")),
+            Some(8u64.to_le_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn golden_candidate_request_vector() {
+        let golden = candidate_golden();
+        let requester_seed = seed_from_hex(golden["requester_seed_hex"].as_str().unwrap());
+        let owner = golden["owner_vk_hex"].as_str().unwrap();
+        let request = &golden["request"];
+        let record = &golden["state"]["requests"][0];
+        let requester = record["requester"].as_str().unwrap();
+        let time = record["time"].as_i64().unwrap();
+        let want_cell = record["want_cell"].as_str().unwrap();
+        let note = record["note"].as_str().unwrap();
+
+        let mut store = store_with_seed(requester_seed);
+        let response = call(
+            &mut store,
+            &candidate_request_payload(owner, time, want_cell, note),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["requester"], requester);
+        assert_eq!(response["requestId"], request["id"]);
+        assert_eq!(response["sig"], request["sig_hex"]);
+
+        let bytes = room::request_signing_bytes(owner, requester, time, want_cell, note).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            request["signing_bytes_hex"].as_str().unwrap()
+        );
+        assert_eq!(
+            room::request_id(request["sig_hex"].as_str().unwrap()).unwrap(),
+            request["id"].as_str().unwrap()
+        );
+        verify_signature(requester, &bytes, request["sig_hex"].as_str().unwrap());
+
+        // A request is standalone: no counter is written.
+        assert_eq!(store.secrets.len(), 1, "only the seed is stored");
+    }
+
+    #[test]
+    fn golden_candidate_dismissal_and_config_vectors() {
+        let golden = candidate_golden();
+        let owner_seed = seed_from_hex(golden["owner_seed_hex"].as_str().unwrap());
+        let owner = golden["owner_vk_hex"].as_str().unwrap();
+
+        let dismissal = &golden["dismissal"];
+        let id = dismissal["id"].as_str().unwrap();
+        let mut store = store_with_seed(owner_seed);
+        let response = call(&mut store, &candidate_dismissal_payload(owner, id));
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["id"], id);
+        assert_eq!(response["sig"], dismissal["sig_hex"]);
+
+        let bytes = room::dismissal_signing_bytes(owner, id).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            dismissal["signing_bytes_hex"].as_str().unwrap()
+        );
+        verify_signature(owner, &bytes, dismissal["sig_hex"].as_str().unwrap());
+        assert_eq!(store.secrets.len(), 1, "dismissal writes no counter");
+
+        let config = &golden["config"];
+        let record = &golden["state"]["config"];
+        let seq = record["seq"].as_u64().unwrap();
+        let accepting = record["accepting"].as_bool().unwrap();
+        let response = call(&mut store, &candidate_config_payload(owner, seq, accepting));
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["seq"], seq);
+        assert_eq!(response["sig"], config["sig_hex"]);
+
+        let bytes = room::config_signing_bytes(owner, seq, accepting).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            config["signing_bytes_hex"].as_str().unwrap()
+        );
+        verify_signature(owner, &bytes, config["sig_hex"].as_str().unwrap());
+        assert_eq!(store.secrets.len(), 1, "config writes no counter");
+    }
+
+    #[test]
+    fn candidate_tag_is_accepted_by_room_commands() {
+        let owner_hex = ROOM_OWNER;
+        let mut members = vec![ROOM_AUTHOR.to_string(), ROOM_OWNER.to_string()];
+        members.sort();
+
+        // Membership and message signing accept ZCR1 as well as ZMR1.
+        let mut store = store_with_seed([7u8; 32]);
+        let response = call(
+            &mut store,
+            &room_membership_payload(
+                ROOM_ID,
+                owner_hex,
+                "ZCR1",
+                3,
+                &[ROOM_AUTHOR, ROOM_OWNER],
+                &[(ROOM_AUTHOR, "deadbeef"), (ROOM_OWNER, "0102030405")],
+            ),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["sig"].as_str().unwrap().len(), 128);
+
+        let mut author_store = store_with_seed([11u8; 32]);
+        let response = call(
+            &mut author_store,
+            &room_message_payload(ROOM_ID, owner_hex, "ZCR1", 3, 0, "00"),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(response["author"], ROOM_AUTHOR);
+
+        // Sealing and opening accept ZCR1, and the blob is tag-bound.
+        let mut owner_store = store_with_seed([7u8; 32]);
+        let response = call(
+            &mut owner_store,
+            &seal_payload(ROOM_ID, owner_hex, "ZCR1", P3C_EPOCH, &members),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        let blob = response["secrets"][0]["blob"].as_str().unwrap().to_string();
+
+        let mut member_store = store_with_seed([11u8; 32]);
+        let response = call(
+            &mut member_store,
+            &open_payload(ROOM_ID, owner_hex, "ZCR1", P3C_EPOCH, &blob),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        let response = call(
+            &mut member_store,
+            &open_payload(ROOM_ID, owner_hex, "ZMR1", P3C_EPOCH, &blob),
+        );
+        assert!(!is_ok(&response));
+    }
+
+    #[test]
+    fn candidate_commands_validate_and_do_not_touch_counters() {
+        let owner_seed = [7u8; 32];
+        let owner = ROOM_OWNER;
+        let id = "bab77af391cff0cfe0f4674852b8d40e";
+
+        // A request may target an owner that is not the local key.
+        let mut requester_store = store_with_seed([0x21u8; 32]);
+        let before = requester_store.secrets.clone();
+        let response = call(
+            &mut requester_store,
+            &candidate_request_payload(owner, 1, "", ""),
+        );
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(
+            response["requester"],
+            "884b8857f4eaa1613c61504db34d4beaf346517a0e31de3cddd4d9b4201d9d0b"
+        );
+        assert_eq!(response["requestId"].as_str().unwrap().len(), 32);
+        assert_eq!(requester_store.secrets, before, "request writes no counter");
+
+        // Bad wantCell and note are refused and write nothing.
+        for payload in [
+            candidate_request_payload(owner, 1, "8", ""),
+            candidate_request_payload(owner, 1, &"0".repeat(33), ""),
+            candidate_request_payload(owner, 1, "", "zz"),
+            candidate_request_payload(owner, 1, "", &"00".repeat(257)),
+        ] {
+            let response = call(&mut requester_store, &payload);
+            assert!(!is_ok(&response), "unexpected response: {response}");
+        }
+        assert_eq!(requester_store.secrets, before);
+
+        // Dismissal and config are owner-only.
+        let mut author_store = store_with_seed([11u8; 32]);
+        let before = author_store.secrets.clone();
+        let response = call(&mut author_store, &candidate_dismissal_payload(owner, id));
+        assert!(!is_ok(&response));
+        assert!(
+            error_text(&response).contains("refused candidate dismissal"),
+            "{response}"
+        );
+        let response = call(
+            &mut author_store,
+            &candidate_config_payload(owner, 1, false),
+        );
+        assert!(!is_ok(&response));
+        assert!(
+            error_text(&response).contains("refused candidate config"),
+            "{response}"
+        );
+        assert_eq!(author_store.secrets, before);
+
+        // Bad id and seq are refused before signing.
+        let mut owner_store = store_with_seed(owner_seed);
+        let before = owner_store.secrets.clone();
+        for payload in [
+            candidate_dismissal_payload(owner, "zz"),
+            candidate_dismissal_payload(owner, "bab77af391cff0cfe0f4674852b8d40"),
+            candidate_config_payload(owner, 0, true),
+        ] {
+            let response = call(&mut owner_store, &payload);
+            assert!(!is_ok(&response), "unexpected response: {response}");
+        }
+        assert_eq!(owner_store.secrets, before);
+
+        // The success paths of all three commands write no counters.
+        let response = call(&mut owner_store, &candidate_dismissal_payload(owner, id));
+        assert!(is_ok(&response), "unexpected response: {response}");
+        let response = call(&mut owner_store, &candidate_config_payload(owner, 1, true));
+        assert!(is_ok(&response), "unexpected response: {response}");
+        assert_eq!(owner_store.secrets, before);
     }
 }

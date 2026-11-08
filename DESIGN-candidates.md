@@ -293,6 +293,46 @@ Body and secret bytes stay opaque to the contract. Delegate v13 must accept
 `ZCR1` in `signRoomMembership`, `signRoomMessage`, `sealRoomEpoch` and
 `openRoomSecret`; P4a does not change the delegate.
 
+### 7.1 Delegate v13 commands
+
+The four existing room commands accept either tag (`ZMR1` or `ZCR1`). The
+epoch-secret HKDF info and the sealed blob are bound to the tag supplied by the
+caller, so a members-room blob cannot be opened as a candidate-room blob.
+
+Three new commands sign candidate-only records. They have no room id argument:
+the room is uniquely derived from `tag || owner`, and the tag is fixed to
+`ZCR1` in the signed bytes.
+
+```
+signCandidateRequest { owner, time, wantCell, note }
+  -> { "ok": true, "requester": "<64 hex>", "requestId": "<32 hex>",
+       "sig": "<128 hex>" }
+```
+
+`requester` is always the local delegate key; `owner` is the target zone's
+owner key and may differ from the local key. No counter is read or written: a
+request is a standalone signed record and the candidate may ask several
+targets. `requestId` is `BLAKE3(raw sig)[0..16]` as 32 lowercase hex.
+
+```
+signCandidateDismissal { owner, id }        // owner only
+  -> { "ok": true, "id": "<32 hex>", "sig": "<128 hex>" }
+```
+
+```
+signCandidateConfig { owner, seq, accepting }   // owner only
+  -> { "ok": true, "seq": N, "sig": "<128 hex>" }
+```
+
+The delegate refuses dismissal and config unless its local key equals `owner`.
+Neither uses a counter: dismissals are idempotent, and `config` is monotone in
+the caller-supplied `seq` (merge keeps the greatest). A replayed old config
+signature is harmless by construction.
+
+Validation mirrors the contract: `owner`/`requester` are Ed25519 points,
+`wantCell` is 0–32 characters from `0`–`7`, `note` is lowercase hex of 0–256
+bytes, `id` is 32 lowercase hex, and `seq > 0`.
+
 ## 8. Build and artifacts
 
 - `candidate/` is standalone with its own `Cargo.lock`, like `room/`.

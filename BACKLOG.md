@@ -21,16 +21,16 @@ changes the compiled bytes and re-keys every zone.
 | Live URL | `<any live node>/v1/contract/web/BZBEeX3Gd7aj5V1KCxFPsWkx4T8j8PUBMvJfGPtvyi4k/` |
 | Live publish target | operator's VPS peer, API via the SSH-forwarded `:7509` |
 | Contract | **v6** `CsFEfMWUH6ai22TWHWqExoL7nvgnHCCGz6TfbVMAcRbw` |
-| Delegate | **v12** `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb`, code `zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd` (live on all four nodes) |
+| Delegate | **v13** `CdhuwP79DJ72jXNRooDqFbJtd2X6tY7HioayqRA69wuv`, code `BJQwHJqtpRavCn2xULWuAtsDDUtyu8x74ppb3d7amRKn` (live on all four nodes) |
 | Room contract | **P3a members room** recorded in `published/room/`; code `DWAtsfi3Ed5kGNZiXFxfU1AfjfGe83iAwb1BWHttFBPM`; pinned in the live UI |
 | Candidate contract | **P4a** `candidate/`, not recorded or deployed; raw hash `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh` |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794080195`, bundle `assets/index-DDEsV89s.js` + lazy `assets/picker-DWQuKAZX.js`, identical on `7509`/`7511`/`7512`/`7513` |
-| Tooling | `freenet` 0.2.153 (`310e494`), `fdev` 0.3.315; CI pin `FREENET_VERSION` 0.2.151 |
+| Live site | version `1794135174`, bundle `assets/index-CNI3c8J-.js` + lazy `assets/picker-XEjP6UmC.js`, identical on `7509`/`7511`/`7512`/`7513` |
+| Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-07; site `1794080195`, P3c encrypted rooms, delegate v12; contract unchanged |
+| Last UI publish | 2026-11-08; site `1794135174`, delegate v13; contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -44,7 +44,28 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4a candidate room
+## Where we left off (2026-11-08) — P4 delegate v13
+
+### P4b implemented and deployed (2026-11-08): delegate v13
+
+- `validate_tag` accepts `ZMR1` and `ZCR1`; `sealRoomEpoch` / `openRoomSecret`
+  bind the caller's tag into the HKDF info, so a members-room blob and a
+  candidate-room blob are not interchangeable.
+- New commands: `signCandidateRequest` (requester = local key, owner may
+  differ; returns `requester`, `requestId`, `sig`), `signCandidateDismissal`
+  and `signCandidateConfig` (owner only). No counters: a request is
+  standalone, dismissals are idempotent and `config` is monotone in the
+  caller-supplied `seq`.
+- Canonical candidate bytes match `fixtures/candidate/golden_v1.json`; 104
+  delegate tests. Delegate v13 `CdhuwP79…` / `BJQwHJqt…`; v12 registered in
+  `LEGACY_DELEGATES`; artifacts recorded and `make check-artifacts` passes.
+- **Live:** delegate registered on 7509; site `1794135174` (10 files, 476,616
+  bytes compressed; `index-CNI3c8J-.js` + lazy `picker-XEjP6UmC.js`),
+  identical on all four nodes. Every zone was opened once and migrated
+  v12→v13 with the same owner and address.
+- 7509 still needed the #22 routine (unregister the delegate, reinstall from
+  the app origin, answer `/permission/pending` with index 0) before its wake
+  cycle ran; after one cycle `readiness.mjs` reports all four READY.
 
 ### P4a implemented (2026-11-08): candidates-room contract
 
@@ -89,13 +110,8 @@ Verified 2026-11-08: `make candidate-check` (24 tests), full `make check`
 `make check-artifacts` still proves the zone, delegate and members-room bytes
 unchanged.
 
-**Next is P4b (delegate v13), then P4c (client + `?root=`), then P4d (deploy).**
+**Next is P4c (client + `?root=`), then P4d (deploy).**
 
-- P4b: accept `ZCR1` in `signRoomMembership`, `signRoomMessage`,
-  `sealRoomEpoch` and `openRoomSecret`; add `signCandidateRequest` (any local
-  key), `signCandidateDismissal` and `signCandidateConfig` (owner only).
-  Register v12 in `LEGACY_DELEGATES`, record the delegate, deploy and open each
-  live zone once (the usual re-key).
 - P4c: `?root=` parsing and validation, the shallowest-free-slot match walk,
   the target panel, request write, queue/interview/admit UI, candidate-room
   client with the pinned hash, `published/candidate/` and the artifact gate.
@@ -161,7 +177,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **95 delegate**, **366 UI**, **30 offline e2e** (the region/room
+candidate**, **104 delegate**, **366 UI**, **30 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -368,6 +384,13 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 - **A room is opened with `?room=<owner-id>`**; owner-only membership controls
   and slot-derived mismatch checks apply only when the target is your own zone.
 
+- **A delegate re-key still needs an app-origin install.** `fdev publish`
+  registers the code but arms nothing. On the publishing node the UI may skip
+  the install dialog because the new key is already registered; then the
+  delegate is configured but inert (`lastScan: 0`, no subscriptions). Fix:
+  send `UnregisterDelegate` over a gateway WS opened with the shell
+  `freenetBridge` auth token, open the site, click Install, answer
+  `/permission/pending` with `index: 0`, and wait one 300 s cycle.
 - **Members-room and candidate-room records share signing domains, not tags.**
   `number:v1:room:{membership,message}` is signed with `ZMR1` in the members
   room and `ZCR1` in the candidate room. Never drop the tag from the signed
@@ -522,13 +545,13 @@ node ui/e2e/readiness.mjs    # grants, addresses, scans, subscriptions
 node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
-Expected at the time of writing: contract 123 tests, delegate 95, room 21,
+Expected at the time of writing: contract 123 tests, delegate 104, room 21,
 candidate 24, UI 366, offline e2e 30, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
 VPS `unstate.ca`, APIs through local SSH forwards; four `freenet network`
-services running as `paul` from `~/.local/bin/freenet` (0.2.153).
+services running as `paul` from `~/.local/bin/freenet` (0.2.155).
 
 | Node | Unit | Ports | Role / owner |
 |---|---|---|---|
@@ -540,8 +563,8 @@ services running as `paul` from `~/.local/bin/freenet` (0.2.153).
 A/B/C keep data, config and logs under `/var/lib/freenet-nodeN/`; D uses the
 default `~/.local/share/freenet`.
 
-Last full topology and readiness check **2026-11-07: all four READY** (v11
-delegate, Background granted, scanning, subscribed; 7509 re-armed with the #22
+Last full topology and readiness check **2026-11-08: all four READY** on
+freenet 0.2.155 (v12 delegate, Background granted, scanning, subscribed; 7509 re-armed with the #22
 unregister + app-origin reinstall workaround). Earlier, D was Configured but
 inert. A delegate re-key means each zone must be opened once so the seed
 migrates; v10→v11 was done on 2026-11-07 without changing owners or addresses.
@@ -562,6 +585,29 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4b: delegate v13, deployed**
+- Both room tags accepted; `sealRoomEpoch`/`openRoomSecret` bind the caller's
+  tag into the HKDF info (member and candidate blobs are not interchangeable).
+- `signCandidateRequest` (local key, any owner; returns `requestId`),
+  `signCandidateDismissal` and `signCandidateConfig` (owner only), with no
+  counters; canonical bytes match the candidate golden fixture. 104 tests.
+- v13 `CdhuwP79…` / `BJQwHJqt…`; v12 added to `LEGACY_DELEGATES`; artifacts
+  recorded; `make check-artifacts` passes.
+- Deployed site `1794135174` (10 files); all four nodes opened once and
+  migrated v12→v13 with the same owners and addresses. 7509 needed the #22
+  unregister + app-origin reinstall, then one wake cycle; all four READY.
+
+**2026-11-08 — freenet 0.2.155 upgrade**
+- Local and VPS `freenet`/`fdev` upgraded from 0.2.153/0.3.315 to
+  0.2.155 (`5aa241a`) / 0.3.317 from the signed release tarballs; SHA-256
+  checked against `SHA256SUMS.txt`, `.0.2.153.bak` kept on both hosts.
+- Restarted all four VPS services without interactive sudo: D is
+  `Restart=always` (SIGTERM), A/B/C are `Restart=on-failure` (SIGKILL); systemd
+  restarted each on the new binary.
+- `readiness.mjs`: all four READY (grants, configured delegate, scans,
+  subscriptions); live `index-DDEsV89s.js` identical on all four nodes.
+- CI pin moved to 0.2.155.
 
 **2026-11-08 — P4a: candidates-room contract**
 - New standalone `candidate/` crate (`ZCR1`), state v1 = members-room state +
@@ -733,9 +779,13 @@ Newest first. **Never remove an entry**; the record gate and
 - Unmigratable: `6h9ugwNX5JxgXhadYvvLp8Eu1jPMRe46zXQnAKrRpt57` (unsettled v4),
   `6DJM6gSdfUdHe4ec4mwvAvQHLx9Jonkq8deEoWZ1jfmX` (v1), `3f15GMxe5Bf8hkdDLGaX2ZNuyyjcQv7FL7i5wayfR6Kd`
   (pre-remap build), `7aK2LcB5Uy8V8AYJYF7entSPk4noEcnYaa72EWpJG1ez` (first v1).
-- Delegate **v12** `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb` /
+- Delegate **v13** `CdhuwP79DJ72jXNRooDqFbJtd2X6tY7HioayqRA69wuv` /
+  `BJQwHJqtpRavCn2xULWuAtsDDUtyu8x74ppb3d7amRKn` — candidate-room signing
+  (request/dismiss/config), `ZCR1` tag acceptance and tag-bound sealing;
+  current and live.
+- Delegate v12 `C669MCbRuDCcjQA6eztwag4B8F5LC9JG7ziB6jHadBHb` /
   `zpYamNqQLqZuGyAUb5u84K87cNTCR3Qum2rBUVtRyhd` — encrypted rooms
-  (X25519/HKDF/AES-GCM seal/open); current and live.
+  (X25519/HKDF/AES-GCM seal/open); superseded by v13, registered.
 - Delegate v11 `3CPshayRgEihDtRUzUSr775LnWB5WXj7r8vjj3GMtMrd` /
   `BRXSZhh95SVz7GhDPCa4HWdC4dukqma2ptajyW1GAgCm` — members-room signing;
   superseded by v12, registered.
@@ -755,9 +805,16 @@ Newest first. **Never remove an entry**; the record gate and
 - The four VPS services are system units owned by root but run as `paul`; a
   restart needs interactive sudo (`sudo systemctl restart freenet freenet-node2
   freenet-node3 freenet-node4`).
-- Nodes were upgraded from freenet 0.2.151 to 0.2.153 on 2026-11-01; old
-  binaries are kept as `~/.local/bin/{freenet,fdev}.0.2.151.bak` on both hosts.
-  CI still pins 0.2.151.
+- Nodes were upgraded from freenet 0.2.151 to 0.2.153 on 2026-11-01, then to
+  0.2.155 (`5aa241a`, fdev 0.3.317) on 2026-11-08. Old binaries are kept as
+  `~/.local/bin/{freenet,fdev}.0.2.151.bak` and `.0.2.153.bak` on both hosts.
+  CI pins 0.2.155.
+- `sudo systemctl restart` needs interactive authentication. The units restart
+  themselves: `freenet.service` is `Restart=always`, the three workers are
+  `Restart=on-failure`, so after replacing the binary `kill -TERM` the D PID and
+  `kill -KILL` the worker PIDs. Verify with `readiness.mjs`.
+- 0.2.155 logs `Startup update check skipped: the update-failure counter cannot
+  be read`; binaries are upgraded manually, so ignore it.
 - What a fresh session should do first: run `make check` and
   `make check-artifacts`, then `node ui/e2e/readiness.mjs` against the live
   nodes; if the delegate was re-keyed, open each zone once.
