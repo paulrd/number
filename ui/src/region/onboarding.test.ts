@@ -5,6 +5,7 @@ import {
   findTarget,
   parseRootInput,
   parseRootParam,
+  resolveZoneAddress,
   validateRoot,
   type MatchResult,
   type ZoneReader,
@@ -454,5 +455,127 @@ describe("find target", () => {
       address: "0",
       published: false,
     });
+  });
+});
+
+describe("resolve zone address", () => {
+  it("returns the empty address for the root itself", async () => {
+    expect(await resolveZoneAddress(reader([]), ROOT, ROOT)).toBe("");
+  });
+
+  it("returns one slot digit for a direct child", async () => {
+    const rootSlots = Array<string | null>(8).fill(null);
+    rootSlots[3] = CHILD;
+    const read = reader([
+      [ROOT, zone(ROOT, null, rootSlots)],
+      [CHILD, zone(CHILD, ROOT, Array(8).fill(null))],
+    ]);
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBe("3");
+  });
+
+  it("accumulates one digit per level from the root down", async () => {
+    const rootSlots = Array<string | null>(8).fill(null);
+    rootSlots[2] = PARENT;
+    const parentSlots = Array<string | null>(8).fill(null);
+    parentSlots[5] = CHILD;
+    const read = reader([
+      [ROOT, zone(ROOT, null, rootSlots)],
+      [PARENT, zone(PARENT, ROOT, parentSlots)],
+      [CHILD, zone(CHILD, PARENT, Array(8).fill(null))],
+    ]);
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBe("25");
+  });
+
+  it("stops at the linked root even when it carries a pending parent", async () => {
+    const rootSlots = Array<string | null>(8).fill(null);
+    rootSlots[3] = CHILD;
+    const read = reader([
+      [ROOT, zone(ROOT, PARENT, rootSlots)],
+      [CHILD, zone(CHILD, ROOT, Array(8).fill(null))],
+      [PARENT, zone(PARENT, null, Array(8).fill(null))],
+    ]);
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBe("3");
+  });
+
+  it("returns null when a parent cannot be read", async () => {
+    const read = reader([
+      [CHILD, zone(CHILD, PARENT, Array(8).fill(null))],
+    ]);
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBeNull();
+  });
+
+  it("returns null when the chain ends at a different root", async () => {
+    const otherSlots = Array<string | null>(8).fill(null);
+    otherSlots[4] = CHILD;
+    const read = reader([
+      [CHILD, zone(CHILD, OTHER, Array(8).fill(null))],
+      [OTHER, zone(OTHER, null, otherSlots)],
+    ]);
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBeNull();
+  });
+
+  it("returns null on a cycle", async () => {
+    const childSlots = Array<string | null>(8).fill(null);
+    childSlots[4] = PARENT;
+    const parentSlots = Array<string | null>(8).fill(null);
+    parentSlots[6] = CHILD;
+    const read = reader([
+      [CHILD, zone(CHILD, PARENT, childSlots)],
+      [PARENT, zone(PARENT, CHILD, parentSlots)],
+    ]);
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBeNull();
+  });
+
+  it("returns null beyond 32 hops", async () => {
+    const ids = Array.from({ length: 35 }, (_, index) =>
+      index.toString(16).padStart(2, "0").repeat(32),
+    );
+    const entries: Array<[string, ZoneView]> = [];
+    for (let index = 0; index < 34; index += 1) {
+      const parent = index === 0 ? null : ids[index - 1]!;
+      const slots = Array<string | null>(8).fill(null);
+      slots[0] = ids[index + 1]!;
+      entries.push([ids[index]!, zone(ids[index]!, parent, slots)]);
+    }
+    entries.push([ids[34]!, zone(ids[34]!, ids[33]!, Array(8).fill(null))]);
+
+    expect(await resolveZoneAddress(reader(entries), ids[0]!, ids[34]!)).toBeNull();
+  });
+
+  it("returns null for malformed ids", async () => {
+    const read = reader([]);
+    expect(await resolveZoneAddress(read, ROOT.toUpperCase(), ROOT)).toBeNull();
+    expect(await resolveZoneAddress(read, ROOT, "z".repeat(64))).toBeNull();
+    expect(await resolveZoneAddress(read, "a".repeat(63), "a".repeat(63))).toBeNull();
+    expect(
+      await resolveZoneAddress(read, "A".repeat(64), "A".repeat(64)),
+    ).toBeNull();
+  });
+
+  it("reads every zone in the chain through the reader", async () => {
+    const rootSlots = Array<string | null>(8).fill(null);
+    rootSlots[2] = PARENT;
+    const parentSlots = Array<string | null>(8).fill(null);
+    parentSlots[5] = CHILD;
+    const zones = new Map<string, ZoneView>([
+      [ROOT, zone(ROOT, null, rootSlots)],
+      [PARENT, zone(PARENT, ROOT, parentSlots)],
+      [CHILD, zone(CHILD, PARENT, Array(8).fill(null))],
+    ]);
+    const calls: string[] = [];
+    const read: ZoneReader = async (ownerId) => {
+      calls.push(ownerId);
+      return zones.get(ownerId) ?? null;
+    };
+
+    expect(await resolveZoneAddress(read, ROOT, CHILD)).toBe("25");
+    expect(calls[0]).toBe(CHILD);
+    expect(calls).toContain(PARENT);
+    expect(calls[calls.length - 1]).toBe(ROOT);
   });
 });

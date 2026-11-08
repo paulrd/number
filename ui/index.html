@@ -2483,6 +2483,216 @@
             </section>
 
             <section
+              id="join-status-step"
+              class="onboarding-step onboarding-status-step"
+              aria-labelledby="join-status-title"
+              hidden
+            >
+              <div class="onboarding-place-head">
+                <h3 id="join-status-title" tabindex="-1">
+                  Checking where you stand…
+                </h3>
+                <p id="join-status-lede" class="onboarding-lede"></p>
+              </div>
+
+              <p
+                id="join-status-loading"
+                class="onboarding-loading"
+                role="status"
+                hidden
+              >
+                <span class="onboarding-spinner" aria-hidden="true"></span>
+                <span>Checking where you stand…</span>
+              </p>
+              <p
+                id="join-status-error"
+                class="form-error onboarding-error"
+                role="alert"
+                hidden
+              ></p>
+
+              <div
+                id="join-status-queued"
+                class="onboarding-card"
+                aria-labelledby="join-status-queued-title"
+                hidden
+              >
+                <h4 id="join-status-queued-title">Request sent</h4>
+                <p
+                  id="join-request-success"
+                  class="onboarding-success onboarding-queued-note"
+                  role="status"
+                >
+                  <strong>Request sent.</strong> Waiting for the owner to
+                  interview you.
+                </p>
+                <dl class="onboarding-public onboarding-queued-facts">
+                  <div>
+                    <dt>Your id</dt>
+                    <dd><code id="join-status-self"></code></dd>
+                  </div>
+                  <div>
+                    <dt>Your cell</dt>
+                    <dd id="join-status-cell"></dd>
+                  </div>
+                  <div>
+                    <dt>Your note</dt>
+                    <dd id="join-status-note"></dd>
+                  </div>
+                  <div>
+                    <dt>Request id</dt>
+                    <dd><code id="join-request-id"></code></dd>
+                  </div>
+                </dl>
+                <p class="field-hint">
+                  Keep this link. Checking again reads the same queue; nothing
+                  is pushed to you.
+                </p>
+              </div>
+
+              <div
+                id="join-status-invited"
+                class="onboarding-card onboarding-invited"
+                aria-labelledby="join-status-invited-title"
+                hidden
+              >
+                <div class="onboarding-card-head">
+                  <h4 id="join-status-invited-title">
+                    You're invited to interview.
+                  </h4>
+                  <span id="join-interview-count" class="requests-count">
+                    No messages
+                  </span>
+                </div>
+                <p
+                  id="join-interview-warning"
+                  class="form-error"
+                  role="alert"
+                  hidden
+                ></p>
+                <p id="join-interview-loading" class="onboarding-meta" hidden>
+                  Reading the interview…
+                </p>
+                <p class="onboarding-meta">
+                  Interview with
+                  <code id="join-interview-target" class="onboarding-owner"></code>
+                </p>
+                <p id="join-interview-empty" class="onboarding-help" hidden>
+                  No messages yet. Say hello.
+                </p>
+                <ol
+                  id="join-interview-messages"
+                  class="room-messages interview-messages"
+                  aria-labelledby="join-status-invited-title"
+                ></ol>
+                <form
+                  id="join-interview-composer"
+                  class="room-composer interview-composer"
+                  novalidate
+                >
+                  <label class="field" for="join-interview-input">
+                    <span>Message</span>
+                    <textarea
+                      id="join-interview-input"
+                      rows="3"
+                      maxlength="2000"
+                      aria-describedby="join-interview-hint join-interview-error"
+                    ></textarea>
+                  </label>
+                  <div class="room-composer-foot">
+                    <p
+                      id="join-interview-hint"
+                      class="field-hint"
+                      aria-live="polite"
+                    ></p>
+                    <button
+                      id="join-interview-send"
+                      class="button button--small button--primary"
+                      type="submit"
+                    >
+                      Send
+                    </button>
+                  </div>
+                  <p
+                    id="join-interview-error"
+                    class="form-error"
+                    role="alert"
+                    hidden
+                  ></p>
+                </form>
+              </div>
+
+              <div
+                id="join-status-admitted"
+                class="onboarding-card onboarding-admitted"
+                aria-labelledby="join-status-admitted-title"
+                hidden
+              >
+                <div class="onboarding-card-head">
+                  <h4 id="join-status-admitted-title">You've been admitted</h4>
+                  <span
+                    id="join-admitted-badge"
+                    class="region-badge"
+                    hidden
+                  ></span>
+                </div>
+                <p class="onboarding-assigned-line">
+                  <strong id="join-admitted-slot"></strong>
+                  <span
+                    id="join-admitted-digit"
+                    class="onboarding-meta"
+                  ></span>
+                </p>
+                <p class="onboarding-meta">
+                  Address <code id="join-admitted-address"></code>
+                </p>
+                <p
+                  id="join-admitted-blocked"
+                  class="onboarding-warning"
+                  role="status"
+                  hidden
+                ></p>
+                <p
+                  id="join-admitted-error"
+                  class="form-error"
+                  role="alert"
+                  hidden
+                ></p>
+                <div class="onboarding-status-actions">
+                  <button
+                    id="join-admitted-sign"
+                    class="button button--primary"
+                    type="button"
+                  >
+                    Sign and join
+                  </button>
+                </div>
+                <div
+                  id="join-admitted-done"
+                  class="onboarding-success"
+                  role="status"
+                  tabindex="-1"
+                  hidden
+                >
+                  <p>
+                    <strong>You've joined.</strong>
+                    <span id="join-admitted-done-text"></span>
+                  </p>
+                </div>
+              </div>
+
+              <div id="join-status-actions" class="onboarding-status-actions">
+                <button
+                  id="join-status-check"
+                  class="button button--small button--primary"
+                  type="button"
+                >
+                  Check again
+                </button>
+              </div>
+            </section>
+
+            <section
               id="join-discovery"
               class="onboarding-discovery"
               aria-labelledby="join-place-title"
@@ -2545,6 +2755,15 @@
                 role="status"
                 aria-live="polite"
               ></p>
+              <div class="onboarding-status-actions">
+                <button
+                  id="join-place-check"
+                  class="button button--small button--quiet"
+                  type="button"
+                >
+                  Check again
+                </button>
+              </div>
               <p
                 id="join-place-error"
                 class="form-error onboarding-error"
@@ -2670,20 +2889,6 @@
                         role="alert"
                         hidden
                       ></p>
-                      <div
-                        id="join-request-success"
-                        class="onboarding-success"
-                        role="status"
-                        hidden
-                      >
-                        <p>
-                          <strong>Request sent.</strong> Waiting for the owner to
-                          interview you.
-                        </p>
-                        <p class="onboarding-meta">
-                          Request id <code id="join-request-id"></code>
-                        </p>
-                      </div>
                     </form>
                   </section>
                 </div>

@@ -127,6 +127,54 @@ export async function validateRoot(
 }
 
 /**
+ * Derive the slot address of `targetId` below `rootId` by walking mutual parent
+ * edges from the target upward. The root is `""`, its child is one digit, and so
+ * on. Missing links, a different root, a cycle, or a chain longer than
+ * `MAX_CHAIN` hops return null.
+ */
+export async function resolveZoneAddress(
+  read: ZoneReader,
+  rootId: string,
+  targetId: string,
+): Promise<string | null> {
+  if (!ROOT_ID.test(rootId) || !ROOT_ID.test(targetId)) return null;
+  if (targetId === rootId) return "";
+
+  const digits: number[] = [];
+  const visited = new Set<string>();
+  let currentId = targetId;
+  let hops = 0;
+
+  for (;;) {
+    if (currentId === rootId) return digits.join("");
+    if (visited.has(currentId)) return null;
+    visited.add(currentId);
+
+    const current = await read(currentId);
+    if (current === null) return null;
+
+    const parentId = current.state.parent.userId;
+    if (parentId === null) {
+      return currentId === rootId ? digits.join("") : null;
+    }
+
+    if (hops >= MAX_CHAIN) return null;
+
+    const parent = await read(parentId);
+    if (parent === null) return null;
+
+    const slot = parent.state.slots.findIndex(
+      (entry) => entry.entry?.contact === current.ownerId,
+    );
+    if (slot < 0) return null;
+
+    digits.unshift(slot);
+    currentId = parentId;
+    hops += 1;
+  }
+}
+
+/**
  * Walk from the root along the point's published digits and return the first
  * visited zone with a free slot, together with a ranked assignment preview.
  */

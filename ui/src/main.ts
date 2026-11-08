@@ -28,7 +28,7 @@ import { ContractBuildError, deriveInstanceId } from "./freenet";
 import { createIdentityDialogs } from "./identity-dialog";
 import { OfflineBoard } from "./mock";
 import { createParentDialog, type ParentDialog } from "./parent-dialog";
-import { createOnboardingPanel } from "./onboarding-panel";
+import { createOnboardingPanel, stripJoinParams } from "./onboarding-panel";
 import { createRequestsPanel } from "./requests-panel";
 import { createRoomPanel } from "./room-panel";
 import {
@@ -1360,6 +1360,28 @@ async function openAdmit(candidateId: string): Promise<void> {
     slots: ownSlotOccupancy(),
     onChoose: (slot) => openEditor(slot, candidateId),
   });
+}
+
+/**
+ * Write this zone's parent with the shared busy/repaint treatment. The parent
+ * dialog and the join link's consent step both use it.
+ */
+async function saveOwnParent(userId: string): Promise<void> {
+  if (!view) {
+    throw new Error("Your zone is not loaded yet.");
+  }
+  busy = true;
+  renderBoard();
+  renderControls();
+  renderContactCount();
+  try {
+    await backend.saveParent(userId);
+  } finally {
+    busy = false;
+    renderBoard();
+    renderControls();
+    renderContactCount();
+  }
 }
 
 /**
@@ -3970,11 +3992,11 @@ function tryOpenRootLink(): void {
   joinPanel.open(value);
 }
 
-/** Drop `root` without disturbing the view/history entry, once the flow settles. */
+/** Drop the join link's hints without disturbing the view/history entry. */
 function stripRootParam(): void {
   const url = new URL(window.location.href);
-  if (!url.searchParams.has("root")) return;
-  url.searchParams.delete("root");
+  if (!url.searchParams.has("root") && !url.searchParams.has("target")) return;
+  stripJoinParams(url);
   window.history.replaceState(window.history.state, "", url);
 }
 
@@ -4237,6 +4259,7 @@ const joinPanel = createOnboardingPanel({
   readBoard: (ownerId) => readBoardForView(ownerId),
   transport: backend.candidateTransport,
   selfId: () => ownIdentity?.pubkey ?? null,
+  saveParent: saveOwnParent,
   announce,
   onSettled: stripRootParam,
 });
@@ -4316,23 +4339,7 @@ parentDialog = createParentDialog({
   getOwnOwnerId: () => ownIdentity?.pubkey ?? null,
   getParent: () => ownState?.parent.userId ?? null,
   readBoard: readBoardForView,
-  saveParent: async (userId) => {
-    if (!view) {
-      throw new Error("Your zone is not loaded yet.");
-    }
-    busy = true;
-    renderBoard();
-    renderControls();
-    renderContactCount();
-    try {
-      await backend.saveParent(userId);
-    } finally {
-      busy = false;
-      renderBoard();
-      renderControls();
-      renderContactCount();
-    }
-  },
+  saveParent: saveOwnParent,
   openContacts: () => {
     addingForParent = true;
     addingForPayment = false;

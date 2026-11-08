@@ -44,7 +44,35 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — P4c admission handoff
+## Where we left off (2026-11-08) — P4c complete
+
+### P4c3b2b implemented (2026-11-08): candidate pending surface
+
+- Helpers: `resolveZoneAddress` walks the parent chain (root → target) and
+  `joinCheck` returns admitted → invited → queued → none. 64 helper tests.
+- The join dialog now keeps `?root=` after submitting and adds a
+  `target=<owner>` hint via `replaceState`. Opening the link (or **Check
+  again**) reads that one zone + its candidate room and shows:
+  - **queued** — request summary and no duplicate form;
+  - **invited** — the candidate interview: latest-epoch messages, `ZCR1`
+    decryption, badges, 995/1024 composer, hard membership lock, Check again;
+  - **admitted** — slot/address, published/provisional cell from the dataset,
+    `admissionBlockReason`, and **Sign and join** (the existing parent write);
+  - **none** — falls back to the place step.
+- A fresh link with no target hint does not tree-walk: it goes to the place
+  step. The bounded 32-zone walk is an explicit Check-again fallback only, and
+  skips unreadable descendant rooms. Closing removes both `root` and `target`.
+- UI 549 tests / 34 files; offline e2e 37 (queued → invited/chat → admitted,
+  axe and console clean). `make check-artifacts` green.
+
+**P4c is complete. Next is P4d: the live two-identity onboarding smoke and the
+site republish.**
+
+- P4d: deploy the P4c UI + pinned candidate contract; run the real flow (two
+  identities, no contacts → root link → request → interview/chat → admit →
+  child signs parent), verify readiness and asset hashes, then update the
+  live-state table.
+- After P4d: growth/re-organization remains deferred (`DESIGN-network.md` §4).
 
 ### P4c3b2a implemented (2026-11-08): owner admission handoff
 
@@ -330,7 +358,7 @@ no re-key.
 - CI has a `regions` job; `make check` runs `regions-check`.
 
 Tests: **22 Rust** (4 wire, 6 blob, 7 manifest, 5 tool), **21 room**, **24
-candidate**, **104 delegate**, **519 UI**, **36 offline e2e** (the region/room
+candidate**, **104 delegate**, **549 UI**, **37 offline e2e** (the region/room
 tests are Axe-clean and make no external requests), plus the manual live-room
 smokes.
 
@@ -537,6 +565,11 @@ encrypted room smokes. Next is P4: candidate room + `?root=` onboarding.
 - **A room is opened with `?room=<owner-id>`**; owner-only membership controls
   and slot-derived mismatch checks apply only when the target is your own zone.
 
+- **The join link is `?root=`; a submitted request adds `?target=`.** Status
+  checks read that one zone. Without a target hint the app goes to the place
+  step and does not tree-walk on open; the bounded 32-zone walk is an explicit
+  Check-again fallback. Closing removes both params. Do not reintroduce an
+  automatic tree walk.
 - **Offline admission self-contact.** The offline harness has one identity, so
   the candidate and owner are the same key. `childProblem` permits a self
   contact only when `__OFFLINE_MODE__` is true and the contact came from the
@@ -703,7 +736,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 519, offline e2e 36, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 549, offline e2e 37, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -742,6 +775,15 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — P4c3b2b: candidate pending surface**
+- `resolveZoneAddress` + `joinCheck`; the join link keeps `root` after submit
+  and adds a `target` hint so status checks read one zone.
+- Queued / invited (encrypted interview chat) / admitted (slot, address,
+  region, §3.5 rule, Sign and join via the parent write) / none, with Check
+  again and no push. Fresh links go straight to the place step; the tree walk
+  is an explicit fallback only.
+- UI 549 tests / 34 files, offline e2e 37; P4c complete.
 
 **2026-11-08 — P4c3b2a: owner admission handoff**
 - Interview **Admit** opens the existing assign picker with the requester

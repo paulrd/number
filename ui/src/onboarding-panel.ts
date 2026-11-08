@@ -13,11 +13,44 @@ import type { CandidateTransport } from "./candidate-client";
 import {
   CANDIDATE_MAX_NOTE_BYTES,
   CANDIDATE_MAX_REQUESTS,
+  candidateNoteToText,
   candidateRequestId,
   isAccepting,
+  latestCandidateMembership,
   textToCandidateNote,
+  type CandidateMembershipV1,
+  type CandidateRequestV1,
   type CandidateStateV1,
 } from "./candidate-state";
+import {
+  admissionAddress,
+  admissionBlockReason,
+  joinCheck,
+  type JoinCheck,
+} from "./candidate-interview";
+import {
+  INTERVIEW_TAG,
+  interviewBodyView,
+  interviewComposerLimit,
+  interviewMembershipLock,
+  interviewMessageRows,
+} from "./requests-panel";
+import {
+  formatRoomTime,
+  roomByteLength,
+  roomComposerProblem,
+  roomMessageCountLabel,
+  roomTimeIso,
+  type RoomMessageRow,
+} from "./room-panel";
+import { roomMessageId } from "./room-state";
+import {
+  isEncryptedRoomBody,
+  readRoomBody,
+  type RoomBodyView,
+} from "./room-crypto";
+import type { StateV3 } from "./state";
+import { emptyState } from "./state";
 import {
   BlobReader,
   ContractSource,
@@ -34,6 +67,7 @@ import { buildFixture } from "./region/fixture";
 import {
   findTarget,
   parseRootInput,
+  resolveZoneAddress,
   validateRoot,
   type ChainZone,
   type MatchResult,
@@ -56,8 +90,10 @@ export interface OnboardingPanelDeps {
   transport: CandidateTransport;
   /** The requester's own owner id, or null while the identity is not ready. */
   selfId(): string | null;
+  /** Write the consent signature: this zone's parent is the target zone. */
+  saveParent(targetOwnerId: string): Promise<void>;
   announce(message: string): void;
-  /** Called when the dialog closes or the request is sent: drop `?root=`. */
+  /** Called when the dialog closes or admission completes: drop `?root=`. */
   onSettled(): void;
 }
 
@@ -188,6 +224,96 @@ function byId<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
+/** The three pending states the join link can show; `none` returns to place. */
+export type JoinStatusKind = "queued" | "invited" | "admitted";
+
+/** The sentence announced and shown when a status view opens. */
+export function joinStatusMessage(kind: JoinStatusKind): string {
+  if (kind === "queued") return "Request sent. Waiting for the owner.";
+  if (kind === "invited") return "You're invited to interview.";
+  return "You've been admitted";
+}
+
+/** `Slot 3` with a one-based label. */
+export function admittedSlotLabel(slot: number): string {
+  return `Slot ${slot + 1}`;
+}
+
+/** `zero-based digit 2, cell c` for an admitted slot. */
+export function admittedDigitLabel(slot: number): string {
+  return `zero-based digit ${slot}, cell ${LETTERS[slot] ?? "?"}`;
+}
+
+/**
+ * The assigned address, or null when the target address could not be resolved.
+ * A root address is the empty string, so the address is just the digit.
+ */
+export function admittedAddressText(
+  targetAddress: string | null,
+  slot: number,
+): string | null {
+  return targetAddress === null ? null : admissionAddress(targetAddress, slot);
+}
+
+/** The displayed note for a queued request, including the empty case. */
+export function requestNoteDisplay(noteHex: string): string {
+  try {
+    const text = candidateNoteToText(noteHex);
+    return text.trim() === "" ? "(no note)" : text;
+  } catch {
+    return "Unreadable note";
+  }
+}
+
+/** A chat author label from the candidate's point of view. */
+export function interviewAuthorLabel(
+  author: string,
+  selfId: string | null,
+  targetId: string,
+): string {
+  if (selfId !== null && author === selfId) return "You";
+  if (author === targetId) return "Owner";
+  return `Member ${author.slice(0, 8)}`;
+}
+
+/** Readable interview write failures. */
+export function interviewErrorText(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "connection") {
+    return "The message was not sent. Check your connection and try again.";
+  }
+  if (code === "sign") {
+    return "The message could not be signed. Make sure your identity is ready, then try again.";
+  }
+  if (code === "not-member") {
+    return "You are no longer in the interview. Check again to see where you stand.";
+  }
+  if (code === "crypto") {
+    return "The message could not be encrypted. Check again and try once more.";
+  }
+  return `The message was not sent: ${errorMessage(error)}`;
+}
+
+/** Readable status-check and consent failures. */
+export function statusErrorText(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "connection") {
+    return "Your join status could not be read while offline. Check your connection and try again.";
+  }
+  return `Your join status could not be read: ${errorMessage(error)}`;
+}
+
+export function signJoinErrorText(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "connection") {
+    return "The join could not be signed while offline. Check your connection and try again.";
+  }
+  if (code === "sign") {
+    return "The join could not be signed. Make sure your identity is ready, then try again.";
+  }
+  return `The join was not signed: ${errorMessage(error)}`;
+}
+
 function isOffline(): boolean {
   return import.meta.env.VITE_OFFLINE_MODE === "1";
 }
@@ -205,6 +331,50 @@ function occupancyFor(zone: ChainZone): SlotOccupancy[] {
     free.has(slot) ? "free" : "taken",
   );
 }
+
+/** The zone that holds this requester's request, invite or slot. */
+interface StatusTarget {
+  targetId: string;
+  targetZone: StateV3;
+  candidateState: CandidateStateV1 | null;
+  check: Exclude<JoinCheck, { kind: "none" }>;
+}
+
+/** Everything one pending view needs, after the four reads. */
+interface StatusModel {
+  kind: JoinStatusKind;
+  targetId: string;
+  targetZone: StateV3;
+  candidateState: CandidateStateV1 | null;
+  address: string | null;
+  ownZone: StateV3 | null;
+  request: CandidateRequestV1 | null;
+  slot: number | null;
+  completed: boolean;
+}
+
+/** How many zones a link-only status search may read. */
+const MAX_STATUS_ZONES = 32;
+
+/** The join link's optional target hint: exactly one 64-hex `target` param. */
+export function parseTargetHint(search: string): string | null {
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  const values = new URLSearchParams(query).getAll("target");
+  if (values.length !== 1) return null;
+  const value = values[0]!;
+  return /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+
+/** Remove the join link's root and target hints, keeping other parameters. */
+export function stripJoinParams(url: URL): void {
+  url.searchParams.delete("root");
+  url.searchParams.delete("target");
+}
+
+type StatusSearchResult =
+  | { kind: "found"; target: StatusTarget }
+  | { kind: "none" }
+  | { kind: "error"; error: unknown };
 
 export function createOnboardingPanel(
   deps: OnboardingPanelDeps,
@@ -228,6 +398,7 @@ export function createOnboardingPanel(
   const lngInput = byId<HTMLInputElement>("join-lng");
   const pointButton = byId<HTMLButtonElement>("join-point");
   const placeStatus = byId<HTMLElement>("join-place-status");
+  const placeCheck = byId<HTMLButtonElement>("join-place-check");
   const placeError = byId<HTMLElement>("join-place-error");
   const mapElement = byId<HTMLElement>("join-map");
   const mapFallback = byId<HTMLElement>("join-map-fallback");
@@ -267,9 +438,46 @@ export function createOnboardingPanel(
   const saturatedReason = byId<HTMLElement>("join-saturated-reason");
   const tryAnother = byId<HTMLButtonElement>("join-try-another");
 
+  const statusStep = byId<HTMLElement>("join-status-step");
+  const statusTitle = byId<HTMLHeadingElement>("join-status-title");
+  const statusLede = byId<HTMLElement>("join-status-lede");
+  const statusLoading = byId<HTMLElement>("join-status-loading");
+  const statusError = byId<HTMLElement>("join-status-error");
+  const statusQueued = byId<HTMLElement>("join-status-queued");
+  const statusSelf = byId<HTMLElement>("join-status-self");
+  const statusCell = byId<HTMLElement>("join-status-cell");
+  const statusNote = byId<HTMLElement>("join-status-note");
+
+  const statusInvited = byId<HTMLElement>("join-status-invited");
+  const interviewTarget = byId<HTMLElement>("join-interview-target");
+  const interviewCount = byId<HTMLElement>("join-interview-count");
+  const interviewWarning = byId<HTMLElement>("join-interview-warning");
+  const interviewLoading = byId<HTMLElement>("join-interview-loading");
+  const interviewEmpty = byId<HTMLElement>("join-interview-empty");
+  const interviewMessages = byId<HTMLOListElement>("join-interview-messages");
+  const interviewComposer = byId<HTMLFormElement>("join-interview-composer");
+  const interviewInput = byId<HTMLTextAreaElement>("join-interview-input");
+  const interviewHint = byId<HTMLElement>("join-interview-hint");
+  const interviewSend = byId<HTMLButtonElement>("join-interview-send");
+  const interviewComposerError = byId<HTMLElement>("join-interview-error");
+
+  const statusAdmitted = byId<HTMLElement>("join-status-admitted");
+  const admittedBadge = byId<HTMLElement>("join-admitted-badge");
+  const admittedSlot = byId<HTMLElement>("join-admitted-slot");
+  const admittedDigit = byId<HTMLElement>("join-admitted-digit");
+  const admittedAddressEl = byId<HTMLElement>("join-admitted-address");
+  const admittedBlocked = byId<HTMLElement>("join-admitted-blocked");
+  const admittedError = byId<HTMLElement>("join-admitted-error");
+  const admittedSign = byId<HTMLButtonElement>("join-admitted-sign");
+  const admittedDone = byId<HTMLElement>("join-admitted-done");
+  const admittedDoneText = byId<HTMLElement>("join-admitted-done-text");
+
+  const statusActions = byId<HTMLElement>("join-status-actions");
+  const statusCheck = byId<HTMLButtonElement>("join-status-check");
+
   let rootId: string | null = null;
   let currentMatch: TargetMatch | null = null;
-  let step: "root" | "place" | "result" = "root";
+  let step: "root" | "place" | "status" | "result" = "root";
   let flowGeneration = 0;
   let candidateGeneration = 0;
   let busy = false;
@@ -282,6 +490,15 @@ export function createOnboardingPanel(
     | { kind: "error" };
   let candidateRead: CandidateRead = { kind: "loading" };
 
+  let statusModel: StatusModel | null = null;
+  let statusGeneration = 0;
+  let statusBusy = false;
+  let interviewViews = new globalThis.Map<string, RoomBodyView>();
+  let interviewDecrypting = false;
+  let sending = false;
+  let interviewComposerErrorText: string | null = null;
+  let signingJoin = false;
+
   let datasetPromise: Promise<RegionDataset> | null = null;
   let mapPromise: Promise<boolean> | null = null;
   let lastFocus: HTMLElement | null = null;
@@ -292,10 +509,14 @@ export function createOnboardingPanel(
     return { ownerId: snapshot.ownerId, state: snapshot.state };
   };
 
-  function setStep(next: "root" | "place" | "result", focus: boolean): void {
+  function setStep(
+    next: "root" | "place" | "status" | "result",
+    focus: boolean,
+  ): void {
     step = next;
     rootStep.hidden = next !== "root";
-    discovery.hidden = next === "root";
+    discovery.hidden = next === "root" || next === "status";
+    statusStep.hidden = next !== "status";
     result.hidden = next !== "result";
     if (next !== "result") {
       targetArea.hidden = true;
@@ -308,7 +529,13 @@ export function createOnboardingPanel(
     }
     if (focus) {
       const heading =
-        next === "root" ? rootTitle : next === "place" ? placeTitle : resultTitle;
+        next === "root"
+          ? rootTitle
+          : next === "place"
+            ? placeTitle
+            : next === "status"
+              ? statusTitle
+              : resultTitle;
       heading.focus({ preventScroll: false });
     }
   }
@@ -316,12 +543,20 @@ export function createOnboardingPanel(
   function open(prefill: string | null = null): void {
     flowGeneration += 1;
     candidateGeneration += 1;
+    statusGeneration += 1;
     rootId = null;
     currentMatch = null;
     busy = false;
     pending = false;
     submitted = false;
     candidateRead = { kind: "loading" };
+    statusModel = null;
+    statusBusy = false;
+    interviewViews = new globalThis.Map();
+    interviewDecrypting = false;
+    sending = false;
+    interviewComposerErrorText = null;
+    signingJoin = false;
 
     rootInput.value = prefill ?? "";
     rootInput.removeAttribute("aria-invalid");
@@ -347,6 +582,7 @@ export function createOnboardingPanel(
     targetArea.hidden = true;
     saturatedArea.hidden = true;
     loading.hidden = true;
+    resetStatusView();
     setStep("root", false);
     updateNote();
     refreshRequestState();
@@ -417,10 +653,8 @@ export function createOnboardingPanel(
       rootId = id;
       rootInput.removeAttribute("aria-invalid");
       rootError.hidden = true;
-      await preparePlace();
+      await checkStatus({ focus: true, announceCheck: false });
       if (generation !== flowGeneration) return;
-      setStep("place", true);
-      placeStatus.textContent = "Zone found. Choose where you are.";
     } catch (error) {
       if (generation !== flowGeneration) return;
       showRootError(
@@ -802,6 +1036,707 @@ export function createOnboardingPanel(
     refreshRequestState();
   }
 
+  /**
+   * Find the zone that holds this requester's status. A fresh link has only the
+   * root id, so a bounded breadth-first walk checks the root first, then mutual
+   * children. Each zone is checked with the shared `joinCheck` rule.
+   */
+  async function findStatusTarget(
+    root: string,
+    self: string,
+  ): Promise<StatusSearchResult> {
+    const queue: Array<{ ownerId: string; parentId: string | null }> = [
+      { ownerId: root, parentId: null },
+    ];
+    const seen = new Set<string>();
+
+    while (queue.length > 0 && seen.size < MAX_STATUS_ZONES) {
+      const next = queue.shift()!;
+      if (seen.has(next.ownerId)) continue;
+      seen.add(next.ownerId);
+
+      let view: Awaited<ReturnType<ZoneReader>>;
+      try {
+        view = await reader(next.ownerId);
+      } catch (error) {
+        if (next.ownerId === root) return { kind: "error", error };
+        continue;
+      }
+      if (view === null) {
+        if (next.ownerId === root) {
+          return {
+            kind: "error",
+            error: new Error("the root zone could not be read"),
+          };
+        }
+        continue;
+      }
+
+      // Only mutual parent edges belong to the discovery tree.
+      if (
+        next.parentId !== null &&
+        view.state.parent.userId !== next.parentId
+      ) {
+        continue;
+      }
+
+      let candidateState: CandidateStateV1 | null;
+      try {
+        candidateState = await deps.transport.read(next.ownerId);
+      } catch (error) {
+        // A broken descendant room must not hide a status found elsewhere.
+        if (next.ownerId === root) return { kind: "error", error };
+        continue;
+      }
+
+      const check = joinCheck(candidateState, view.state, self);
+      if (check.kind !== "none") {
+        return {
+          kind: "found",
+          target: {
+            targetId: next.ownerId,
+            targetZone: view.state,
+            candidateState,
+            check,
+          },
+        };
+      }
+
+      for (const slot of view.state.slots) {
+        const contact = slot.entry?.contact;
+        if (contact !== undefined && !seen.has(contact)) {
+          queue.push({ ownerId: contact, parentId: next.ownerId });
+        }
+      }
+    }
+
+    return { kind: "none" };
+  }
+
+  /** Read the one zone named by the URL target hint. */
+  async function readTargetStatus(
+    targetId: string,
+    self: string,
+  ): Promise<StatusSearchResult> {
+    let view: Awaited<ReturnType<ZoneReader>>;
+    try {
+      view = await reader(targetId);
+    } catch (error) {
+      return { kind: "error", error };
+    }
+    if (view === null) {
+      return {
+        kind: "error",
+        error: new Error("the target zone could not be read"),
+      };
+    }
+
+    let candidateState: CandidateStateV1 | null;
+    try {
+      candidateState = await deps.transport.read(targetId);
+    } catch (error) {
+      return { kind: "error", error };
+    }
+
+    const check = joinCheck(candidateState, view.state, self);
+    if (check.kind === "none") return { kind: "none" };
+    return {
+      kind: "found",
+      target: {
+        targetId,
+        targetZone: view.state,
+        candidateState,
+        check,
+      },
+    };
+  }
+
+  /**
+   * Keep the validated root and carry the target so a reload, or Check again,
+   * can read one zone instead of walking the tree. A replaceState keeps the
+   * current history entry and preserves every other parameter.
+   */
+  function setTargetHint(targetId: string): void {
+    const url = new URL(window.location.href);
+    if (rootId !== null) url.searchParams.set("root", rootId);
+    url.searchParams.set("target", targetId);
+    window.history.replaceState(window.history.state, "", url);
+  }
+
+  /**
+   * Read the pending state for the current root and show one of queued,
+   * invited or admitted. A hint reads one zone; Check again may fall back to
+   * the bounded tree walk. `none` falls back to the normal place step.
+   */
+  async function checkStatus(options: {
+    focus: boolean;
+    announceCheck: boolean;
+  }): Promise<void> {
+    const root = rootId;
+    if (root === null) return;
+    const self = deps.selfId();
+    if (self === null) {
+      await preparePlace();
+      setStep("place", true);
+      placeStatus.textContent =
+        "Waiting for your identity before the join status can be checked.";
+      return;
+    }
+
+    const hint = parseTargetHint(window.location.search);
+    if (hint === null && !options.announceCheck) {
+      // A fresh link with no hint: offer the place step without a tree walk.
+      await preparePlace();
+      setStep("place", true);
+      placeStatus.textContent = "Zone found. Choose where you are.";
+      return;
+    }
+
+    const generation = ++statusGeneration;
+    statusBusy = true;
+    statusLoading.hidden = false;
+    statusError.hidden = true;
+    statusError.textContent = "";
+    statusQueued.hidden = true;
+    statusInvited.hidden = true;
+    statusAdmitted.hidden = true;
+    statusActions.hidden = false;
+    statusCheck.hidden = false;
+    statusCheck.disabled = true;
+    statusCheck.textContent = "Checking…";
+    statusTitle.textContent = "Checking where you stand…";
+    statusLede.textContent = "";
+    setStep("status", false);
+    if (options.announceCheck) deps.announce("Checking again…");
+
+    try {
+      const found =
+        hint !== null
+          ? await readTargetStatus(hint, self)
+          : await findStatusTarget(root, self);
+      if (generation !== statusGeneration) return;
+
+      if (found.kind === "error") {
+        const message = statusErrorText(found.error);
+        statusBusy = false;
+        statusCheck.disabled = false;
+        statusCheck.textContent = "Check again";
+        statusLoading.hidden = true;
+        statusError.textContent = message;
+        statusError.hidden = false;
+        setStep("status", true);
+        deps.announce(message);
+        return;
+      }
+
+      if (found.kind === "none") {
+        statusModel = null;
+        statusBusy = false;
+        statusLoading.hidden = true;
+        await preparePlace();
+        if (generation !== statusGeneration) return;
+        setStep("place", true);
+        placeStatus.textContent =
+          "No request is on file yet. Choose where you are to ask.";
+        deps.announce(
+          "No request is on file. Choose where you are to ask.",
+        );
+        return;
+      }
+
+      const address = await resolveZoneAddress(
+        reader,
+        root,
+        found.target.targetId,
+      ).catch(() => null);
+      if (generation !== statusGeneration) return;
+
+      const ownZone =
+        found.target.targetId === self
+          ? found.target.targetZone
+          : ((await reader(self))?.state ?? null);
+      if (generation !== statusGeneration) return;
+
+      const check = found.target.check;
+      statusModel = {
+        kind: check.kind,
+        targetId: found.target.targetId,
+        targetZone: found.target.targetZone,
+        candidateState: found.target.candidateState,
+        address,
+        ownZone,
+        request: check.kind === "queued" ? check.request : null,
+        slot: check.kind === "admitted" ? check.slot : null,
+        completed: false,
+      };
+      interviewViews = new globalThis.Map();
+      interviewComposerErrorText = null;
+      admittedError.hidden = true;
+      admittedError.textContent = "";
+      admittedDone.hidden = true;
+      admittedBadge.hidden = true;
+      statusLoading.hidden = true;
+      statusError.hidden = true;
+      statusBusy = false;
+      statusCheck.disabled = false;
+      statusCheck.textContent = "Check again";
+      showStatus(options.focus || options.announceCheck);
+    } catch (error) {
+      if (generation !== statusGeneration) return;
+      const message = statusErrorText(error);
+      statusBusy = false;
+      statusCheck.disabled = false;
+      statusCheck.textContent = "Check again";
+      statusLoading.hidden = true;
+      statusError.textContent = message;
+      statusError.hidden = false;
+      setStep("status", true);
+      deps.announce(message);
+    }
+  }
+
+  function showStatus(focus: boolean): void {
+    const model = statusModel;
+    if (model === null) return;
+    statusLoading.hidden = true;
+    statusError.hidden = true;
+    setStep("status", false);
+    renderStatus();
+    if (focus) statusTitle.focus({ preventScroll: false });
+    deps.announce(joinStatusMessage(model.kind));
+  }
+
+  function renderStatus(): void {
+    const model = statusModel;
+    if (model === null) return;
+
+    statusQueued.hidden = model.kind !== "queued";
+    statusInvited.hidden = model.kind !== "invited";
+    statusAdmitted.hidden = model.kind !== "admitted";
+    statusActions.hidden = model.kind === "admitted";
+    statusCheck.hidden = model.kind === "admitted";
+    statusCheck.disabled = statusBusy;
+    statusCheck.textContent = statusBusy ? "Checking…" : "Check again";
+
+    if (model.kind === "queued") {
+      statusTitle.textContent = "Request sent";
+      statusLede.textContent =
+        "Request sent. Waiting for the owner to interview you.";
+      renderQueued(model);
+    } else if (model.kind === "invited") {
+      statusTitle.textContent = "You're invited to interview.";
+      statusLede.textContent =
+        "The owner is interviewing you in the candidate room. Check again to read new messages.";
+      renderInterview(model);
+    } else {
+      statusTitle.textContent = "You've been admitted";
+      statusLede.textContent =
+        "The owner wrote a slot for you. Sign and join when you're ready.";
+      renderAdmitted(model);
+    }
+  }
+
+  function renderQueued(model: StatusModel): void {
+    const request = model.request;
+    if (request === null) return;
+    statusSelf.textContent = deps.selfId() ?? "";
+    statusCell.textContent = formatWantCell(request.want_cell);
+    statusNote.textContent = requestNoteDisplay(request.note);
+    requestId.textContent = candidateRequestId(request);
+    requestSuccess.hidden = false;
+  }
+
+  function renderInterview(model: StatusModel): void {
+    const self = deps.selfId();
+    interviewTarget.textContent = shorten(model.targetId);
+    interviewTarget.title = model.targetId;
+    interviewTarget.setAttribute(
+      "aria-label",
+      `Interview owner id ${model.targetId}`,
+    );
+    const latest =
+      model.candidateState === null
+        ? null
+        : latestCandidateMembership(model.candidateState);
+    const rows = interviewMessageRows(
+      model.candidateState?.messages ?? [],
+      latest,
+    );
+    const atEpoch =
+      latest === null
+        ? 0
+        : (model.candidateState?.messages ?? []).filter(
+            (message) => message.epoch === latest.seq,
+          ).length;
+    interviewCount.textContent = roomMessageCountLabel(atEpoch, rows.length);
+
+    const lock = interviewMembershipLock(
+      model.targetId,
+      model.targetZone,
+      self,
+      latest,
+    );
+    interviewWarning.hidden = lock === null;
+    interviewWarning.textContent = lock ?? "";
+
+    interviewMessages.replaceChildren();
+    for (const row of rows) {
+      interviewMessages.append(interviewMessageRow(row, model, self));
+    }
+    interviewEmpty.hidden = rows.length > 0 || statusBusy;
+    interviewLoading.hidden = true;
+
+    const limit = interviewComposerLimit(latest);
+    const text = interviewInput.value;
+    const bytes = roomByteLength(text);
+    const over = bytes > limit;
+    const problem = roomComposerProblem(text, limit);
+    const canSend =
+      latest !== null && lock === null && !statusBusy && !sending;
+
+    interviewInput.disabled = !canSend;
+    interviewInput.setAttribute("aria-invalid", over ? "true" : "false");
+    interviewComposer.classList.toggle("is-over", over);
+    interviewComposer.setAttribute("aria-busy", String(sending));
+    interviewSend.disabled = !canSend || problem !== null;
+    interviewSend.textContent = sending ? "Sending…" : "Send";
+    interviewSend.setAttribute("aria-busy", String(sending));
+    statusCheck.disabled = statusBusy || sending;
+
+    interviewHint.classList.toggle("is-warning", over && canSend);
+    if (latest === null) {
+      interviewHint.textContent =
+        "The interview has no signed membership yet.";
+    } else if (lock !== null) {
+      interviewHint.textContent = lock;
+    } else if (over) {
+      interviewHint.textContent = `Too long: ${bytes} / ${limit} bytes.`;
+    } else {
+      interviewHint.textContent = `${bytes} / ${limit} bytes${
+        (latest.secrets.length ?? 0) > 0 ? " (encrypted)" : ""
+      }. Enter sends; Shift+Enter adds a line.`;
+    }
+
+    interviewComposerError.hidden = interviewComposerErrorText === null;
+    interviewComposerError.textContent = interviewComposerErrorText ?? "";
+
+    if (latest !== null) {
+      const pending = rows.some(
+        (row) =>
+          isEncryptedRoomBody(row.message.body) &&
+          !interviewViews.has(roomMessageId(row.message)),
+      );
+      if (pending) void decryptInterview(model, latest);
+    }
+  }
+
+  function interviewMessageRow(
+    row: RoomMessageRow,
+    model: StatusModel,
+    self: string | null,
+  ): HTMLLIElement {
+    const item = document.createElement("li");
+    item.className = "room-message";
+    item.dataset.history = String(row.history);
+    item.dataset.self = String(
+      self !== null && row.message.author === self,
+    );
+
+    const head = document.createElement("div");
+    head.className = "room-message-head";
+
+    const author = document.createElement("span");
+    author.className = "room-message-author";
+    author.textContent = interviewAuthorLabel(
+      row.message.author,
+      self,
+      model.targetId,
+    );
+    author.title = row.message.author;
+    head.append(author);
+
+    const cached = interviewViews.get(roomMessageId(row.message));
+    const bodyView = interviewBodyView(row.message.body, cached);
+    const encryption = bodyView === null ? "pending" : bodyView.kind;
+    item.dataset.encryption = encryption;
+
+    const badge = document.createElement("span");
+    badge.className = "room-message-badge room-message-encryption";
+    badge.dataset.state = encryption;
+    badge.textContent =
+      encryption === "encrypted"
+        ? "Encrypted"
+        : encryption === "plaintext"
+          ? "Unencrypted"
+          : encryption === "unreadable"
+            ? "Not readable"
+            : "Decrypting";
+    head.append(badge);
+
+    const time = document.createElement("time");
+    time.className = "room-message-time";
+    const iso = roomTimeIso(row.message.time);
+    if (iso !== null) time.dateTime = iso;
+    time.textContent = formatRoomTime(row.message.time);
+    time.title = iso ?? "Unknown time";
+    head.append(time);
+
+    const body = document.createElement("p");
+    body.className = "room-message-body";
+    if (bodyView === null) {
+      body.textContent = "Reading encrypted message…";
+    } else if (bodyView.kind === "unreadable") {
+      body.textContent = "Not readable for this epoch";
+    } else {
+      body.textContent = bodyView.text;
+    }
+
+    item.append(head, body);
+    return item;
+  }
+
+  async function decryptInterview(
+    model: StatusModel,
+    latest: CandidateMembershipV1,
+  ): Promise<void> {
+    if (interviewDecrypting) return;
+    interviewDecrypting = true;
+    const generation = statusGeneration;
+    const rows = interviewMessageRows(
+      model.candidateState?.messages ?? [],
+      latest,
+    );
+    const pending = rows.filter(
+      (row) =>
+        isEncryptedRoomBody(row.message.body) &&
+        !interviewViews.has(roomMessageId(row.message)),
+    );
+    try {
+      let key: Uint8Array | null = null;
+      try {
+        key = await deps.transport.epochKeyFor(model.targetId, latest);
+      } catch {
+        key = null;
+      }
+      if (generation !== statusGeneration || statusModel !== model) return;
+
+      const roomId = deps.transport.roomIdFor(model.targetId);
+      for (const row of pending) {
+        const view = await readRoomBody(
+          key,
+          {
+            roomId,
+            owner: model.targetId,
+            author: row.message.author,
+            epoch: row.message.epoch,
+            tag: INTERVIEW_TAG,
+          },
+          row.message.body,
+        );
+        if (generation !== statusGeneration || statusModel !== model) return;
+        interviewViews.set(roomMessageId(row.message), view);
+      }
+    } finally {
+      interviewDecrypting = false;
+    }
+
+    if (generation === statusGeneration && statusModel === model) {
+      renderStatus();
+    }
+  }
+
+  function renderAdmitted(model: StatusModel): void {
+    const slot = model.slot ?? 0;
+    admittedSlot.textContent = admittedSlotLabel(slot);
+    admittedDigit.textContent = admittedDigitLabel(slot);
+    const address = admittedAddressText(model.address, slot);
+    admittedAddressEl.textContent = address ?? "Unavailable";
+
+    const block = model.completed
+      ? null
+      : model.ownZone === null
+        ? "Your zone could not be read, so the join cannot be signed yet. Check again."
+        : admissionBlockReason(model.ownZone);
+    admittedBlocked.hidden = block === null;
+    admittedBlocked.textContent = block ?? "";
+
+    admittedSign.hidden = model.completed;
+    admittedSign.disabled = model.completed || signingJoin || block !== null;
+    admittedSign.textContent = signingJoin ? "Signing…" : "Sign and join";
+    admittedDone.hidden = !model.completed;
+    admittedDoneText.textContent = model.completed
+      ? ` ${shorten(model.targetId)} is now your zone's parent.`
+      : "";
+
+    admittedBadge.hidden = true;
+    if (!model.completed && model.address !== null) {
+      void loadAdmittedBadge(model);
+    }
+  }
+
+  async function loadAdmittedBadge(model: StatusModel): Promise<void> {
+    const slot = model.slot;
+    const address = model.address;
+    if (slot === null || address === null) return;
+    const generation = statusGeneration;
+    try {
+      const dataset = await ensureDataset();
+      const occupancy: SlotOccupancy[] = model.targetZone.slots.map((entry) =>
+        entry.entry === null ? "free" : "taken",
+      );
+      const region = await resolveZoneRegion(dataset, address, occupancy);
+      if (generation !== statusGeneration || statusModel !== model) return;
+      const child = region.children[slot];
+      if (child === undefined) return;
+      admittedBadge.textContent = child.provisional ? "Provisional" : "Published";
+      admittedBadge.dataset.state = child.provisional
+        ? "provisional"
+        : "published";
+      admittedBadge.hidden = false;
+    } catch {
+      // Without the dataset the address alone is still the record.
+    }
+  }
+
+  async function sendInterviewMessage(): Promise<void> {
+    const model = statusModel;
+    if (model === null || model.kind !== "invited" || sending || statusBusy) {
+      return;
+    }
+    const self = deps.selfId();
+    if (self === null) return;
+    const latest =
+      model.candidateState === null
+        ? null
+        : latestCandidateMembership(model.candidateState);
+    if (latest === null) return;
+
+    const lock = interviewMembershipLock(
+      model.targetId,
+      model.targetZone,
+      self,
+      latest,
+    );
+    if (lock !== null) {
+      interviewComposerErrorText = lock;
+      renderStatus();
+      interviewInput.focus({ preventScroll: true });
+      return;
+    }
+
+    const limit = interviewComposerLimit(latest);
+    const text = interviewInput.value;
+    const problem = roomComposerProblem(text, limit);
+    if (problem !== null) {
+      interviewComposerErrorText = problem;
+      renderStatus();
+      interviewInput.focus({ preventScroll: true });
+      return;
+    }
+
+    const generation = statusGeneration;
+    sending = true;
+    interviewComposerErrorText = null;
+    renderStatus();
+
+    try {
+      const next = await deps.transport.sendMessage(
+        model.targetId,
+        new TextEncoder().encode(text),
+      );
+      if (generation !== statusGeneration || statusModel !== model) return;
+      model.candidateState = next;
+      interviewInput.value = "";
+      deps.announce("Message sent.");
+    } catch (error) {
+      if (generation !== statusGeneration || statusModel !== model) return;
+      interviewComposerErrorText = interviewErrorText(error);
+      deps.announce(interviewComposerErrorText);
+    } finally {
+      if (generation === statusGeneration && statusModel === model) {
+        sending = false;
+        renderStatus();
+        if (statusModel?.kind === "invited") {
+          interviewInput.focus({ preventScroll: true });
+        }
+      } else {
+        sending = false;
+      }
+    }
+  }
+
+  async function signJoin(): Promise<void> {
+    const model = statusModel;
+    if (model === null || model.kind !== "admitted" || signingJoin) return;
+    const block =
+      model.ownZone === null
+        ? "Your zone could not be read, so the join cannot be signed yet."
+        : admissionBlockReason(model.ownZone);
+    if (block !== null) return;
+
+    const generation = statusGeneration;
+    signingJoin = true;
+    admittedError.hidden = true;
+    admittedError.textContent = "";
+    renderStatus();
+
+    try {
+      await deps.saveParent(model.targetId);
+      if (generation !== statusGeneration || statusModel !== model) return;
+      model.completed = true;
+      deps.onSettled();
+      deps.announce("Joined the zone.");
+    } catch (error) {
+      if (generation !== statusGeneration || statusModel !== model) return;
+      admittedError.textContent = signJoinErrorText(error);
+      admittedError.hidden = false;
+      deps.announce(admittedError.textContent);
+    } finally {
+      if (generation === statusGeneration && statusModel === model) {
+        signingJoin = false;
+        renderStatus();
+        if (model.completed) {
+          admittedDone.focus({ preventScroll: true });
+        }
+      } else {
+        signingJoin = false;
+      }
+    }
+  }
+
+  function resetStatusView(): void {
+    statusModel = null;
+    statusBusy = false;
+    statusLoading.hidden = true;
+    statusError.hidden = true;
+    statusError.textContent = "";
+    statusTitle.textContent = "Checking where you stand…";
+    statusLede.textContent = "";
+    statusQueued.hidden = true;
+    statusInvited.hidden = true;
+    statusAdmitted.hidden = true;
+    statusActions.hidden = true;
+    interviewMessages.replaceChildren();
+    interviewWarning.hidden = true;
+    interviewWarning.textContent = "";
+    interviewLoading.hidden = true;
+    interviewEmpty.hidden = true;
+    interviewComposerError.hidden = true;
+    interviewComposerError.textContent = "";
+    admittedBlocked.hidden = true;
+    admittedBlocked.textContent = "";
+    admittedError.hidden = true;
+    admittedError.textContent = "";
+    admittedDone.hidden = true;
+    admittedBadge.hidden = true;
+    interviewInput.value = "";
+    interviewComposerErrorText = null;
+    interviewViews = new globalThis.Map();
+    interviewDecrypting = false;
+    sending = false;
+    signingJoin = false;
+  }
+
   function blockedReason(): string | null {
     if (currentMatch === null) return "Choose a point first.";
     if (deps.selfId() === null) {
@@ -870,14 +1805,54 @@ export function createOnboardingPanel(
       });
       if (generation !== flowGeneration) return;
       submitted = true;
+      setTargetHint(target.ownerId);
       const id =
         requestIdFor(state, requester, match.wantCell, note) ?? "(not reported)";
       requestId.textContent = id;
-      requestSuccess.hidden = false;
-      deps.onSettled();
-      deps.announce(
-        "Join request sent. Waiting for the owner to interview you.",
-      );
+
+      const targetZone = (await reader(target.ownerId))?.state ?? null;
+      if (generation !== flowGeneration) return;
+      const ownZone =
+        target.ownerId === requester
+          ? targetZone
+          : ((await reader(requester))?.state ?? null);
+      if (generation !== flowGeneration) return;
+      const address = await resolveZoneAddress(
+        reader,
+        rootId!,
+        target.ownerId,
+      ).catch(() => null);
+      if (generation !== flowGeneration) return;
+
+      const requestRecord =
+        state.requests.find(
+          (request) => candidateRequestId(request) === id,
+        ) ??
+        state.requests[state.requests.length - 1] ??
+        null;
+      const check =
+        targetZone === null
+          ? requestRecord === null
+            ? ({ kind: "none" } as const)
+            : ({ kind: "queued", request: requestRecord } as const)
+          : joinCheck(state, targetZone, requester);
+      if (check.kind === "none") {
+        throw new Error("the request was written but not found in the queue");
+      }
+      statusModel = {
+        kind: check.kind,
+        targetId: target.ownerId,
+        targetZone: targetZone ?? emptyState(),
+        candidateState: state,
+        address,
+        ownZone,
+        request: check.kind === "queued" ? check.request : null,
+        slot: check.kind === "admitted" ? check.slot : null,
+        completed: false,
+      };
+      interviewViews = new globalThis.Map();
+      interviewComposerErrorText = null;
+      showStatus(true);
     } catch (error) {
       if (generation !== flowGeneration) return;
       requestError.textContent = requestErrorText(error);
@@ -978,12 +1953,14 @@ export function createOnboardingPanel(
   function resetToRoot(): void {
     flowGeneration += 1;
     candidateGeneration += 1;
+    statusGeneration += 1;
     rootId = null;
     currentMatch = null;
     busy = false;
     pending = false;
     submitted = false;
     candidateRead = { kind: "loading" };
+    resetStatusView();
     rootStep.hidden = false;
     discovery.hidden = true;
     loading.hidden = true;
@@ -1055,6 +2032,47 @@ export function createOnboardingPanel(
     void submitRequest();
   });
   noteInput.addEventListener("input", updateNote);
+
+  statusCheck.addEventListener("click", () => {
+    if (statusBusy) return;
+    void checkStatus({ focus: true, announceCheck: true });
+  });
+
+  // The explicit fallback when the URL carries no target hint.
+  placeCheck.addEventListener("click", () => {
+    if (busy || statusBusy) return;
+    void checkStatus({ focus: true, announceCheck: true });
+  });
+
+  interviewComposer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendInterviewMessage();
+  });
+  interviewInput.addEventListener("keydown", (event) => {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.isComposing &&
+      !interviewInput.disabled
+    ) {
+      event.preventDefault();
+      interviewComposer.requestSubmit();
+    }
+  });
+  interviewInput.addEventListener("input", () => {
+    if (interviewComposerErrorText !== null) {
+      interviewComposerErrorText = null;
+      interviewComposerError.hidden = true;
+      interviewComposerError.textContent = "";
+    }
+    renderStatus();
+  });
+
+  admittedSign.addEventListener("click", () => {
+    if (admittedSign.disabled) return;
+    void signJoin();
+  });
+
   rootInput.addEventListener("input", () => {
     rootInput.removeAttribute("aria-invalid");
     rootError.hidden = true;
@@ -1067,6 +2085,9 @@ export function createOnboardingPanel(
   dialog.addEventListener("close", () => {
     flowGeneration += 1;
     candidateGeneration += 1;
+    statusGeneration += 1;
+    statusBusy = false;
+    interviewDecrypting = false;
     pending = false;
     deps.onSettled();
     const target = lastFocus;

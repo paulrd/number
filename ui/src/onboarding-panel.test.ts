@@ -6,13 +6,24 @@ import {
   type CandidateStateV1,
 } from "./candidate-state";
 import {
+  admittedAddressText,
+  admittedDigitLabel,
+  admittedSlotLabel,
   candidateStatusLine,
   chainAddress,
   formatWantCell,
+  interviewAuthorLabel,
+  interviewErrorText,
+  joinStatusMessage,
   noteByteLabel,
+  parseTargetHint,
   requestErrorText,
   requestIdFor,
+  requestNoteDisplay,
   rootErrorText,
+  signJoinErrorText,
+  statusErrorText,
+  stripJoinParams,
 } from "./onboarding-panel";
 
 function request(overrides: Partial<CandidateRequestV1> = {}): CandidateRequestV1 {
@@ -145,5 +156,115 @@ describe("requestIdFor", () => {
 
   it("returns null when the requester has no entry", () => {
     expect(requestIdFor(state(), "d".repeat(64), "01", "hello")).toBeNull();
+  });
+});
+
+describe("joinStatusMessage", () => {
+  it("names the three pending states", () => {
+    expect(joinStatusMessage("queued")).toBe(
+      "Request sent. Waiting for the owner.",
+    );
+    expect(joinStatusMessage("invited")).toBe("You're invited to interview.");
+    expect(joinStatusMessage("admitted")).toBe("You've been admitted");
+  });
+});
+
+describe("admitted labels and address", () => {
+  it("uses a one-based slot and a zero-based digit", () => {
+    expect(admittedSlotLabel(0)).toBe("Slot 1");
+    expect(admittedSlotLabel(7)).toBe("Slot 8");
+    expect(admittedDigitLabel(2)).toBe("zero-based digit 2, cell c");
+  });
+
+  it("appends the root or nested target address", () => {
+    expect(admittedAddressText("", 0)).toBe("0");
+    expect(admittedAddressText("02", 5)).toBe("025");
+  });
+
+  it("keeps the address unknown rather than inventing one", () => {
+    expect(admittedAddressText(null, 3)).toBeNull();
+  });
+});
+
+describe("requestNoteDisplay", () => {
+  it("decodes the note and spells the empty case", () => {
+    expect(requestNoteDisplay(textToCandidateNote("hello"))).toBe("hello");
+    expect(requestNoteDisplay(textToCandidateNote("  "))).toBe("(no note)");
+  });
+
+  it("never throws on malformed hex", () => {
+    expect(requestNoteDisplay("zz")).toBe("Unreadable note");
+  });
+});
+
+describe("interviewAuthorLabel", () => {
+  const self = "a".repeat(64);
+  const target = "b".repeat(64);
+
+  it("names the two sides of the interview", () => {
+    expect(interviewAuthorLabel(self, self, target)).toBe("You");
+    expect(interviewAuthorLabel(target, self, target)).toBe("Owner");
+    expect(interviewAuthorLabel("c".repeat(64), self, target)).toBe(
+      "Member cccccccc",
+    );
+  });
+});
+
+describe("pending errors", () => {
+  it("maps interview write failures", () => {
+    expect(interviewErrorText({ code: "connection" })).toContain(
+      "Check your connection",
+    );
+    expect(interviewErrorText({ code: "not-member" })).toContain(
+      "no longer in the interview",
+    );
+    expect(interviewErrorText(new Error("boom"))).toContain("boom");
+  });
+
+  it("maps status reads and the consent signature", () => {
+    expect(statusErrorText({ code: "connection" })).toContain("offline");
+    expect(statusErrorText(new Error("boom"))).toContain("boom");
+    expect(signJoinErrorText({ code: "connection" })).toContain("offline");
+    expect(signJoinErrorText({ code: "sign" })).toContain(
+      "identity is ready",
+    );
+  });
+});
+
+describe("parseTargetHint", () => {
+  const target = "e".repeat(64);
+
+  it("reads exactly one valid target parameter", () => {
+    expect(parseTargetHint(`?root=${"a".repeat(64)}&target=${target}`)).toBe(
+      target,
+    );
+    expect(parseTargetHint(`target=${target}`)).toBe(target);
+  });
+
+  it("ignores a missing, duplicate or malformed target", () => {
+    expect(parseTargetHint(`?root=${"a".repeat(64)}`)).toBeNull();
+    expect(parseTargetHint(`?target=${target}&target=${target}`)).toBeNull();
+    expect(parseTargetHint(`?target=${"E".repeat(64)}`)).toBeNull();
+    expect(parseTargetHint("?target=abc")).toBeNull();
+  });
+});
+
+describe("stripJoinParams", () => {
+  it("removes root and target without disturbing other parameters", () => {
+    const url = new URL(
+      `https://example.test/app?view=advanced&root=${"a".repeat(64)}` +
+        `&target=${"b".repeat(64)}#top`,
+    );
+    stripJoinParams(url);
+    expect(url.searchParams.has("root")).toBe(false);
+    expect(url.searchParams.has("target")).toBe(false);
+    expect(url.searchParams.get("view")).toBe("advanced");
+    expect(url.hash).toBe("#top");
+  });
+
+  it("is safe when the hints are absent", () => {
+    const url = new URL("https://example.test/app?view=simple");
+    stripJoinParams(url);
+    expect(url.toString()).toBe("https://example.test/app?view=simple");
   });
 });

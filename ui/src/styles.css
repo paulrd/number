@@ -7084,6 +7084,47 @@ body:has(#join-dialog[open]) {
   line-height: 1.45;
 }
 
+.onboarding-status-step {
+  gap: 0.85rem;
+}
+
+.onboarding-status-step > .onboarding-place-head h3:focus,
+#join-admitted-done:focus {
+  outline: none;
+}
+
+.onboarding-queued-note {
+  display: block;
+  margin: 0;
+}
+
+.onboarding-queued-facts {
+  margin: 0;
+}
+
+.onboarding-invited {
+  gap: 0.55rem;
+}
+
+.onboarding-invited .interview-messages {
+  max-height: 18rem;
+}
+
+.onboarding-admitted {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background:
+    linear-gradient(135deg, var(--accent-soft), transparent 65%),
+    var(--surface);
+}
+
+.onboarding-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 .onboarding-loading {
   display: flex;
   align-items: center;

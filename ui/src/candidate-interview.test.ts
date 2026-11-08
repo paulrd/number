@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type {
-  CandidateMembershipV1,
-  CandidateStateV1,
+import {
+  candidateRequestId,
+  type CandidateMembershipV1,
+  type CandidateRequestV1,
+  type CandidateStateV1,
 } from "./candidate-state";
 import {
   admissionAddress,
@@ -11,6 +13,7 @@ import {
   interviewMembers,
   interviewMembersAfterAdmit,
   interviewState,
+  joinCheck,
   zoneChildren,
 } from "./candidate-interview";
 import { emptyState, type Entry, type Slot, type StateV3 } from "./state";
@@ -66,6 +69,14 @@ function candidateState(
     dismissals: [],
     config: null,
   };
+}
+
+function request(
+  requester: string,
+  time: number,
+  sig = SIG,
+): CandidateRequestV1 {
+  return { requester, want_cell: "", time, note: "", sig };
 }
 
 /** Eight distinct child keys, ascending: 0x10 … 0x17. */
@@ -330,5 +341,87 @@ describe("admissionBlockReason", () => {
     expect(
       admissionBlockReason(stateWith({ 3: occupied(CHILD_B) }, CHILD_A)),
     ).toBe(ADMISSION_REFUSED);
+  });
+});
+
+describe("joinCheck", () => {
+  it("returns none without a candidate state or target slot", () => {
+    expect(joinCheck(null, emptyState(), CANDIDATE)).toEqual({ kind: "none" });
+    expect(joinCheck(candidateState(), emptyState(), CANDIDATE)).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("returns queued when the requester's request is in the queue", () => {
+    const state = candidateState();
+    const queued = request(CANDIDATE, 100);
+    state.requests = [queued];
+
+    expect(joinCheck(state, emptyState(), CANDIDATE)).toEqual({
+      kind: "queued",
+      request: queued,
+    });
+  });
+
+  it("returns invited when the requester is in the latest membership", () => {
+    const state = candidateState(membership([OWNER, CANDIDATE]));
+
+    expect(joinCheck(state, emptyState(), CANDIDATE)).toEqual({
+      kind: "invited",
+    });
+  });
+
+  it("prefers an admission slot over an invite and a request", () => {
+    const state = candidateState(membership([OWNER, CANDIDATE]));
+    state.requests = [request(CANDIDATE, 100)];
+    const zone = stateWith({ 5: occupied(CANDIDATE) });
+
+    expect(joinCheck(state, zone, CANDIDATE)).toEqual({
+      kind: "admitted",
+      slot: 5,
+    });
+  });
+
+  it("chooses the newest queued request by time", () => {
+    const state = candidateState();
+    const older = request(CANDIDATE, 100);
+    const newer = request(CANDIDATE, 200, "d".repeat(128));
+    state.requests = [newer, older];
+
+    expect(joinCheck(state, emptyState(), CANDIDATE)).toEqual({
+      kind: "queued",
+      request: newer,
+    });
+  });
+
+  it("breaks equal-time ties by request id", () => {
+    const state = candidateState();
+    const first = request(CANDIDATE, 100, "a".repeat(128));
+    const second = request(CANDIDATE, 100, "b".repeat(128));
+    state.requests = [first, second];
+    const expected =
+      candidateRequestId(first) > candidateRequestId(second) ? first : second;
+
+    expect(joinCheck(state, emptyState(), CANDIDATE)).toEqual({
+      kind: "queued",
+      request: expected,
+    });
+  });
+
+  it("matches the requester id exactly", () => {
+    const state = candidateState();
+    const requester = "ab".repeat(32);
+    state.requests = [request(requester, 100)];
+
+    expect(joinCheck(state, emptyState(), requester.toUpperCase())).toEqual({
+      kind: "none",
+    });
+    expect(joinCheck(state, emptyState(), `${requester} `)).toEqual({
+      kind: "none",
+    });
+    expect(joinCheck(state, emptyState(), requester)).toEqual({
+      kind: "queued",
+      request: state.requests[0],
+    });
   });
 });

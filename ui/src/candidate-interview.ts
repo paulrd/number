@@ -9,7 +9,9 @@
 
 import {
   CANDIDATE_MAX_MEMBERS,
+  candidateRequestId,
   latestCandidateMembership,
+  type CandidateRequestV1,
   type CandidateStateV1,
 } from "./candidate-state";
 import { SLOT_COUNT, USER_ID_HEX_LEN, type StateV3 } from "./state";
@@ -162,4 +164,49 @@ export function admissionBlockReason(ownState: StateV3): string | null {
   const hasChild = ownState.slots.some((slot) => slot.entry !== null);
   if (!hasParent && !hasChild) return null;
   return "Your zone already has a parent or children. Admission would move a subtree, which is not supported yet.";
+}
+
+/** What the candidate's pending surface should show for a join link. */
+export type JoinCheck =
+  | { kind: "none" }
+  | { kind: "queued"; request: CandidateRequestV1 }
+  | { kind: "invited" }
+  | { kind: "admitted"; slot: number };
+
+/**
+ * Join-link state, in precedence order: an admission slot, the latest candidate
+ * membership, the requester's queued request, then nothing. The newest request
+ * by `(time, id)` wins when several are queued.
+ */
+export function joinCheck(
+  candidateState: CandidateStateV1 | null,
+  targetZone: StateV3,
+  requesterId: string,
+): JoinCheck {
+  const slot = admissionSlot(targetZone, requesterId);
+  if (slot !== null) return { kind: "admitted", slot };
+
+  if (candidateState !== null) {
+    const membership = latestCandidateMembership(candidateState);
+    if (membership !== null && membership.members.includes(requesterId)) {
+      return { kind: "invited" };
+    }
+
+    let newest: CandidateRequestV1 | null = null;
+    for (const request of candidateState.requests) {
+      if (request.requester !== requesterId) continue;
+      if (newest === null || comparesAfter(request, newest)) newest = request;
+    }
+    if (newest !== null) return { kind: "queued", request: newest };
+  }
+
+  return { kind: "none" };
+}
+
+function comparesAfter(
+  a: CandidateRequestV1,
+  b: CandidateRequestV1,
+): boolean {
+  if (a.time !== b.time) return a.time > b.time;
+  return candidateRequestId(a) > candidateRequestId(b);
 }

@@ -38,8 +38,28 @@ async function openSimple(page: Page): Promise<void> {
   await expect(page.locator("#advanced-view")).toBeHidden();
 }
 
-/**
- * Add a child through the region assignment picker, choosing the lowest free
+/** Reopen the join link in the same page, without losing in-memory state. */
+async function reopenJoinRoot(
+  page: Page,
+  ownerId: string,
+  targetId?: string,
+): Promise<void> {
+  await page.evaluate(
+    ({ id, target }) => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("root", id);
+      if (target === null) url.searchParams.delete("target");
+      else url.searchParams.set("target", target);
+      window.history.pushState(window.history.state, "", url);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    },
+    { id: ownerId, target: targetId ?? null },
+  );
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await expect(page.locator("#join-root-input")).toHaveValue(ownerId);
+}
+
+/** Add a child through the region assignment picker, choosing the lowest free
  * slot (the same slot the old direct path opened), then return to the editor.
  */
 async function openAssignEditor(page: Page): Promise<void> {
@@ -1779,6 +1799,189 @@ test("joins a zone from Advanced with a root id, a point, and a signed request",
     `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
   ).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test("shows the candidate queued, invited, and admitted from the join link", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto("/");
+  await openAdvanced(page);
+
+  await expect(page.locator("#identity-short")).toHaveAttribute(
+    "title",
+    /^[0-9a-f]{64}$/,
+  );
+  const ownerId = await page.locator("#identity-short").getAttribute("title");
+  expect(ownerId).toMatch(/^[0-9a-f]{64}$/);
+
+  // Open from the link: the parameter must survive the request.
+  await page.goto(`/?root=${ownerId}`);
+  await expect(page.locator("#join-dialog")).toBeVisible();
+  await expect(page.locator("#join-place-title")).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("root")).toBe(ownerId!);
+
+  await page.locator("#join-lat").fill("10");
+  await page.locator("#join-lng").fill("10");
+  await page.locator("#join-point").click();
+  await expect(page.locator("#join-result")).toBeVisible();
+  await page.locator("#join-note").fill("Candidate pending check");
+  await page.locator("#join-submit").click();
+
+  // Queued: the link stays, and the form is replaced by the status view.
+  await expect(page.locator("#join-status-step")).toBeVisible();
+  await expect(page.locator("#join-status-title")).toHaveText("Request sent");
+  await expect(page.locator("#join-status-title")).toBeFocused();
+  await expect(page.locator("#join-request-success")).toContainText(
+    "Request sent. Waiting for the owner",
+  );
+  await expect(page.locator("#join-status-cell")).toHaveText("cell 01");
+  await expect(page.locator("#join-status-note")).toHaveText(
+    "Candidate pending check",
+  );
+  await expect(page.locator("#join-request-id")).not.toHaveText("");
+  await expect(page.locator("#join-status-invited")).toBeHidden();
+  const queuedUrl = new URL(page.url());
+  expect(queuedUrl.searchParams.get("root")).toBe(ownerId!);
+  expect(queuedUrl.searchParams.get("target")).toBe(ownerId);
+  const targetId = queuedUrl.searchParams.get("target")!;
+  expect(targetId).toMatch(/^[0-9a-f]{64}$/);
+
+  const queuedAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    queuedAccessibility.violations,
+    `axe violations:\n${JSON.stringify(queuedAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  // Only an explicit close drops both hints.
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+  await expect
+    .poll(() => {
+      const url = new URL(page.url());
+      return url.searchParams.has("root") || url.searchParams.has("target");
+    })
+    .toBe(false);
+
+  // Reopening with both hints reads just the one target zone and lands on the
+  // same queued view.
+  await reopenJoinRoot(page, ownerId!, targetId);
+  await expect(page.locator("#join-status-title")).toHaveText("Request sent");
+  await expect(page.locator("#join-request-id")).not.toHaveText("");
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+
+  // The owner invites from the request queue.
+  await openAdvanced(page);
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await page.locator("#requests-list .requests-row .requests-interview").click();
+  await expect(page.locator("#interview-section")).toBeVisible();
+  await page.locator("#requests-done").click();
+  await expect(page.locator("#requests-dialog")).toBeHidden();
+
+  // The link now shows the interview; send one candidate message.
+  await reopenJoinRoot(page, ownerId!, targetId);
+  await expect(page.locator("#join-status-step")).toBeVisible();
+  await expect(page.locator("#join-status-title")).toHaveText(
+    "You're invited to interview.",
+  );
+  await expect(page.locator("#join-status-invited")).toBeVisible();
+  await expect(page.locator("#join-interview-target")).toHaveAttribute(
+    "title",
+    ownerId!,
+  );
+  await expect(page.locator("#join-interview-input")).toBeEnabled();
+  await page.locator("#join-interview-input").fill("Hello from the candidate");
+  await page.locator("#join-interview-send").click();
+  const sent = page.locator("#join-interview-messages .room-message");
+  await expect(sent).toHaveCount(1);
+  await expect(sent.locator(".room-message-body")).toHaveText(
+    "Hello from the candidate",
+  );
+  await expect(sent.locator(".room-message-encryption")).toHaveText(
+    "Unencrypted",
+  );
+
+  const invitedAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    invitedAccessibility.violations,
+    `axe violations:\n${JSON.stringify(invitedAccessibility.violations, null, 2)}`,
+  ).toEqual([]);
+
+  // Check again re-reads and keeps the same interview.
+  await page.locator("#join-status-check").click();
+  await expect(page.locator("#join-status-title")).toHaveText(
+    "You're invited to interview.",
+  );
+  await expect(page.locator("#join-interview-messages .room-message")).toHaveCount(
+    1,
+  );
+
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+
+  // The owner writes the admission slot through the region designation.
+  await openAdvanced(page);
+  await page.locator("#requests-open").click();
+  await expect(page.locator("#requests-dialog")).toBeVisible();
+  await expect(page.locator("#interview-section")).toBeVisible();
+  await page.locator("#interview-admit").click();
+  await expect(page.locator("#region-dialog")).toBeVisible();
+  await expect(page.locator("#region-assign-panel")).toBeVisible();
+  for (let index = 0; index < 8; index += 1) {
+    const input = page.locator(
+      `#region-assign-cards .region-assign-card[data-slot="${index}"] input`,
+    );
+    if ((await input.count()) > 0 && (await input.isEnabled())) {
+      await input.check();
+      break;
+    }
+  }
+  await expect(page.locator("#region-assign-choose")).toBeEnabled();
+  await page.locator("#region-assign-choose").click();
+  await expect(page.locator("#region-dialog")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#contact-select")).toHaveValue(ownerId!);
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+  await page.locator("#requests-done").click();
+  await expect(page.locator("#requests-dialog")).toBeHidden();
+
+  // Admitted: the slot and address are shown, with the §3.5 refusal for a
+  // zone that would move a subtree (the offline self-admit).
+  await reopenJoinRoot(page, ownerId!, targetId);
+  await expect(page.locator("#join-status-title")).toHaveText(
+    "You've been admitted",
+  );
+  await expect(page.locator("#join-status-admitted")).toBeVisible();
+  await expect(page.locator("#join-admitted-slot")).toHaveText("Slot 1");
+  await expect(page.locator("#join-admitted-digit")).toContainText(
+    "zero-based digit 0",
+  );
+  await expect(page.locator("#join-admitted-address")).toHaveText("0");
+  await expect(page.locator("#join-admitted-badge")).toHaveText("Published");
+  await expect(page.locator("#join-admitted-blocked")).toContainText(
+    "Your zone already has a parent or children",
+  );
+  await expect(page.locator("#join-admitted-sign")).toBeDisabled();
+  await expect(page.locator("#join-status-check")).toBeHidden();
+
+  await page.locator("#join-close").click();
+  await expect(page.locator("#join-dialog")).toBeHidden();
+  await expect
+    .poll(() => {
+      const url = new URL(page.url());
+      return url.searchParams.has("root") || url.searchParams.has("target");
+    })
+    .toBe(false);
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations,
+    `axe violations:\n${JSON.stringify(accessibility.violations, null, 2)}`,
+  ).toEqual([]);
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
 test("opens discovery from a ?root= link and clears it only when closed", async ({

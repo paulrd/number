@@ -587,6 +587,61 @@ Rules:
   zone already has a parent or any occupied child; null when it may join.
 - No DOM, transport or crypto in this module.
 
+### 12.2.2 Candidate pending surface (P4c3b2b)
+
+After a request, the join link (`?root=`) stays the way back: submitting keeps
+the parameter, and only an explicit close dismisses it. Opening the link (or
+**Check again** in the flow) re-reads the target candidate room, the target
+zone, the candidate's own zone and the target's address, then renders one of:
+
+- **queued** — the requester's own request is still in the public queue;
+- **invited** — the requester is in the latest candidate-room membership and no
+  slot names them yet: show the interview chat (same component as the owner),
+  with a composer and the membership-mismatch lock;
+- **admitted** — `admissionSlot(targetZone, requester)` is set: show the slot,
+  the assigned address (`targetAddress + slot`) and whether that cell is
+  published or provisional. Enforce `admissionBlockReason(ownZone)`; when it
+  passes, **Sign and join** calls the existing parent write
+  (`saveParent(targetOwnerId)`) and closes with a success state. This is the
+  consent step: the parent wrote the slot, the child signs `parent`;
+- **none** — nothing on file; offer the normal place step so a request can be
+  sent.
+
+`?root=` must still be parsed/validated as before. No push or polling is
+promised; **Check again** is the transport. A request is only shown as queued
+while its derived id is in the state; an invite replaces it.
+
+Pure helpers:
+
+```ts
+// region/onboarding.ts
+export async function resolveZoneAddress(
+  read: ZoneReader,
+  rootId: string,
+  targetId: string,
+): Promise<string | null>;
+
+// candidate-interview.ts
+export type JoinCheck =
+  | { kind: "none" }
+  | { kind: "queued"; request: CandidateRequestV1 }
+  | { kind: "invited" }
+  | { kind: "admitted"; slot: number };
+export function joinCheck(
+  candidateState: CandidateStateV1 | null,
+  targetZone: StateV3,
+  requesterId: string,
+): JoinCheck;
+```
+
+- `resolveZoneAddress` walks from the target up through mutual parent edges:
+  read the zone's `parent.userId`, then the parent's matching slot contact,
+  prepend that slot digit, and stop at `rootId` (empty address). Missing links,
+  a cycle, another root or more than 32 hops return null.
+- `joinCheck` precedence: admitted slot, then membership, then the requester's
+  request in the queue, then none.
+
+
 
 
 
