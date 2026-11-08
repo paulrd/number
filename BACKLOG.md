@@ -46,13 +46,17 @@ background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
 
-## Where we left off (2026-11-08) — map page
+## Where we left off (2026-11-08) — map page and world detail
 
-### Map page implemented and deployed (2026-11-08)
+### Map page and lazy 1:50m world implemented and deployed (2026-11-08)
 
-The map is now a full-screen page rather than a 760 px dialog, and it is
-slightly more detailed. Spec and contract: `DESIGN-map.md` (it supersedes the
-map paragraphs in `DESIGN-views.md` and `DESIGN-regions-p1.md` §9).
+**State:** everything below is shipped and live at site `1794165577`; nothing
+from this work is open. The map is a full-screen page rather than a 760 px
+dialog, and it gains a 1:50m world above zoom 5. Spec and contract:
+`DESIGN-map.md` (it supersedes the map paragraphs in `DESIGN-views.md` and
+`DESIGN-regions-p1.md` §9). No delegate, contract or signing change; the
+remaining backlog is the upstream-blocked/accepted items and the deferred
+growth design.
 
 - **IA.** `#map-view` is a sibling of `#advanced-view`, reached as `?view=map`
   from Advanced's "Where this zone sits" (`#region-open`, plus
@@ -72,9 +76,10 @@ map paragraphs in `DESIGN-views.md` and `DESIGN-regions-p1.md` §9).
   vendored Natural Earth label anchors with a visible-area gate; populated-place
   labels LOD by SCALERANK (0/1/2/3 by zoom band) with deterministic greedy
   collision and a 40-label cap; parent/grandparent and selected-child rings from
-  published rows only. `maxZoom` is 11 on the page/dialog. No 50m coastlines, no
-  admin-1, no tiles, no external requests; cells are never invented below the
-  dataset prefix (7).
+  published rows only. `maxZoom` is 11 on the page/dialog. 110m is the first
+  paint; a 1:50m world lazily swaps in above zoom 5 on full maps (see the
+  follow-up below). No admin-1, no tiles, no external requests; cells are never
+  invented below the dataset prefix (7).
 - **Inline assignment.** Row and canvas click only select (highlight,
   `aria-pressed`, announce "Selected slot N, cell c."); a free selection reveals
   `#map-assign-selected` ("Assign slot N…") which opens the existing slot editor
@@ -82,25 +87,31 @@ map paragraphs in `DESIGN-views.md` and `DESIGN-regions-p1.md` §9).
   for inspection but hide the action and say why. Canvas hit-testing is
   published-only (provisional cells are list-only); shared edges resolve to the
   higher sibling. Nothing is written until the owner saves.
-- **Assets.** Two vendored Natural Earth extracts (`country-labels-110m.json`,
-  `places-50m-labels.json`; public domain, generator in
-  `ui/scripts/gen-map-labels.mjs`), loaded in a separate lazy `labels` chunk
-  (33 kB raw / 10.6 kB gzip). `map-base` is 267 kB raw / 86.3 kB gzip; the main
-  bundle grows only by the trigger and dynamic import.
+- **Assets.** Vendored Natural Earth data: `countries-110m`/`countries-50m`
+  (world-atlas@2), `country-labels-110m.json` and `places-50m-labels.json`
+  (public domain; label generator in `ui/scripts/gen-map-labels.mjs`). Labels
+  load in a lazy `labels` chunk (33 kB raw / 10.6 kB gzip); the 50m world is its
+  own lazy `countries-50m` chunk (756.5 kB raw / 233.0 kB gzip); `map-base` is
+  268 kB raw / 86.7 kB gzip. The main bundle grows only by the trigger and the
+  dynamic imports.
 - **Accessibility.** The canvas is `aria-hidden`, has no focusable Leaflet
   control or marker (`keyboard:false` on digit/marker icons), and the sidebar
   list and coordinate form are the equal path. Zoom is a 44 px button group
   outside the canvas. Axe is clean on the page, including the zone tab that
   previously exposed `tabindex=0 role=button` cell digits.
-- **Tests.** UI 650 tests / 41 files (17 detail, 12 page, 11 hit-test, 9 label,
-  5 view-mode, plus copy/e2e updates); offline e2e 40 (page from Advanced, deep
-  link + tabs, scroll restore, row and real canvas selection → slot editor,
-  place lookup from the fixture, map-chunk failure fallback, zero external
-  requests, axe). `make check` and `make check-artifacts` green.
-- **Deployed.** Site `1794162484` (14 files, `index-D9qXWixK.js`), identical on
-  all four nodes. Live checks at 1440×900 and 390×844: address `0`, 8 child rows,
-  chain to root, 6 city labels, 14 graticule paths, no console errors; selection
-  announces and reveals the action; no horizontal overflow at phone width.
+- **Tests.** UI 652 tests / 41 files (19 detail incl. 2 LOD boundary, 12 page,
+  11 hit-test, 9 label, 5 view-mode, plus copy/e2e updates); offline e2e 41
+  (page from Advanced, deep link + tabs, scroll restore, row and real canvas
+  selection → slot editor, real canvas click → place resolve, 1:50m swap up and
+  back, map-chunk failure fallback, zero external requests, axe). `make check`
+  and `make check-artifacts` green.
+- **Deployed.** Final site `1794165577` (15 files, `index-BOVBbO03.js`;
+  `1794162484`/`1794164388` were intermediate). Main bundle and the 50m chunk
+  are byte-identical on all four nodes. Live checks at 1440×900 and 390×844:
+  address `0`, 8 child rows, chain to root, 6 city labels, 14 graticule paths,
+  no console errors; selection announces and reveals the action; no horizontal
+  overflow at phone width; 177 country paths at the fit, 241 above zoom 5, one
+  same-origin 50m request, back to 177 on zoom out.
 
 **Follow-up (site `1794164388`): `Find a place` clicks did nothing.** The page
 passed an `onClick` callback but `createMapStage` never wired `map.on("click")`;
@@ -127,7 +138,9 @@ back to 177 on zoom out, no console errors. UI 652/41, offline e2e 41.
 **Known limits recorded in the design doc:** label widths are estimated (not DOM
 measured) so collision is conservative; country labels may be absent when their
 anchor is off-screen; provisional children cannot be canvas-selected; the map
-never implies detail below the published dataset depth.
+never implies detail below the published dataset depth; at the top of the zoom
+range (10–11) even 1:50m Natural Earth is generalised (1:10m was measured at
++917 kB gzip and rejected).
 
 ## Where we left off (2026-11-08) — P4f portable admission code
 
@@ -1384,3 +1397,9 @@ Newest first. **Never remove an entry**; the record gate and
 - What a fresh session should do first: run `make check` and
   `make check-artifacts`, then `node ui/e2e/readiness.mjs` against the live
   nodes; if the delegate was re-keyed, open each zone once.
+- Map page (2026-11-08): spec is `DESIGN-map.md`. Deploying it is UI-only
+  (`make build` then `fdev --port 7509 website update --key number-local
+  ui/dist`); no `record-artifacts`, no delegate/contract change. The 1:50m world
+  is a lazy chunk fetched only above zoom 5; `#map-canvas[data-detail]`
+  (`compact`/`110m`/`loading`/`50m`) is the test hook. Live site
+  `1794165577` (15 files) is the current one.
