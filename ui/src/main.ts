@@ -49,7 +49,7 @@ import {
 } from "./payments";
 import { MAX_CONTACTS } from "./contact-rules";
 import { pathToAddress } from "./region/paths";
-import type { SlotOccupancy, ZoneRegion } from "./region/zone-region";
+import type { SlotOccupancy, ChildRegion, ZoneRegion } from "./region/zone-region";
 import {
   formatCents,
   I64_MAX,
@@ -76,6 +76,12 @@ import {
   type LinkState,
 } from "./tree-view";
 import { errorMessage, hexToBytes, shorten, utf8Length } from "./util";
+import {
+  mapTabFromSearch,
+  viewModeFromSearch,
+  type ViewMode,
+} from "./view-mode";
+import type { MapPage, MapPageTab } from "./region/map-page";
 
 const isOffline = __OFFLINE_MODE__;
 
@@ -176,8 +182,10 @@ const boardHint = byId<HTMLParagraphElement>("board-hint");
 
 const simpleView = byId<HTMLElement>("simple-view");
 const advancedView = byId<HTMLElement>("advanced-view");
+const mapView = byId<HTMLElement>("map-view");
 const viewToggle = byId<HTMLButtonElement>("view-toggle");
 const advancedTitle = byId<HTMLHeadingElement>("advanced-title");
+const mapTitle = byId<HTMLHeadingElement>("map-title");
 const parentValueTitle = byId<HTMLElement>("parent-value-title");
 
 const simplePay = byId<HTMLButtonElement>("simple-pay");
@@ -314,11 +322,16 @@ let ownIdentity: DelegateIdentity | null = null;
 /** The own board on screen. */
 let view: ViewedBoard | null = null;
 
-type ViewMode = "simple" | "advanced";
-/** Which surface is painted. Both stay mounted; only visibility changes. */
+/** Which surface is painted. All stay mounted; only visibility changes. */
 let viewMode: ViewMode = "simple";
 /** True when this page session pushed the `?view=advanced` history entry. */
 let pushedAdvancedEntry = false;
+/** True when this page session pushed the `?view=map` history entry. */
+let pushedMapEntry = false;
+/** The page controller, created on first open and destroyed on leave. */
+let mapPage: MapPage | null = null;
+/** Advanced's scroll position, restored when the map page is left. */
+let advancedScrollY: number | null = null;
 
 /** Which slots are mutual children, keyed by slot index. Repainted async. */
 let slotExistence = new Map<number, boolean>();
@@ -1011,6 +1024,9 @@ async function refreshSlotExistence(): Promise<void> {
   slotExistence = new Map(checks);
   slotExistenceOwner = ownerId;
   renderBoard();
+  // The map page reads occupancy on resolve; a slot that just became
+  // "Taken" (or "Pending") must repaint its row and action state.
+  if (viewMode === "map") mapPage?.refresh();
 }
 
 function renderClearedSlots(): void {
@@ -1283,40 +1299,6 @@ function paintBoardRegionState(region: ZoneRegion): void {
   boardRegionState.hidden = false;
 }
 
-function announceAddressProblem(): void {
-  const info =
-    ownReceiveAddressOwner === view?.ownerId ? ownReceiveAddress : null;
-  const problem: AddressProblem = info?.problem ?? "unreadable";
-  announce(`Octal address unavailable: ${ADDRESS_PROBLEM_REASONS[problem]}.`);
-}
-
-async function openZoneRegionPicker(): Promise<void> {
-  const address = await ownRegionAddress();
-  if (address === null) {
-    announceAddressProblem();
-    return;
-  }
-  const module = await import("./region/picker");
-  module.openZoneRegion({
-    address,
-    slots: ownSlotOccupancy(),
-    onAssign: () => {
-      void openAssign().catch((error) => {
-        console.error("Could not open the region assignment", error);
-      });
-    },
-    onResolved: paintBoardRegionState,
-  });
-}
-
-function openPlaceRegionPicker(): void {
-  void import("./region/picker")
-    .then((module) => module.openRegionPicker())
-    .catch((error) => {
-      console.error("Could not open the region picker", error);
-    });
-}
-
 /**
  * Open the assignment picker for the first free slot. Without a settled
  * address, fall back to the old direct editor so the parent can still write.
@@ -1360,6 +1342,21 @@ async function openAdmit(candidateId: string): Promise<void> {
     slots: ownSlotOccupancy(),
     onChoose: (slot) => openEditor(slot, candidateId),
   });
+}
+
+/**
+ * Inline handoff from the map page: open the existing slot editor for the
+ * selected child. The slot index *is* the address digit, so this is the same
+ * `openEditor` path the assign dialog runs after `chooseAssignSlot`; nothing
+ * about the zone changes until the owner saves. A taken or out-of-range slot
+ * is refused here as well as in the page, so a stale click cannot open it.
+ */
+function openSelectedChild(slot: number, child: ChildRegion): void {
+  if (!ownState || !view) return;
+  const current = ownState.slots[slot];
+  if (current === undefined || current.entry !== null) return;
+  if (child.slot !== slot) return;
+  openEditor(slot);
 }
 
 /**
@@ -1851,25 +1848,25 @@ function renderSimpleActions(): void {
 /** Paint visibility for the current view without touching history. */
 function paintViewMode(): void {
   const advanced = viewMode === "advanced";
-  simpleView.hidden = advanced;
+  const map = viewMode === "map";
+  simpleView.hidden = advanced || map;
   advancedView.hidden = !advanced;
-  viewToggle.textContent = advanced ? "Back to the simple view" : "Advanced";
-  viewToggle.setAttribute("aria-expanded", String(advanced));
+  mapView.hidden = !map;
+  viewToggle.textContent =
+    viewMode === "simple" ? "Advanced" : "Back to the simple view";
+  viewToggle.setAttribute("aria-expanded", String(viewMode !== "simple"));
 }
 
 function focusSurface(): void {
-  if (viewMode === "advanced") advancedTitle.focus({ preventScroll: true });
+  if (viewMode === "map") mapTitle.focus({ preventScroll: true });
+  else if (viewMode === "advanced") advancedTitle.focus({ preventScroll: true });
   else boardTitle.focus({ preventScroll: true });
-}
-
-function initialViewMode(): ViewMode {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("view") === "advanced" ? "advanced" : "simple";
 }
 
 function stripViewParam(): void {
   const url = new URL(window.location.href);
   url.searchParams.delete("view");
+  url.searchParams.delete("place");
   try {
     window.history.replaceState({ view: "simple" }, "", url);
   } catch {
@@ -1877,10 +1874,35 @@ function stripViewParam(): void {
   }
 }
 
+/** Replace the current entry with `?view=advanced`, dropping map-only state. */
+function replaceWithAdvanced(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "advanced");
+  url.searchParams.delete("place");
+  try {
+    window.history.replaceState({ view: "advanced" }, "", url);
+  } catch {
+    // The surface still switches without history.
+  }
+}
+
+/** Keep `place=1` in the URL while the page's place tab is open. */
+function updatePlaceParam(tab: MapPageTab): void {
+  if (viewMode !== "map") return;
+  const url = new URL(window.location.href);
+  if (tab === "place") url.searchParams.set("place", "1");
+  else url.searchParams.delete("place");
+  try {
+    window.history.replaceState({ view: "map" }, "", url);
+  } catch {
+    // Gateway shells may refuse history writes; the tab still switches.
+  }
+}
+
 /**
- * Switch surfaces. Advanced is mirrored into `?view=advanced`; leaving uses
- * `history.back()` only for the entry this session pushed, so Back can never
- * bounce out of the app.
+ * Switch surfaces. Advanced is mirrored into `?view=advanced`, the map page
+ * into `?view=map`. Leaving uses `history.back()` only for the entry this
+ * session pushed, so Back can never bounce out of the app.
  */
 function setViewMode(
   mode: ViewMode,
@@ -1893,21 +1915,64 @@ function setViewMode(
     return;
   }
 
+  const previous = viewMode;
+  if (previous === "map" && mode !== "map") mapPage?.close();
+  // The map is its own page: open it at the top, and bring Advanced back to
+  // where the reader left it. Without this the page inherits Advanced's scroll
+  // and the site header and Back button start off-screen.
+  if (previous === "advanced" && mode === "map") {
+    advancedScrollY = window.scrollY;
+  }
   viewMode = mode;
   paintViewMode();
+  if (mode === "map") {
+    window.scrollTo(0, 0);
+  } else if (previous === "map" && mode === "advanced" && advancedScrollY !== null) {
+    window.scrollTo(0, advancedScrollY);
+    advancedScrollY = null;
+  } else {
+    advancedScrollY = null;
+  }
 
   if (writeHistory) {
-    if (mode === "advanced") {
+    if (mode === "map") {
       const url = new URL(window.location.href);
-      if (url.searchParams.get("view") !== "advanced") {
-        url.searchParams.set("view", "advanced");
+      if (url.searchParams.get("view") !== "map") {
+        url.searchParams.set("view", "map");
         try {
-          window.history.pushState({ view: "advanced" }, "", url);
-          pushedAdvancedEntry = true;
+          window.history.pushState({ view: "map" }, "", url);
+          pushedMapEntry = true;
         } catch {
-          // Gateway shells may refuse history writes; the surface still opens.
+          // Gateway shells may refuse history writes; the page still opens.
         }
       }
+    } else if (mode === "advanced") {
+      if (previous === "map") {
+        if (pushedMapEntry) {
+          pushedMapEntry = false;
+          try {
+            window.history.back();
+          } catch {
+            replaceWithAdvanced();
+          }
+        } else {
+          replaceWithAdvanced();
+        }
+      } else {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get("view") !== "advanced") {
+          url.searchParams.set("view", "advanced");
+          try {
+            window.history.pushState({ view: "advanced" }, "", url);
+            pushedAdvancedEntry = true;
+          } catch {
+            // Gateway shells may refuse history writes; the surface still opens.
+          }
+        }
+      }
+    } else if (previous === "map") {
+      pushedMapEntry = false;
+      stripViewParam();
     } else if (pushedAdvancedEntry) {
       pushedAdvancedEntry = false;
       try {
@@ -1922,6 +1987,46 @@ function setViewMode(
 
   if (mode === "advanced") void refreshSlotExistence();
   if (focus) focusSurface();
+}
+
+/**
+ * Open the map page, creating its controller on first use. The module and the
+ * map chunk are dynamic imports, so the main bundle only pays for this
+ * function until the page is opened.
+ */
+async function openMapPage(
+  tab: MapPageTab,
+  options: { history?: boolean } = {},
+): Promise<void> {
+  if (viewMode !== "map") setViewMode("map", { history: options.history });
+  try {
+    const module = await import("./region/map-page");
+    if (mapPage === null) {
+      mapPage = module.createMapPage({
+        readAddress: ownRegionAddress,
+        readSlots: ownSlotOccupancy,
+        onResolved: paintBoardRegionState,
+        onAssign: () => {
+          void openAssign().catch((error) => {
+            console.error("Could not open the region assignment", error);
+          });
+        },
+        onSelectCell: openSelectedChild,
+        onTabChange: updatePlaceParam,
+        onBack: () => setViewMode("advanced"),
+        announce,
+      });
+    }
+    await mapPage.open({ tab });
+  } catch (error) {
+    console.error("Could not open the map page", error);
+    showNotice(
+      "warning",
+      "Map unavailable",
+      "The map page could not be loaded. Your zone is still shown in Advanced.",
+    );
+    setViewMode("advanced");
+  }
 }
 
 function renderAll(): void {
@@ -1943,6 +2048,7 @@ function renderAll(): void {
   // Async and request-guarded: a stale read never paints over a newer board.
   void renderPayments();
   renderAutoAdvance();
+  if (viewMode === "map") mapPage?.refresh();
 }
 
 const PAYMENT_BADGES: Record<
@@ -4413,13 +4519,27 @@ if (!isOffline) {
   callbacks.onIdentityRequired = () => identityDialogs.requestIdentity();
 }
 
-viewMode = initialViewMode();
+// The app owns surface scroll: entering the map starts at the top and Back
+// returns Advanced to where the reader left it. The browser's automatic
+// restoration would otherwise override the explicit restore after `history.back`.
+try {
+  window.history.scrollRestoration = "manual";
+} catch {
+  // Gateway shells may refuse; the explicit scrolls still apply.
+}
+
+viewMode = viewModeFromSearch(window.location.search);
 maybeOpenReceiveLink();
 maybeOpenRoomLink();
 maybeOpenRootLink();
 buildSlots();
 renderAll();
 paintViewMode();
+if (viewMode === "map") {
+  void openMapPage(mapTabFromSearch(window.location.search), {
+    history: false,
+  });
+}
 renderStatus();
 reconnectButton.hidden = isOffline;
 
@@ -4481,18 +4601,16 @@ contactsOpen.addEventListener("click", () => {
   contactsDialog.open();
 });
 viewToggle.addEventListener("click", () => {
-  setViewMode(viewMode === "advanced" ? "simple" : "advanced");
+  setViewMode(viewMode === "simple" ? "advanced" : "simple");
 });
 byId<HTMLButtonElement>("join-open").addEventListener("click", () => {
   joinPanel.open();
 });
 byId<HTMLButtonElement>("region-open").addEventListener("click", () => {
-  void openZoneRegionPicker().catch((error) => {
-    console.error("Could not open the region picker", error);
-  });
+  void openMapPage("zone");
 });
 byId<HTMLButtonElement>("region-place-open").addEventListener("click", () => {
-  openPlaceRegionPicker();
+  void openMapPage("place");
 });
 simplePay.addEventListener("click", () => {
   if (!simplePay.disabled) openPaymentDialog();
@@ -4525,12 +4643,20 @@ window.addEventListener("popstate", () => {
   rootLinkSettled = false;
   pendingRootValue = null;
   maybeOpenRootLink();
-  const mode: ViewMode =
-    new URLSearchParams(window.location.search).get("view") === "advanced"
-      ? "advanced"
-      : "simple";
-  if (mode !== viewMode) setViewMode(mode, { history: false, focus: true });
-  else if (mode === "simple") pushedAdvancedEntry = false;
+  const mode = viewModeFromSearch(window.location.search);
+  if (mode !== viewMode) {
+    setViewMode(mode, { history: false, focus: true });
+    if (mode === "map") {
+      void openMapPage(mapTabFromSearch(window.location.search), {
+        history: false,
+      });
+    }
+  } else if (mode === "simple") {
+    pushedAdvancedEntry = false;
+    pushedMapEntry = false;
+  } else if (mode === "advanced") {
+    pushedMapEntry = false;
+  }
 });
 paymentRecipient.addEventListener("change", updatePaymentRecipient);
 paymentAddressBook.addEventListener("click", () => {

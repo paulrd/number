@@ -20,9 +20,14 @@ function section(source: string, id: string): string {
 
 const simple = section(html, "simple-view");
 const advancedStart = html.indexOf('id="advanced-view"');
-const advancedEnd = html.indexOf("</main>", advancedStart);
+const mapStart = html.indexOf('id="map-view"');
+const advancedEnd = mapStart === -1 ? html.indexOf("</main>", advancedStart) : mapStart;
+const mapEnd = mapStart === -1 ? -1 : html.indexOf("</main>", mapStart);
 const advanced = html.slice(advancedStart, advancedEnd);
-const outsideAdvanced = html.slice(0, advancedStart) + html.slice(advancedEnd);
+const map = mapStart === -1 ? "" : html.slice(mapStart, mapEnd);
+const outsideAdvanced =
+  html.slice(0, advancedStart) +
+  html.slice(mapStart === -1 ? advancedEnd : mapStart);
 
 describe("default view copy", () => {
   it("keeps the three action labels and the neutral record seams", () => {
@@ -65,6 +70,31 @@ describe("advanced child slot ids", () => {
     expect(mainSource).toContain("shorten(entry.contact)");
     expect(mainSource).toContain("slotView.id.title = entry ? entry.contact");
     expect(mainSource).toContain("id.title = entry.contact");
+  });
+});
+
+describe("map page copy", () => {
+  it("is a sibling section, not part of the simple view", () => {
+    expect(html).toContain('id="map-view"');
+    expect(simple).not.toContain("map-canvas");
+    expect(map).toContain('id="map-canvas"');
+    expect(map).toContain('aria-hidden="true"');
+    expect(map).toContain('id="map-legend"');
+    expect(map).toContain('id="map-chain"');
+    expect(map).toContain('id="map-cells"');
+    expect(map).toContain('id="map-tab-place"');
+  });
+
+  it("keeps the attribution and the keyboard path copy", () => {
+    expect(map).toContain("Geometry: Natural Earth (public domain).");
+    expect(map).toContain("The map is visual");
+    expect(map).toContain("Zoom out");
+    expect(map).toContain("Zoom in");
+  });
+
+  it("keeps the map out of the top-level header", () => {
+    expect(html).not.toContain('id="view-toggle-map"');
+    expect(advanced).toContain("Open the map");
   });
 });
 

@@ -575,7 +575,7 @@
                 class="button button--small"
                 type="button"
               >
-                Find your region
+                Open the map
               </button>
               <button
                 id="region-place-open"
@@ -705,6 +705,241 @@
               by the contract. Clearing a slot records that it was cleared, so an
               older copy cannot bring it back.
             </p>
+          </div>
+        </section>
+
+        <section
+          id="map-view"
+          class="map-page"
+          aria-labelledby="map-title"
+          hidden
+        >
+          <header class="map-page-head">
+            <button
+              id="map-back"
+              class="button button--quiet map-back"
+              type="button"
+            >
+              ← Advanced
+            </button>
+            <div class="map-page-heading">
+              <p class="eyebrow">Where this zone sits</p>
+              <h2 id="map-title" class="map-page-title" tabindex="-1">Map</h2>
+            </div>
+          </header>
+
+          <div
+            id="map-tabs"
+            class="region-tabs map-tabs"
+            role="tablist"
+            aria-label="Map view"
+          >
+            <button
+              id="map-tab-zone"
+              class="region-tab"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="map-panel-zone"
+            >
+              This zone
+            </button>
+            <button
+              id="map-tab-place"
+              class="region-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="map-panel-place"
+              tabindex="-1"
+            >
+              Find a place
+            </button>
+          </div>
+
+          <div class="map-page-body">
+            <div class="map-stage">
+              <div id="map-canvas" class="map-canvas" aria-hidden="true"></div>
+              <p id="map-canvas-help" class="sr-only">
+                The map is visual. Use the child cell list or the coordinate
+                fields; both give the same answers.
+              </p>
+              <div
+                id="map-controls"
+                class="map-controls"
+                role="group"
+                aria-label="Map zoom"
+              >
+                <button
+                  id="map-zoom-out"
+                  class="map-zoom"
+                  type="button"
+                  aria-label="Zoom out"
+                >
+                  −
+                </button>
+                <button id="map-zoom-world" class="map-zoom map-zoom--wide" type="button">
+                  World
+                </button>
+                <button
+                  id="map-zoom-in"
+                  class="map-zoom"
+                  type="button"
+                  aria-label="Zoom in"
+                >
+                  +
+                </button>
+              </div>
+              <p id="map-unavailable" class="map-unavailable" hidden>
+                The map could not be loaded. Your zone's address and the child
+                cell list still work.
+              </p>
+              <p id="map-source" class="region-source">
+                Geometry: Natural Earth (public domain).
+              </p>
+            </div>
+
+            <aside id="map-side" class="map-side">
+              <p
+                id="map-status"
+                class="region-status map-status"
+                role="status"
+                aria-live="polite"
+              ></p>
+
+              <div
+                id="map-panel-zone"
+                class="map-panel"
+                role="tabpanel"
+                aria-labelledby="map-tab-zone"
+                aria-busy="true"
+              >
+                <div class="region-zone-summary">
+                  <p class="region-zone-line">
+                    <code id="map-zone-address" class="region-zone-address">—</code>
+                    <span id="map-zone-letters" class="region-zone-letters"></span>
+                    <span id="map-zone-badge" class="region-badge" hidden></span>
+                  </p>
+                  <p id="map-zone-state" class="region-zone-state"></p>
+                  <p id="map-zone-note" class="region-zone-note" hidden></p>
+                </div>
+
+                <ul id="map-legend" class="region-legend" aria-label="Map legend">
+                  <li><span class="region-swatch region-swatch--own" aria-hidden="true"></span>Your zone</li>
+                  <li><span class="region-swatch region-swatch--free" aria-hidden="true"></span>Free</li>
+                  <li><span class="region-swatch region-swatch--taken" aria-hidden="true"></span>Taken</li>
+                  <li><span class="region-swatch region-swatch--provisional" aria-hidden="true"></span>Provisional</li>
+                </ul>
+
+                <nav class="map-chain" aria-labelledby="map-chain-title">
+                  <h3 id="map-chain-title" class="map-side-title">Chain to root</h3>
+                  <ol id="map-chain" class="map-chain-list"></ol>
+                </nav>
+
+                <div class="region-cells-head">
+                  <h3 id="map-cells-title" class="region-cells-title">
+                    Child cells
+                  </h3>
+                  <p id="map-cells-count" class="region-cells-count"></p>
+                </div>
+                <ol
+                  id="map-cells"
+                  class="region-cells map-cells"
+                  aria-labelledby="map-cells-title"
+                ></ol>
+                <p id="map-cells-empty" class="region-cells-empty" hidden></p>
+                <p
+                  id="map-cell-warning"
+                  class="region-assign-warning"
+                  role="status"
+                  hidden
+                ></p>
+
+                <div class="region-actions map-actions">
+                  <button
+                    id="map-assign-selected"
+                    class="button button--primary"
+                    type="button"
+                    hidden
+                    disabled
+                  >
+                    Assign slot…
+                  </button>
+                  <button id="map-assign" class="button button--primary" type="button">
+                    Assign a child region…
+                  </button>
+                  <button id="map-find-place" class="button button--quiet" type="button">
+                    Find a place
+                  </button>
+                </div>
+              </div>
+
+              <div
+                id="map-panel-place"
+                class="map-panel"
+                role="tabpanel"
+                aria-labelledby="map-tab-place"
+                hidden
+              >
+                <h3 class="map-side-title">Find a place</h3>
+                <p class="map-side-help">
+                  Type coordinates, or click the map. The table below is the
+                  same answer.
+                </p>
+                <form id="map-place-form" class="region-form">
+                  <label class="region-field">
+                    <span>Latitude</span>
+                    <input
+                      id="map-lat"
+                      type="number"
+                      step="0.0001"
+                      min="-90"
+                      max="90"
+                      inputmode="decimal"
+                      required
+                    />
+                  </label>
+                  <label class="region-field">
+                    <span>Longitude</span>
+                    <input
+                      id="map-lng"
+                      type="number"
+                      step="0.0001"
+                      min="-180"
+                      max="180"
+                      inputmode="decimal"
+                      required
+                    />
+                  </label>
+                  <button class="button button--small" type="submit">
+                    Show region
+                  </button>
+                </form>
+
+                <div id="region-result" class="region-result" hidden>
+                  <p class="region-path">
+                    <strong id="region-path"></strong>
+                    <code id="region-octal"></code>
+                  </p>
+                  <dl class="region-facts">
+                    <div><dt>Depth</dt><dd id="region-depth"></dd></div>
+                    <div><dt>Bounds</dt><dd id="region-bounds"></dd></div>
+                    <div><dt>Population</dt><dd id="region-population"></dd></div>
+                  </dl>
+                  <table class="region-children">
+                    <caption>Child regions</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">#</th>
+                        <th scope="col">Path</th>
+                        <th scope="col">Population</th>
+                      </tr>
+                    </thead>
+                    <tbody id="region-children"></tbody>
+                  </table>
+                </div>
+              </div>
+            </aside>
           </div>
         </section>
       </main>
@@ -1549,42 +1784,13 @@
           dataset, not the zone tree.
         </p>
         <div
-          id="region-tabs"
-          class="region-tabs"
-          role="tablist"
-          aria-label="Region view"
-          hidden
-        >
-          <button
-            id="region-tab-zone"
-            class="region-tab"
-            type="button"
-            role="tab"
-            aria-selected="false"
-            aria-controls="region-panel-zone"
-            tabindex="-1"
-          >
-            This zone
-          </button>
-          <button
-            id="region-tab-place"
-            class="region-tab"
-            type="button"
-            role="tab"
-            aria-selected="true"
-            aria-controls="region-panel-place"
-          >
-            A place
-          </button>
-        </div>
-        <div
           id="region-map"
           class="region-map"
           aria-hidden="true"
         ></div>
         <p id="region-map-help" class="sr-only">
-          The map is visual. Use the coordinate fields to find a place, or the
-          cell list to read this zone's regions.
+          The map is visual. Use the coordinate fields or the cell list below;
+          they give the same answers.
         </p>
         <p
           id="region-status"
@@ -1592,98 +1798,6 @@
           role="status"
           aria-live="polite"
         ></p>
-        <div
-          id="region-panel-zone"
-          class="region-panel"
-          role="tabpanel"
-          aria-labelledby="region-tab-zone"
-          hidden
-        >
-          <div id="region-zone-summary" class="region-zone-summary">
-            <p class="region-zone-line">
-              <code id="region-zone-address" class="region-zone-address">—</code>
-              <span id="region-zone-letters" class="region-zone-letters"></span>
-              <span id="region-zone-badge" class="region-badge" hidden></span>
-            </p>
-            <p id="region-zone-state" class="region-zone-state"></p>
-            <p id="region-zone-note" class="region-zone-note" hidden></p>
-          </div>
-          <ul id="region-legend" class="region-legend" aria-label="Map legend">
-            <li id="region-legend-own"><span class="region-swatch region-swatch--own" aria-hidden="true"></span>Your zone</li>
-            <li><span class="region-swatch region-swatch--free" aria-hidden="true"></span>Free</li>
-            <li><span class="region-swatch region-swatch--taken" aria-hidden="true"></span>Taken</li>
-            <li><span class="region-swatch region-swatch--provisional" aria-hidden="true"></span>Provisional</li>
-          </ul>
-          <div class="region-cells-head">
-            <h3 id="region-cells-title" class="region-cells-title">
-              Your child regions
-            </h3>
-            <p id="region-cells-count" class="region-cells-count"></p>
-          </div>
-          <ol id="region-cells" class="region-cells" aria-labelledby="region-cells-title"></ol>
-          <p id="region-cells-empty" class="region-cells-empty" hidden></p>
-          <div id="region-assign-actions" class="region-actions" hidden>
-            <button id="region-assign" class="button button--small" type="button">
-              Assign a child region…
-            </button>
-          </div>
-        </div>
-        <div
-          id="region-panel-place"
-          class="region-panel"
-          role="tabpanel"
-          aria-labelledby="region-tab-place"
-        >
-          <form id="region-form" class="region-form">
-            <label class="region-field">
-              <span>Latitude</span>
-              <input
-                id="region-lat"
-                type="number"
-                step="0.0001"
-                min="-90"
-                max="90"
-                inputmode="decimal"
-                required
-              />
-            </label>
-            <label class="region-field">
-              <span>Longitude</span>
-              <input
-                id="region-lng"
-                type="number"
-                step="0.0001"
-                min="-180"
-                max="180"
-                inputmode="decimal"
-                required
-              />
-            </label>
-            <button class="button button--small" type="submit">Show region</button>
-          </form>
-          <div id="region-result" class="region-result" hidden>
-            <p class="region-path">
-              <strong id="region-path"></strong>
-              <code id="region-octal"></code>
-            </p>
-            <dl class="region-facts">
-              <div><dt>Depth</dt><dd id="region-depth"></dd></div>
-              <div><dt>Bounds</dt><dd id="region-bounds"></dd></div>
-              <div><dt>Population</dt><dd id="region-population"></dd></div>
-            </dl>
-            <table class="region-children">
-              <caption>Child regions</caption>
-              <thead>
-                <tr>
-                  <th scope="col">#</th>
-                  <th scope="col">Path</th>
-                  <th scope="col">Population</th>
-                </tr>
-              </thead>
-              <tbody id="region-children"></tbody>
-            </table>
-          </div>
-        </div>
         <div
           id="region-assign-panel"
           class="region-panel region-assign-panel"

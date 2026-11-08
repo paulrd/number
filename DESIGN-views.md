@@ -4,6 +4,10 @@ Status: pass 2 implementation spec. Supersedes the earlier design memo where
 they disagree. Data layer is v6/v9 (see `DESIGN-v6.md`); this pass changes only
 `ui/` presentation and flow.
 
+**Map surface:** superseded by `DESIGN-map.md`. The map is now a full-screen
+`?view=map` sub-page of Advanced; the two-surface rules below still govern
+Simple and Advanced, and Simple remains map-free.
+
 ## Information architecture
 
 One document, two surfaces:

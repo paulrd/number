@@ -1440,20 +1440,69 @@ test("rejects incomplete, own and duplicate receive links", async ({ page }) => 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("region panel shows the root zone and its eight child cells", async ({
+test("map page shows the root zone and its eight child cells", async ({
   page,
 }) => {
   const errors = watchConsole(page);
 
   await page.goto("/");
   await openAdvanced(page);
-  await page.locator("#region-open").click();
+  // Open from a scrolled Advanced page: the map page must start at the top, and
+  // Back must restore Advanced's position.
+  await page.evaluate(() => window.scrollTo(0, 400));
+  // A programmatic click keeps the pre-click scroll exact; Playwright's click
+  // would scroll the button into view first.
+  await page.evaluate(() => {
+    document.getElementById("region-open")?.click();
+  });
+  const advancedScroll = 400;
 
-  await expect(page.locator("#region-dialog")).toBeVisible();
-  await expect(page.locator("#region-panel-zone")).toBeVisible();
-  await expect(page.locator("#region-zone-address")).toHaveText("root");
-  await expect(page.locator("#region-zone-badge")).toHaveText("The world");
-  await expect(page.locator("#region-cells li")).toHaveCount(8);
+  await expect(page.locator("#map-view")).toBeVisible();
+  await expect(page.locator("#simple-view")).toBeHidden();
+  await expect(page.locator("#map-back")).toBeInViewport();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(page.locator("#map-zone-address")).toHaveText("root");
+  await expect(page.locator("#map-zone-badge")).toHaveText("The world");
+  await expect(page.locator("#map-cells .map-cell-row")).toHaveCount(8);
+  await expect(page.locator("#map-chain")).toContainText("root");
+  await expect(page.locator("#map-canvas")).toHaveAttribute(
+    "data-state",
+    "ready",
+  );
+  await expect(page.locator("#map-unavailable")).toBeHidden();
+  await expect(page).toHaveURL(/view=map/);
+
+  // Back returns to Advanced, keeps a real history entry, and restores scroll.
+  await page.locator("#map-back").click();
+  await expect(page.locator("#advanced-view")).toBeVisible();
+  await expect(page.locator("#map-view")).toBeHidden();
+  await expect(page).toHaveURL(/view=advanced/);
+  expect(await page.evaluate(() => window.scrollY)).toBe(advancedScroll);
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("map page opens from a deep link and keeps place=1 on the tab", async ({
+  page,
+}) => {
+  const errors = watchConsole(page);
+
+  await page.goto("/?view=map&place=1");
+  await expect(page.locator("#map-view")).toBeVisible();
+  await expect(page.locator("#map-panel-place")).toBeVisible();
+  await expect(page.locator("#map-tab-place")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await page.locator("#map-tab-zone").click();
+  await expect(page.locator("#map-panel-zone")).toBeVisible();
+  await expect(page).not.toHaveURL(/place=1/);
+  await expect(page.locator("#map-zone-address")).toHaveText("root");
+
+  await page.locator("#map-back").click();
+  await expect(page.locator("#advanced-view")).toBeVisible();
+  await expect(page).toHaveURL(/view=advanced/);
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -1480,6 +1529,10 @@ test("assignment picker opens the slot editor for the chosen cell", async ({
   );
   await firstFree.check();
   await expect(page.locator("#region-assign-choose")).toBeEnabled();
+  const results = await new AxeBuilder({ page })
+    .include("#region-dialog")
+    .analyze();
+  expect(results.violations).toEqual([]);
   await page.locator("#region-assign-choose").click();
 
   await expect(page.locator("#region-dialog")).toBeHidden();
@@ -1489,7 +1542,9 @@ test("assignment picker opens the slot editor for the chosen cell", async ({
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
 
-test("region picker resolves a point from sample data", async ({ page }) => {
+test("map page selects a cell and opens the slot editor for it", async ({
+  page,
+}) => {
   const errors = watchConsole(page);
   const external: string[] = [];
   page.on("request", (request) => {
@@ -1505,30 +1560,151 @@ test("region picker resolves a point from sample data", async ({ page }) => {
 
   await page.goto("/");
   await openAdvanced(page);
+  await addContact(page, "Map child", MOCK_CHILD_ID);
   await page.locator("#region-open").click();
-  await expect(page.locator("#region-dialog")).toBeVisible();
-  // The zone mode opens first; the place lookup lives behind its tab.
-  await expect(page.locator("#region-panel-zone")).toBeVisible();
-  await page.locator("#region-tab-place").click();
-  await expect(page.locator("#region-panel-place")).toBeVisible();
+  await expect(page.locator("#map-view")).toBeVisible();
+  await expect(page.locator("#map-cells .map-cell-row")).toHaveCount(8);
 
-  await page.locator("#region-lat").fill("1");
-  await page.locator("#region-lng").fill("1");
-  await page.locator("#region-form button[type=submit]").click();
+  // Selecting a row is not navigation: it highlights, announces, and reveals
+  // the one inline action without opening the editor.
+  const slotZero = page.locator('#map-cells .map-cell-row[data-slot="0"]');
+  await slotZero.click();
+  await expect(slotZero).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#map-status")).toHaveText(
+    "Selected slot 1, cell a.",
+  );
+  await expect(page.locator("#map-assign-selected")).toBeVisible();
+  await expect(page.locator("#map-assign-selected")).toHaveText(
+    "Assign slot 1…",
+  );
+  await expect(page.locator("#editor")).toBeHidden();
+  await expect(page).toHaveURL(/view=map/);
+
+  // The action is the handoff: it opens the same slot editor the assign
+  // dialog opens after choosing slot 0.
+  await page.locator("#map-assign-selected").click();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#editor-title")).toHaveText("Slot 1");
+  await expect(page.locator("#editor-slot")).toHaveText("01");
+  await page.locator("#contact-select").selectOption(MOCK_CHILD_ID);
+  await page.locator("#save-button").click();
+  await expect(page.locator("#editor")).toBeHidden();
+
+  // Saving refreshes the page: the row becomes taken and the count drops.
+  await expect(slotZero).toHaveAttribute("data-state", "taken");
+  await expect(page.locator("#map-cells-count")).toHaveText("7 free of 8");
+  await expect(page.locator("#map-zone-address")).toHaveText("root");
+
+  // A canvas click selects the same row, without opening the editor. Click the
+  // centre of the second published rectangle (slot 1); the SVG paths are in
+  // slot order, so nth(1) is slot 1 after slot 0 became taken.
+  await page.waitForTimeout(450);
+  const cellPaths = page.locator(
+    "#map-canvas .leaflet-overlay-pane path.region-cell",
+  );
+  await expect(cellPaths).toHaveCount(8);
+  const slotOneBox = await cellPaths.nth(1).boundingBox();
+  expect(slotOneBox).not.toBeNull();
+  await page.mouse.click(
+    slotOneBox!.x + slotOneBox!.width / 2,
+    slotOneBox!.y + slotOneBox!.height / 2,
+  );
+
+  const slotOne = page.locator('#map-cells .map-cell-row[data-slot="1"]');
+  await expect(slotOne).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#map-status")).toHaveText(
+    "Selected slot 2, cell b.",
+  );
+  await expect(page.locator("#map-assign-selected")).toHaveText(
+    "Assign slot 2…",
+  );
+  await expect(page.locator("#editor")).toBeHidden();
+
+  // A taken cell can still be inspected on the canvas, but it never offers
+  // the inline action (so it cannot reach the editor).
+  const slotZeroBox = await cellPaths.nth(0).boundingBox();
+  expect(slotZeroBox).not.toBeNull();
+  await page.mouse.click(
+    slotZeroBox!.x + slotZeroBox!.width / 2,
+    slotZeroBox!.y + slotZeroBox!.height / 2,
+  );
+  await expect(slotZero).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#map-assign-selected")).toBeHidden();
+  await expect(page.locator("#map-cell-warning")).toContainText(
+    "Slot 1 is taken",
+  );
+  await expect(page.locator("#editor")).toBeHidden();
+
+  // The offline fixture publishes depth 1 and 2, so the root zone has no
+  // provisional child to click on the canvas. Provisional cells never win the
+  // hit test (hit-test.test.ts); the drawn map always shows their ancestor.
+  await expect(
+    page.locator("#map-canvas path.region-cell--provisional"),
+  ).toHaveCount(0);
+
+  expect(external).toEqual([]);
+  const results = await new AxeBuilder({ page }).include("#map-view").analyze();
+  expect(results.violations).toEqual([]);
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("map page resolves a point from sample data", async ({ page }) => {
+  const errors = watchConsole(page);
+  const external: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (
+      !url.startsWith("http://127.0.0.1:4173") &&
+      !url.startsWith("data:") &&
+      !url.startsWith("blob:")
+    ) {
+      external.push(url);
+    }
+  });
+
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#region-place-open").click();
+  await expect(page.locator("#map-view")).toBeVisible();
+  await expect(page.locator("#map-panel-place")).toBeVisible();
+  await expect(page).toHaveURL(/view=map/);
+  await expect(page).toHaveURL(/place=1/);
+
+  await page.locator("#map-lat").fill("1");
+  await page.locator("#map-lng").fill("1");
+  await page.locator("#map-place-form button[type=submit]").click();
 
   await expect(page.locator("#region-path")).toHaveText("aa");
   await expect(page.locator("#region-octal")).toHaveText("00");
   await expect(page.locator("#region-depth")).toHaveText("2");
   await expect(page.locator("#region-population")).toHaveText("1");
   await expect(page.locator("#region-children tr")).toHaveCount(8);
-  await expect(page.locator("#region-source")).toContainText("Sample");
+  await expect(page.locator("#map-source")).toContainText("Sample");
+  await expect(page.locator("#simple-view #map-canvas")).toHaveCount(0);
 
   expect(external).toEqual([]);
-  const results = await new AxeBuilder({ page })
-    .include("#region-dialog")
-    .analyze();
+  const results = await new AxeBuilder({ page }).include("#map-view").analyze();
   expect(results.violations).toEqual([]);
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("map page keeps its sidebar when the map chunk cannot load", async ({
+  page,
+}) => {
+  await page.route(/map-base-[^/]+\.js$/, (route) => route.abort());
+  await page.goto("/");
+  await openAdvanced(page);
+  await page.locator("#region-open").click();
+
+  await expect(page.locator("#map-view")).toBeVisible();
+  await expect(page.locator("#map-unavailable")).toBeVisible();
+  await expect(page.locator("#map-canvas")).toHaveAttribute(
+    "data-state",
+    "unavailable",
+  );
+  await expect(page.locator("#map-zone-address")).toHaveText("root");
+  await expect(page.locator("#map-cells .map-cell-row")).toHaveCount(8);
+  await expect(page.locator("#map-controls")).toBeHidden();
 });
 
 test("opens the members room, shows the plaintext notice, and sends a message", async ({

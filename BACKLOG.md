@@ -5,6 +5,8 @@ Durable state for the project. Read this with `README.md`, then the design docs:
 `DESIGN-network.md` (regions, onboarding, rooms; growth deferred),
 `DESIGN-regions-p1.md` (stage-1 dataset, contracts, picker),
 `DESIGN-views.md` (what the two surfaces may contain, + revision 3),
+`DESIGN-map.md` (the full-screen map page, `?view=map`; supersedes the map
+paragraphs in the view and region docs),
 `DESIGN-payments-lca.md` (payments whose endpoint is the LCA),
 `DESIGN-rooms.md` (members-room contract, P3a), and
 `DESIGN-candidates.md` (candidates-room contract, P4a).
@@ -26,11 +28,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794155664`, bundle `assets/index-BswZAvDg.js` (+ lazy picker/feature chunks), 15 files; candidate WASM served and identical on all four nodes |
+| Live site | version `1794162484`, bundle `assets/index-D9qXWixK.js` (+ lazy map/picker/labels chunks), 14 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794155664`, P4f portable admission code (owner copy / candidate paste, expected-owner precedence fix) + P4e target-zone watch; delegate v13 unchanged; contract unchanged |
+| Last UI publish | 2026-11-08; site `1794162484`, full-screen map page (`?view=map`) with detail layers and inline cell assignment; P4f admission code + P4e watch unchanged; delegate v13 and contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -43,6 +45,67 @@ with any link can pay or be paid, including when an endpoint is the LCA
 background when the node grants Background; the UI shows your own zone only,
 with the parent left unmentioned on the simple surface unless the link is
 missing, and everything else behind Advanced.
+
+## Where we left off (2026-11-08) — map page
+
+### Map page implemented and deployed (2026-11-08)
+
+The map is now a full-screen page rather than a 760 px dialog, and it is
+slightly more detailed. Spec and contract: `DESIGN-map.md` (it supersedes the
+map paragraphs in `DESIGN-views.md` and `DESIGN-regions-p1.md` §9).
+
+- **IA.** `#map-view` is a sibling of `#advanced-view`, reached as `?view=map`
+  from Advanced's "Where this zone sits" (`#region-open`, plus
+  `#region-place-open` for the place tab). The header keeps its single control;
+  `#simple-view` stays map-free. History: Advanced→Map pushes; Back from a
+  pushed entry uses `history.back()`; a direct `?view=map` load falls back with
+  `replaceState`, so Back never leaves the app. `place=1` is the only map
+  parameter. Scroll is app-owned (`history.scrollRestoration = "manual"`):
+  entering the page starts at the top so the site header and `#map-back` are
+  visible, and leaving via Back restores Advanced's scroll.
+- **One map.** `region/map-base.ts` is the only Leaflet/geometry/cell/fit
+  implementation; the page, the assign/review dialog and the onboarding embed
+  all use it (`region/session.ts` shares one dataset promise). The dialog is now
+  only assign/review; the old zone/place dialog panels are gone. The onboarding
+  embed keeps `detail: "compact"` (110m, no labels, maxZoom 8).
+- **Detail.** Graticule 30°/10°/5° by zoom (none at 8+); country names from
+  vendored Natural Earth label anchors with a visible-area gate; populated-place
+  labels LOD by SCALERANK (0/1/2/3 by zoom band) with deterministic greedy
+  collision and a 40-label cap; parent/grandparent and selected-child rings from
+  published rows only. `maxZoom` is 11 on the page/dialog. No 50m coastlines, no
+  admin-1, no tiles, no external requests; cells are never invented below the
+  dataset prefix (7).
+- **Inline assignment.** Row and canvas click only select (highlight,
+  `aria-pressed`, announce "Selected slot N, cell c."); a free selection reveals
+  `#map-assign-selected` ("Assign slot N…") which opens the existing slot editor
+  via the same `openEditor(slot)` path the assign dialog uses. Taken rows select
+  for inspection but hide the action and say why. Canvas hit-testing is
+  published-only (provisional cells are list-only); shared edges resolve to the
+  higher sibling. Nothing is written until the owner saves.
+- **Assets.** Two vendored Natural Earth extracts (`country-labels-110m.json`,
+  `places-50m-labels.json`; public domain, generator in
+  `ui/scripts/gen-map-labels.mjs`), loaded in a separate lazy `labels` chunk
+  (33 kB raw / 10.6 kB gzip). `map-base` is 267 kB raw / 86.3 kB gzip; the main
+  bundle grows only by the trigger and dynamic import.
+- **Accessibility.** The canvas is `aria-hidden`, has no focusable Leaflet
+  control or marker (`keyboard:false` on digit/marker icons), and the sidebar
+  list and coordinate form are the equal path. Zoom is a 44 px button group
+  outside the canvas. Axe is clean on the page, including the zone tab that
+  previously exposed `tabindex=0 role=button` cell digits.
+- **Tests.** UI 650 tests / 41 files (17 detail, 12 page, 11 hit-test, 9 label,
+  5 view-mode, plus copy/e2e updates); offline e2e 40 (page from Advanced, deep
+  link + tabs, scroll restore, row and real canvas selection → slot editor,
+  place lookup from the fixture, map-chunk failure fallback, zero external
+  requests, axe). `make check` and `make check-artifacts` green.
+- **Deployed.** Site `1794162484` (14 files, `index-D9qXWixK.js`), identical on
+  all four nodes. Live checks at 1440×900 and 390×844: address `0`, 8 child rows,
+  chain to root, 6 city labels, 14 graticule paths, no console errors; selection
+  announces and reveals the action; no horizontal overflow at phone width.
+
+**Known limits recorded in the design doc:** label widths are estimated (not DOM
+measured) so collision is conservative; country labels may be absent when their
+anchor is off-screen; provisional children cannot be canvas-selected; the map
+never implies detail below the published dataset depth.
 
 ## Where we left off (2026-11-08) — P4f portable admission code
 
@@ -896,7 +959,7 @@ node ui/e2e/links.mjs        # parent tree + slot references, cycles
 ```
 
 Expected at the time of writing: contract 123 tests, delegate 104, room 21,
-candidate 24, UI 593, offline e2e 37, `verify-merge` 14 laws / 0 violations.
+candidate 24, UI 650, offline e2e 40, `verify-merge` 14 laws / 0 violations.
 
 ## Live four-node test bed
 
@@ -935,6 +998,18 @@ wake-ups — the app-origin install from the site does.
 ## Done
 
 Newest first. Earlier work is summarised by commit; `git log` has the detail.
+
+**2026-11-08 — Map page (site `1794162484`)**
+- Full-screen `?view=map` sub-page of Advanced; one shared base map for page,
+  dialog and onboarding; the dialog is assign/review only; `#simple-view` stays
+  map-free. App-owned scroll: page opens at the top, Back restores Advanced.
+- Detail: graticule 30/10/5°, country names, 40-city label cap with greedy
+  collision, parent/grandparent/selected-child rings; maxZoom 11; no 50m or
+  admin-1; two vendored Natural Earth label assets in their own lazy chunk.
+- Inline assignment: row/canvas selection (published-only hit test) reveals
+  `#map-assign-selected`, which opens the existing slot editor for that slot.
+- UI 650/41; offline e2e 40 (axe clean, no external requests); deployed 14 files
+  and verified on all four nodes, plus live desktop and phone checks.
 
 **2026-11-08 — P4f: portable admission code (site `1794155664`)**
 - Owner copies the already-signed child-slot record as

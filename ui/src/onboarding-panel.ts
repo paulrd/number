@@ -62,19 +62,8 @@ import {
 } from "./room-crypto";
 import type { StateV3 } from "./state";
 import { emptyState } from "./state";
-import {
-  BlobReader,
-  ContractSource,
-  FixtureSource,
-  contractKeyFromInstance,
-  type RegionSource,
-} from "./region/source";
-import {
-  REGIONS_MANIFEST_CODE_HASH,
-  REGIONS_MANIFEST_INSTANCE,
-} from "./region/constants";
-import { RegionDataset } from "./region/dataset";
-import { buildFixture } from "./region/fixture";
+import type { RegionDataset } from "./region/dataset";
+import { openRegionDataset } from "./region/session";
 import {
   findTarget,
   parseRootInput,
@@ -87,10 +76,7 @@ import {
 import { resolveZoneRegion, type SlotOccupancy } from "./region/zone-region";
 import type { RegionRow } from "./region/wire";
 import { errorMessage, shorten, utf8Length } from "./util";
-import type { LatLngExpression, LatLngTuple, LayerGroup, Map } from "leaflet";
-import type { GeometryCollection, Topology } from "topojson-specification";
-
-type LeafletModule = typeof import("leaflet");
+import type { MapStage } from "./region/map-base";
 type TargetMatch = Extract<MatchResult, { kind: "target" }>;
 type SaturatedMatch = Extract<MatchResult, { kind: "saturated" }>;
 
@@ -126,13 +112,9 @@ export interface OnboardingPanel {
 
 const NOTE_LIMIT = CANDIDATE_MAX_NOTE_BYTES;
 const QUEUE_LIMIT = CANDIDATE_MAX_REQUESTS;
-const WORLD_VIEW: LatLngExpression = [20, 0];
-const WORLD_ZOOM = 1;
 const LETTERS = "abcdefgh";
 
-let map: Map | null = null;
-let layer: LayerGroup | null = null;
-let leaflet: LeafletModule | null = null;
+let stage: MapStage | null = null;
 
 /** `12 / 256 bytes`, or a warning when the note is too long. */
 export function noteByteLabel(note: string): string {
@@ -333,17 +315,6 @@ export function signJoinErrorText(error: unknown): string {
     return "The join could not be signed. Make sure your identity is ready, then try again.";
   }
   return `The join was not signed: ${errorMessage(error)}`;
-}
-
-function isOffline(): boolean {
-  return import.meta.env.VITE_OFFLINE_MODE === "1";
-}
-
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
-  );
 }
 
 function occupancyFor(zone: ChainZone): SlotOccupancy[] {
@@ -664,7 +635,6 @@ export function createOnboardingPanel(
     },
   });
 
-  let datasetPromise: Promise<RegionDataset> | null = null;
   let mapPromise: Promise<boolean> | null = null;
   let lastFocus: HTMLElement | null = null;
 
@@ -751,7 +721,7 @@ export function createOnboardingPanel(
     setStep("root", false);
     updateNote();
     refreshRequestState();
-    if (!map || !layer) {
+    if (stage === null) {
       mapFallback.hidden = true;
       mapElement.dataset.state = "";
     }
@@ -959,96 +929,36 @@ export function createOnboardingPanel(
       if (step === "root") return;
       mapFallback.hidden = ok;
       mapElement.dataset.state = ok ? "ready" : "unavailable";
-      window.requestAnimationFrame(() => map?.invalidateSize());
+      stage?.invalidate();
     });
     placeError.hidden = true;
     placeError.textContent = "";
   }
 
-  async function ensureDataset(): Promise<RegionDataset> {
-    if (datasetPromise === null) {
-      datasetPromise = RegionDataset.open(createSource());
-      datasetPromise.catch(() => {
-        datasetPromise = null;
-      });
-    }
-    return datasetPromise;
-  }
-
-  function createSource(): RegionSource {
-    if (isOffline()) {
-      const fixture = buildFixture();
-      return new FixtureSource(fixture.manifestState, fixture.shards);
-    }
-    if (!REGIONS_MANIFEST_INSTANCE || !REGIONS_MANIFEST_CODE_HASH) {
-      throw new Error("Region data is not published yet.");
-    }
-    return new ContractSource(
-      new BlobReader(),
-      contractKeyFromInstance(
-        REGIONS_MANIFEST_INSTANCE,
-        REGIONS_MANIFEST_CODE_HASH,
-      ),
-    );
-  }
-
   async function ensureMap(): Promise<boolean> {
-    if (map !== null && layer !== null) return true;
+    if (stage !== null) return true;
     if (mapPromise !== null) return mapPromise;
 
     mapPromise = (async () => {
       try {
-        const [module, countriesModule, topojson] = await Promise.all([
-          import("leaflet"),
-          import("./assets/countries-110m.json"),
-          import("topojson-client"),
-          import("leaflet/dist/leaflet.css"),
-        ]);
-        const L = (
-          (module as unknown as { default?: LeafletModule }).default ?? module
-        ) as LeafletModule;
-        leaflet = L;
-        map = L.map(mapElement, {
-          crs: L.CRS.EPSG4326,
-          center: WORLD_VIEW,
-          zoom: WORLD_ZOOM,
-          minZoom: 1,
+        // Dynamic: Leaflet and the country geometry stay out of the main chunk.
+        const { createMapStage } = await import("./region/map-base");
+        stage = createMapStage(mapElement, {
+          detail: "compact",
           maxZoom: 8,
-          worldCopyJump: true,
-          attributionControl: false,
-          keyboard: false,
-          zoomControl: false,
+          countryClassName: "join-world",
+          countryStyle: { weight: 0.5, fillOpacity: 1 },
+          onClick: (point) => {
+            if (step !== "place" || busy) return;
+            latInput.value = String(roundCoordinate(point.lat));
+            lngInput.value = String(roundCoordinate(point.lng));
+            void matchPoint({ lat: point.lat, lng: point.lng });
+          },
         });
-        mapElement.removeAttribute("tabindex");
-
-        const topology = countriesModule.default as unknown as Topology<{
-          countries: GeometryCollection;
-        }>;
-        const geometry = topojson.feature(
-          topology,
-          topology.objects.countries,
-        );
-        L.geoJSON(geometry as unknown as GeoJSON.GeoJsonObject, {
-          style: () => ({
-            className: "join-world",
-            weight: 0.5,
-            fillOpacity: 1,
-          }),
-        }).addTo(map);
-
-        layer = L.layerGroup().addTo(map);
-        map.on("click", (event) => {
-          if (step !== "place" || busy) return;
-          latInput.value = String(roundCoordinate(event.latlng.lat));
-          lngInput.value = String(roundCoordinate(event.latlng.lng));
-          void matchPoint({ lat: event.latlng.lat, lng: event.latlng.lng });
-        });
-        window.requestAnimationFrame(() => map?.invalidateSize());
+        stage.invalidate();
         return true;
       } catch {
-        map = null;
-        layer = null;
-        leaflet = null;
+        stage = null;
         return false;
       } finally {
         mapPromise = null;
@@ -1062,7 +972,7 @@ export function createOnboardingPanel(
   }
 
   function clearMap(): void {
-    layer?.clearLayers();
+    stage?.clear();
   }
 
   async function matchPoint(next: {
@@ -1087,7 +997,7 @@ export function createOnboardingPanel(
     saturatedArea.hidden = true;
 
     try {
-      const dataset = await ensureDataset();
+      const dataset = await openRegionDataset();
       const found = await findTarget(reader, dataset, targetRoot, next);
       if (generation !== flowGeneration) return;
 
@@ -1943,7 +1853,7 @@ export function createOnboardingPanel(
     if (regionAddress === null) return;
     const generation = statusGeneration;
     try {
-      const dataset = await ensureDataset();
+      const dataset = await openRegionDataset();
       const region = await resolveZoneRegion(dataset, regionAddress, occupancy);
       if (generation !== statusGeneration || statusModel !== model) return;
       const child = region.children[slot];
@@ -2239,13 +2149,12 @@ export function createOnboardingPanel(
     at: { lat: number; lng: number },
   ): Promise<void> {
     const ok = await ensureMap();
-    if (!ok || map === null || layer === null || leaflet === null) {
+    if (!ok || stage === null) {
       mapFallback.hidden = false;
       mapElement.dataset.state = "unavailable";
       return;
     }
-    const L = leaflet;
-    layer.clearLayers();
+    stage.clear();
     const rows: RegionRow[] = [];
     const targetIndex = found.kind === "target" ? found.chain.length - 1 : -1;
 
@@ -2262,14 +2171,14 @@ export function createOnboardingPanel(
             index === targetIndex
               ? "join-cell join-cell--target"
               : "join-cell join-cell--chain";
-          addCell(L, region.cell, cls);
+          stage.addCell(region.cell, cls);
           rows.push(region.cell);
         }
         if (index === targetIndex && found.kind === "target") {
           const child = region.children[found.assigned.slot];
           // A provisional cell has no geometry. Never invent one.
           if (child?.row) {
-            addCell(L, child.row, "join-cell join-cell--assigned");
+            stage.addCell(child.row, "join-cell join-cell--assigned");
             rows.push(child.row);
           }
         }
@@ -2278,44 +2187,18 @@ export function createOnboardingPanel(
       }
     }
 
-    L.circleMarker([at.lat, at.lng], {
-      radius: 6,
-      className: "join-point",
-      interactive: false,
-    }).addTo(layer);
+    stage.addPoint({ lat: at.lat, lng: at.lng }, "join-point");
 
     if (rows.length > 0) {
-      const corners: LatLngTuple[] = [];
-      for (const row of rows) {
-        corners.push([row.minLat, row.minLon], [row.maxLat, row.maxLon]);
-      }
-      corners.push([at.lat, at.lng]);
-      map.fitBounds(L.latLngBounds(corners), {
+      stage.fitRows(rows, {
+        point: { lat: at.lat, lng: at.lng },
         padding: [18, 18],
         maxZoom: 7,
-        animate: !prefersReducedMotion(),
       });
     } else {
-      map.setView([at.lat, at.lng], 4, {
-        animate: !prefersReducedMotion(),
-      });
+      stage.setView({ lat: at.lat, lng: at.lng }, 4);
     }
-    window.requestAnimationFrame(() => map?.invalidateSize());
-  }
-
-  function addCell(
-    L: LeafletModule,
-    row: RegionRow,
-    className: string,
-  ): void {
-    if (layer === null) return;
-    L.rectangle(
-      [
-        [row.minLat, row.minLon],
-        [row.maxLat, row.maxLon],
-      ],
-      { className, interactive: false },
-    ).addTo(layer);
+    stage.invalidate();
   }
 
   function resetToRoot(): void {
