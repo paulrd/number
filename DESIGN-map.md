@@ -124,8 +124,15 @@ Advanced's scroll offset (the title focus uses `preventScroll`).
 `#map-place-form` (Latitude, Longitude, Show region), then `#region-result`:
 path letters, octal address, depth, bounds, population, and the child table
 (`not published` where the dataset has no row). Ids are unchanged from the old
-dialog place panel, so the copy and tests read the same. Errors: "No published
-region covers this point.", "Region data failed verification.", "Region detail
+dialog place panel, so the copy and tests read the same.
+
+Entering the place tab clears the zone cells and resets the camera to the world,
+or redraws the last resolved place. Clicking the canvas fills the latitude and
+longitude fields, resolves the point, and draws the resolved cell with a point
+marker; the form remains the keyboard path. Switching back to "This zone"
+re-fits the zone and clears the place point.
+
+Errors: "No published region covers this point.", "Region data failed verification.", "Region detail
 is unavailable right now.".
 
 ### Responsive

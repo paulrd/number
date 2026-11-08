@@ -1670,6 +1670,13 @@ test("map page resolves a point from sample data", async ({ page }) => {
   await expect(page).toHaveURL(/view=map/);
   await expect(page).toHaveURL(/place=1/);
 
+  // The place tab starts on the world view: the zone's cells are not drawn.
+  await expect(page.locator("#map-canvas")).toHaveAttribute(
+    "data-state",
+    "ready",
+  );
+  await expect(page.locator("#map-canvas path.region-cell")).toHaveCount(0);
+
   await page.locator("#map-lat").fill("1");
   await page.locator("#map-lng").fill("1");
   await page.locator("#map-place-form button[type=submit]").click();
@@ -1681,6 +1688,56 @@ test("map page resolves a point from sample data", async ({ page }) => {
   await expect(page.locator("#region-children tr")).toHaveCount(8);
   await expect(page.locator("#map-source")).toContainText("Sample");
   await expect(page.locator("#simple-view #map-canvas")).toHaveCount(0);
+
+  // Click the centre of the resolved cell. The click path lives in the base
+  // map now, so the inputs must take the clicked point (5-decimal) and the
+  // lookup runs again. The cell has to be visible and whole for this to mean
+  // anything; fail loudly rather than skipping.
+  await page.waitForTimeout(450);
+  const ownCell = page.locator("#map-canvas path.region-cell--own");
+  await expect(ownCell).toHaveCount(1);
+  const ownBox = await ownCell.boundingBox();
+  const canvasBox = await page.locator("#map-canvas").boundingBox();
+  if (ownBox === null || ownBox.width < 2 || ownBox.height < 2) {
+    throw new Error(
+      `resolved cell has an empty bounding box: ${JSON.stringify(ownBox)}`,
+    );
+  }
+  if (
+    canvasBox === null ||
+    ownBox.x < canvasBox.x ||
+    ownBox.y < canvasBox.y ||
+    ownBox.x + ownBox.width > canvasBox.x + canvasBox.width ||
+    ownBox.y + ownBox.height > canvasBox.y + canvasBox.height
+  ) {
+    throw new Error(
+      `resolved cell is outside the canvas: cell=${JSON.stringify(ownBox)} canvas=${JSON.stringify(canvasBox)}`,
+    );
+  }
+  await page.mouse.click(
+    ownBox.x + ownBox.width / 2,
+    ownBox.y + ownBox.height / 2,
+  );
+  await expect(page.locator("#region-result")).toBeVisible();
+  // Band 0 spans lat 0..22.5 and lng 0..5.625, so its centre is 11.25,
+  // 2.8125. The inputs show the 5-decimal rounded click point.
+  const clickedLat = await page.locator("#map-lat").inputValue();
+  const clickedLng = await page.locator("#map-lng").inputValue();
+  expect(clickedLat).toMatch(/^-?\d+(\.\d{1,5})?$/);
+  expect(clickedLng).toMatch(/^-?\d+(\.\d{1,5})?$/);
+  expect(Number(clickedLat)).toBeCloseTo(11.25, 0);
+  expect(Number(clickedLng)).toBeCloseTo(2.8125, 0);
+  expect(clickedLat).not.toBe("1");
+  expect(clickedLng).not.toBe("1");
+  await expect(page.locator("#map-canvas .region-point")).toHaveCount(1);
+
+  // Switching back restores the zone's cells and its sidebar panel.
+  await page.locator("#map-tab-zone").click();
+  await expect(page.locator("#map-panel-zone")).toBeVisible();
+  await expect(page.locator("#map-zone-address")).toBeVisible();
+  await expect(page.locator("#map-zone-address")).toHaveText("root");
+  await expect(page.locator("#map-canvas path.region-cell")).toHaveCount(8);
+  await expect(page.locator("#map-canvas .region-point")).toHaveCount(0);
 
   expect(external).toEqual([]);
   const results = await new AxeBuilder({ page }).include("#map-view").analyze();

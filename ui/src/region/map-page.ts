@@ -228,6 +228,7 @@ export function createMapPage(deps: MapPageDeps): MapPage {
   let currentRegion: ZoneRegion | null = null;
   let selectedSlot: number | null = null;
   let lastPlace: ResolvedCell | null = null;
+  let lastPoint: MapPoint | null = null;
 
   function setStatus(text: string): void {
     status.textContent = text;
@@ -259,32 +260,12 @@ export function createMapPage(deps: MapPageDeps): MapPage {
       if (currentRegion) drawRegion(currentRegion, selectedSlot);
     } else if (lastPlace) {
       drawPlace(lastPlace);
-    } else if (currentRegion) {
-      drawRegion(currentRegion, selectedSlot);
+    } else {
+      // No resolved place yet: the place tab is the world, never the zone's
+      // cells and camera.
+      stage.clear();
+      stage.setWorld();
     }
-  }
-
-  /**
-   * Select the child under a canvas click. `createMapStage` also receives
-   * `hitTestCell`, but the page converts the container point itself so
-   * selection does not depend on the stage surfacing a click callback. A
-   * click only selects; the action button owns the editor handoff.
-   */
-  function handleCanvasClick(event: MouseEvent): void {
-    if (stage === null || tab !== "zone" || currentRegion === null) return;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const latlng = stage.map.containerPointToLatLng([
-      event.clientX - rect.left,
-      event.clientY - rect.top,
-    ]);
-    const slot = hitTestCell(currentRegion, {
-      lat: latlng.lat,
-      lng: latlng.lng,
-    });
-    if (slot === null) return;
-    const child = currentRegion.children.find((entry) => entry.slot === slot);
-    if (child !== undefined) selectChild(child);
   }
 
   async function ensureStage(): Promise<boolean> {
@@ -309,14 +290,30 @@ export function createMapPage(deps: MapPageDeps): MapPage {
             if (tab !== "zone" || currentRegion === null) return null;
             return hitTestCell(currentRegion, point);
           },
+          onSelectCell: (slot: number) => {
+            // A click only selects; `#map-assign-selected` owns the handoff.
+            if (tab !== "zone" || currentRegion === null) return;
+            const child = currentRegion.children.find(
+              (entry) => entry.slot === slot,
+            );
+            if (child !== undefined) selectChild(child);
+          },
         });
         canvas.dataset.state = "ready";
         unavailable.hidden = true;
         controls.hidden = false;
         stage.invalidate();
         // The dataset may have resolved while Leaflet was loading; paint now.
-        if (tab === "place" && lastPlace) drawPlace(lastPlace);
-        else if (currentRegion) drawRegion(currentRegion, selectedSlot);
+        if (tab === "place") {
+          if (lastPlace) {
+            drawPlace(lastPlace);
+          } else {
+            stage.clear();
+            stage.setWorld();
+          }
+        } else if (currentRegion) {
+          drawRegion(currentRegion, selectedSlot);
+        }
         return true;
       } catch {
         stage = null;
@@ -662,7 +659,10 @@ export function createMapPage(deps: MapPageDeps): MapPage {
       currentRegion = region;
       selectedSlot = null;
       renderZone(region, address);
-      if (tab === "zone" || lastPlace === null) drawRegion(region);
+      // The place tab stays on its own view; never draw the zone's cells there
+      // when no place has been resolved.
+      if (tab === "zone") drawRegion(region);
+      else if (lastPlace) drawPlace(lastPlace);
       setPanelBusy(false);
       setStatus("");
       deps.onResolved?.(region);
@@ -686,6 +686,7 @@ export function createMapPage(deps: MapPageDeps): MapPage {
       const resolved = await dataset.resolve(lat, lng);
       if (request !== placeGeneration) return;
       lastPlace = resolved;
+      lastPoint = { lat, lng };
       renderPlace(resolved);
       drawPlace(resolved);
       setStatus("");
@@ -735,6 +736,8 @@ export function createMapPage(deps: MapPageDeps): MapPage {
         stage.addLabel(child.row, child.letters, "region-digit");
       }
     }
+    // The marker belongs on top of the cells, so it is added last.
+    if (lastPoint !== null) stage.addPoint(lastPoint, "region-point");
     stage.fitRows([resolved.row], { padding: [28, 28], maxZoom: 8 });
   }
 
@@ -780,6 +783,7 @@ export function createMapPage(deps: MapPageDeps): MapPage {
     void ensureStage();
     placeResult.hidden = true;
     lastPlace = null;
+    lastPoint = null;
     await resolveZone();
     if (request !== openGeneration) return;
     title.focus({ preventScroll: true });
@@ -794,6 +798,8 @@ export function createMapPage(deps: MapPageDeps): MapPage {
     stage = null;
     selectedSlot = null;
     currentRegion = null;
+    lastPlace = null;
+    lastPoint = null;
   }
 
   function refresh(): void {
@@ -850,7 +856,6 @@ export function createMapPage(deps: MapPageDeps): MapPage {
   zoomInButton.addEventListener("click", () => stage?.zoomIn());
   zoomOutButton.addEventListener("click", () => stage?.zoomOut());
   zoomWorldButton.addEventListener("click", () => stage?.setWorld());
-  canvas.addEventListener("click", handleCanvasClick);
 
   backButton.addEventListener("click", () => {
     deps.onBack?.();

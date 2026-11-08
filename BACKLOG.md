@@ -28,11 +28,11 @@ changes the compiled bytes and re-keys every zone.
 | Candidate contract | **P4a** recorded in `published/candidate/`; code `4P2HZkm7K2DERij1uMf5UxgLnUYxaK3esPWEXTC3vimh`; pinned by the P4c client, not deployed |
 | Live owner identity | `3f8411470c801051120a0ff14b5ab571c5660df42c17bc72677c37f2505c27b0` |
 | Live zone (v6 instance) | `5vwEEpEBENdqKCVsHH1qqtyZ8rtP7pA2jFroSTBWB4dL` — dormant `selfName` `Dad`, root, one mutual child `Tim` |
-| Live site | version `1794162484`, bundle `assets/index-D9qXWixK.js` (+ lazy map/picker/labels chunks), 14 files; candidate WASM served and identical on all four nodes |
+| Live site | version `1794164388`, bundle `assets/index-WKTltPKS.js` (+ lazy map/picker/labels chunks), 14 files; candidate WASM served and identical on all four nodes |
 | Tooling | `freenet` 0.2.155 (`5aa241a`), `fdev` 0.3.317; CI pin `FREENET_VERSION` 0.2.155 |
 | Local node | `:7510` stopped, loopback-only. When started it will not fetch the live site; run `fdev --port 7510 website update --key number-local ui/dist` |
 | Artifacts | `published/manifest.json` is the source of truth for the address |
-| Last UI publish | 2026-11-08; site `1794162484`, full-screen map page (`?view=map`) with detail layers and inline cell assignment; P4f admission code + P4e watch unchanged; delegate v13 and contract unchanged |
+| Last UI publish | 2026-11-08; site `1794164388`, map page follow-up (place-tab click + world reset); full-screen `?view=map` with detail layers and inline cell assignment; P4f admission code + P4e watch unchanged; delegate v13 and contract unchanged |
 | Region dataset | **S1′ (≤7) live**: 178 shards + manifest `HyUU1CqeMhABSgCiomVFxkgEdXbWLaFJ2hLFbLGxHDU` (seq 1), publisher key `2d996f41fce12cdc25b9d742edb57e247a5af693867bebb86b126d7b3c11ed07`; UI constants set; picker republished 2026-11-07 |
 
 What the app does now, in one paragraph: one personal **zone** per owner with
@@ -101,6 +101,16 @@ map paragraphs in `DESIGN-views.md` and `DESIGN-regions-p1.md` §9).
   all four nodes. Live checks at 1440×900 and 390×844: address `0`, 8 child rows,
   chain to root, 6 city labels, 14 graticule paths, no console errors; selection
   announces and reveals the action; no horizontal overflow at phone width.
+
+**Follow-up (site `1794164388`): `Find a place` clicks did nothing.** The page
+passed an `onClick` callback but `createMapStage` never wired `map.on("click")`;
+the place tab also fell back to drawing the zone's cells/camera when it had no
+resolved place. Fixed: the stage owns the one click path (place resolve vs. zone
+select), the place tab starts at the world (or the last place), a click fills the
+5-decimal coordinates, resolves the point, draws the region plus a
+`region-point` marker, and switching back re-fits the zone and clears the point.
+E2E now clicks the real canvas and asserts the inputs/result/marker, then the
+zone restore. UI 650/41, offline e2e 40.
 
 **Known limits recorded in the design doc:** label widths are estimated (not DOM
 measured) so collision is conservative; country labels may be absent when their

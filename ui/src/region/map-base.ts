@@ -61,7 +61,8 @@ export interface MapStageOptions {
   onClick?: (point: MapPoint) => void;
   /**
    * Inline-assignment seam. `hitTestCell` maps a click to a slot; when it
-   * returns a slot, `onSelectCell` reports it. Pass 1 supplies neither.
+   * returns a slot, `onSelectCell` reports it. Both must be supplied to enable
+   * click-to-select.
    */
   hitTestCell?: (point: MapPoint) => number | null;
   onSelectCell?: (slot: number) => void;
@@ -185,6 +186,19 @@ export function createMapStage(
     if (!detailed || destroyed) return;
     scheduleLabels();
     scheduleGraticule();
+  });
+
+  // One click path for both surfaces: the page resolves a place on the place
+  // tab (`onClick`) and selects a child on the zone tab (`hitTestCell` +
+  // `onSelectCell`). Leaflet already suppresses `click` after a drag.
+  map.on("click", (event: L.LeafletMouseEvent) => {
+    if (destroyed) return;
+    const point: MapPoint = { lat: event.latlng.lat, lng: event.latlng.lng };
+    options.onClick?.(point);
+    if (options.hitTestCell !== undefined && options.onSelectCell !== undefined) {
+      const slot = options.hitTestCell(point);
+      if (slot !== null) options.onSelectCell(slot);
+    }
   });
 
   function scheduleGraticule(): void {
