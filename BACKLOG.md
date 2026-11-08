@@ -702,7 +702,8 @@ Ranked by what a next session should care about.
    only across connected co-hosts; anti-entropy is 300 s+ (tens of minutes in
    the field). Same-node flows pass. Choose a reliable handoff before calling
    onboarding live: a signed admission link/message carrying the slot record,
-   a shared gateway, or explicit anti-entropy latency copy.
+   a shared gateway, or explicit anti-entropy latency copy. Findings and
+   freenet-core citations: `reports/freenet-stale-contract-reads.md`.
 
 1. **Address-book import marker cannot persist (#ours, small).** The app runs in
    a sandboxed, opaque-origin iframe where `localStorage` throws, so the
